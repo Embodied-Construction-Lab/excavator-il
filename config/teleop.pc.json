@@ -1,0 +1,22 @@
+{
+  "schema_version": "excavator_teleop_config.v1",
+  "orin_host": "192.168.0.55",
+  "orin_port": 18090,
+  "rate_hz": 20,
+  "mapping_id": "dual_stick.v1",
+  "calibration_id": "raw.v1",
+  "devices": [
+    {
+      "device_id": "REPLACE_WITH_LEFT_JOYSTICK_GUID",
+      "axis_indices": [0, 1, 2]
+    },
+    {
+      "device_id": "REPLACE_WITH_RIGHT_JOYSTICK_GUID",
+      "axis_indices": [0, 1, 2]
+    }
+  ],
+  "deadman": {
+    "controller_slot": 1,
+    "button_index": 0
+  }
+}

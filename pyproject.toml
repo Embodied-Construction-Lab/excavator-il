@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "excavator-il"
+version = "0.1.0"
+description = "Excavator demonstration validation and LeRobot ACT dataset tooling"
+requires-python = ">=3.10,<3.13"
+dependencies = []
+
+[project.optional-dependencies]
+collector = ["opencv-python-headless>=4.8,<5", "pyserial>=3.5,<4"]
+teleop = ["pygame>=2.5,<3"]
+training = ["lerobot==0.5.2", "numpy>=1.26,<3", "Pillow>=10"]
+test = ["pytest>=8", "pytest-cov>=6", "numpy>=1.26,<3", "Pillow>=10"]
+
+[project.scripts]
+excavator-il = "excavator_il.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

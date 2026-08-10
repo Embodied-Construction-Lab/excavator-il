@@ -1,0 +1,10 @@
+name: excavator-il
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - ffmpeg
+  - pip
+  - pip:
+      - lerobot==0.5.2
+      - -e .[test]
