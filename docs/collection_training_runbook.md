@@ -82,6 +82,106 @@ python -m pip install -e '.[collector]'
 正式采集期间不能同时运行 `excavator-orin-runtime/orin_state_sender.py`，Collector 必须独占
 STM32 串口。
 
+### 网络、代理与防火墙迁移清单
+
+每次更换 Wi-Fi、PC 或 Orin 后都要重新执行本节。不要假定旧网络的 IP、接口名、UFW 规则或
+代理 TUN 局域网段会自动迁移。当前 dr202 现场配置为：
+
+| 项目 | 当前值 |
+| --- | --- |
+| PC Wi-Fi 接口 | `wlp128s20f3` |
+| PC IP | `192.168.31.219` |
+| Orin Wi-Fi 接口 | `wlP1p1s0` |
+| Orin IP | `192.168.31.10` |
+| Collector UDP | Orin `18090/udp`；应用层只允许当前 PC |
+| PC 局域网代理 | `192.168.31.219:7897` |
+
+先在两端发现实际地址和出接口，不要照抄旧接口名：
+
+```bash
+# PC
+ip -4 -br address
+ip route get <ORIN_IP>
+
+# Orin
+ip -4 -br address
+ip route get <PC_IP>
+```
+
+随后更新受 Git 管理的现场配置：
+
+- PC `config/teleop.pc.json`：`orin_host=<ORIN_IP>`；
+- Orin `config/collection.orin.json`：`allowed_pc_host=<PC_IP>`；
+- UDP 端口两端必须同为 `18090`。
+
+先检查 Orin 是否真的启用了主机防火墙，不要因为某台机器使用 UFW 就假定所有机器相同：
+
+```bash
+command -v ufw || true
+systemctl is-active ufw nftables firewalld
+```
+
+当前 dr202 的 Orin 没有启用 UFW、nftables 或 firewalld，Collector 依靠
+`allowed_pc_host` 做来源限制，不需要额外安装防火墙。如果新 Orin 已启用 UFW，则必须显式允许
+当前 PC 进入 Collector UDP 端口。把尖括号替换为本次发现的值：
+
+```bash
+sudo ufw allow in on <ORIN_WIFI_INTERFACE> \
+  proto udp \
+  from <PC_IP> \
+  to <ORIN_IP> \
+  port 18090 \
+  comment 'ACT teleop PC'
+
+sudo ufw status numbered
+```
+
+若未来在当前 dr202 Orin 上启用 UFW，对应实例命令是：
+
+```bash
+sudo ufw allow in on wlP1p1s0 \
+  proto udp \
+  from 192.168.31.219 \
+  to 192.168.31.10 \
+  port 18090 \
+  comment 'ACT teleop PC on dr202'
+```
+
+防火墙列出规则不等于数据链已经可用。启动 Collector 和 teleop 后，teleop 的 `ack` 必须持续
+递增且 `accepted_acks` 必须大于零；持续出现 `ack=-1` 时禁止开始 Episode，应检查规则是否加在
+正确机器、接口名和目标 IP 是否正确，以及 Wi-Fi 是否启用了客户端隔离。测试时必须保证
+Collector 在 teleop 整个测试窗口内持续运行；Collector 已退出时出现的 `ack=-1` 不能用于判断网络。
+
+若 Orin 通过 PC 的局域网代理访问外网，还要在 Orin `/etc/environment` 中把代理地址和
+`no_proxy` 更新为当前 IP，大小写变量保持一致：
+
+```text
+http_proxy="http://<PC_IP>:7897"
+https_proxy="http://<PC_IP>:7897"
+HTTP_PROXY="http://<PC_IP>:7897"
+HTTPS_PROXY="http://<PC_IP>:7897"
+no_proxy="localhost,127.0.0.1,::1,<PC_IP>,<ORIN_IP>"
+NO_PROXY="localhost,127.0.0.1,::1,<PC_IP>,<ORIN_IP>"
+```
+
+同时确认 PC 代理进程监听 LAN 地址而不是仅监听 `127.0.0.1`，PC UFW 只允许当前 Orin 访问
+`7897/tcp`。Mihomo/Clash 使用 TUN 时，还要更新或重建其本地局域网段；旧网络网段残留可能把
+新网络入站连接重定向到内部端口。验证顺序为：
+
+```bash
+# PC：确认代理监听
+ss -ltnp | grep ':7897'
+
+# Orin：先验证 TCP 可达，再验证 HTTPS 代理
+nc -vz -w 3 <PC_IP> 7897
+curl -v --connect-timeout 5 --max-time 15 \
+  -x http://<PC_IP>:7897 https://www.google.com/generate_204
+```
+
+VS Code Remote-SSH、终端或长期进程不会自动继承修改后的 `/etc/environment`。修改后重新登录
+SSH，并重启对应的 VS Code Server/进程，再检查其实际环境。不要在配置或日志中记录代理密码、
+令牌或其他密钥。
+
 ## 3. 双端采集命令
 
 Orin 终端 1——启动 Collector：
