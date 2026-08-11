@@ -35,6 +35,12 @@ def _parser() -> argparse.ArgumentParser:
 
     commands.add_parser("list-joysticks", help="list stable pygame joystick identities")
 
+    diagnose_joysticks = commands.add_parser(
+        "diagnose-joysticks",
+        help="interactively verify local joystick axes and deadman without network I/O",
+    )
+    diagnose_joysticks.add_argument("--config", default="config/teleop.pc.json")
+
     collect = commands.add_parser("collect", help="run the Orin hardware collector")
     collect.add_argument("--config", default="config/collection.orin.json")
 
@@ -106,6 +112,16 @@ def main(argv: list[str] | None = None) -> int:
             from .teleop import list_pygame_devices
 
             _print_json(list_pygame_devices())
+        elif args.command == "diagnose-joysticks":
+            from .joystick_diagnostic import run_joystick_diagnostic
+            from .teleop import TeleopConfig
+
+            try:
+                report = run_joystick_diagnostic(TeleopConfig.load(args.config))
+            except KeyboardInterrupt:
+                print("diagnostic interrupted by operator", file=sys.stderr)
+                return 130
+            return 0 if report.matches_config else 3
         elif args.command == "collect":
             from .collector.service import run_collector
 

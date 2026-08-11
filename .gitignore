@@ -11,3 +11,4 @@ data/raw/
 data/lerobot/
 outputs/
 wandb/
+logs

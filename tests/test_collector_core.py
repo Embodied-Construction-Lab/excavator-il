@@ -36,7 +36,7 @@ def test_collector_accepts_new_session_action_and_rejects_duplicate_sequence(tmp
         sample_seq=0,
         pc_sample_monotonic_ns=100,
         pc_sample_wall_ns=200,
-        axes=(-0.8, 0.4, 0.0, 0.2, -0.6, 0.0),
+        axes=(-0.8, 0.4, 0.75, 0.2, -0.6, -0.65),
         controllers=(
             ControllerIdentity(1, "left-guid", "left", (True,)),
             ControllerIdentity(2, "right-guid", "right", (False,)),
@@ -68,6 +68,7 @@ def test_collector_accepts_new_session_action_and_rejects_duplicate_sequence(tmp
         0.2,
         -0.8,
     ]
+    assert [serial_command[name] for name in ("Z1", "Z2")] == [0.0, 0.0]
     assert serial_command["command_seq"] == 0
     assert duplicate.accepted is False
     assert duplicate.reason == "duplicate_or_out_of_order"

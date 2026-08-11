@@ -70,6 +70,29 @@ excavator-il list-joysticks
 PC 上 Pygame 实际加载的 SDL 必须为 2.24 或更新版本。
 同时核对 PC/Orin IP、串口、相机设备和 provenance 字段。
 
+首次接入手柄、更换 USB Hub/PC 或修改轴映射后，保持挖掘机熄火并停止 Collector，在 PC 运行
+本地交互诊断：
+
+```bash
+conda activate excavator-il
+cd /home/zhaoshuai/workspace_uinty/RL_prj/excavator-il
+excavator-il diagnose-joysticks --config config/teleop.pc.json
+```
+
+该命令只读取 Pygame 手柄事件，不创建 socket、不访问 Orin/STM32。按终端提示依次保持中位、
+移动 `X1/Y1/X2/Y2` 到两个端点并回中，再在 6 秒窗口内只按放计划作为 deadman 的按钮 3 次。
+Z1/Z2 不参与权威动作映射，因此不采样、不配置物理轴、不作为通过条件。PC 在线包仍保留这两个
+字段但固定为零，Collector 在 STM32 串口边界再次清零，防止触发固件的左右行走输出。四个 XY
+不取反、不缩放，并保持 `[boom,stick,bucket,swing]=[Y2,Y1,X2,X1]`。最终必须满足：
+
+- 四个 XY 轴均为 `PASS`，且每段只检测到预期手柄上的一个大幅活动轴；
+- `detected_xy_indices` 与 `configured_xy_indices` 完全一致；
+- `detected_deadman` 与 `configured_deadman` 完全一致；
+- `matches_config=True`，进程退出码为 0。
+
+任何一项失败时命令退出码为 3，禁止启动 Collector 或进入 Episode。诊断报告中的端点是未取反、
+未缩放的 SDL 原始值；不要根据历史 `deploy_scale_model/doublestick_send.py` 的轴号直接修改配置。
+
 Orin：
 
 ```bash

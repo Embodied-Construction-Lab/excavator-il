@@ -69,6 +69,8 @@ find /dev/input/by-id -maxdepth 1 -type l -name '*-event-joystick' \
 同型号手柄可以具有相同 GUID，但两个 `device_path` 必须按 USB 序列号区分左右并解析到不同的
 物理设备。路径缺失、GUID 不匹配或两个路径指向同一设备时，Teleop 会在创建发送 socket 前退出。
 稳定路径识别要求 Pygame 实际加载 SDL 2.24 或更新版本；版本过低时命令会直接报错退出。
+本地 `excavator_teleop_config.v3` 每只手柄只配置 X/Y 两个轴；线上 Z1/Z2 由 PC 和 Collector
+两层强制为零，人工示教不得通过 Z 轴触发左右行走。
 
 同时确认 PC/Orin IP、`/dev/ttyTHS1`、`/dev/video0`、相机尺寸，以及
 `episode_defaults.provenance` 中的固件和标定版本。配置文件是现场副本，换网络或设备后应显式修改，

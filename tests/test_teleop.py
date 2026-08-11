@@ -14,15 +14,15 @@ def test_teleop_packet_uses_unrounded_axes_and_stable_device_ids():
         pc_sample_monotonic_ns=100,
         pc_sample_wall_ns=200,
         devices=(
-            DeviceSnapshot("left-guid", "left", (0.123456, -0.2, 0.333333), (False, True)),
-            DeviceSnapshot("right-guid", "right", (-0.444444, 0.555555, -0.6), (True, False)),
+            DeviceSnapshot("left-guid", "left", (0.123456, -0.2), (False, True)),
+            DeviceSnapshot("right-guid", "right", (-0.444444, 0.555555), (True, False)),
         ),
         deadman_pressed=True,
         mapping_id="dual_stick.v1",
         calibration_id="raw.v1",
     )
 
-    assert packet.axes == (0.123456, -0.2, 0.333333, -0.444444, 0.555555, -0.6)
+    assert packet.axes == (0.123456, -0.2, 0.0, -0.444444, 0.555555, 0.0)
     assert packet.controllers[0].device_id == "left-guid"
     assert packet.controllers[1].device_id == "right-guid"
 
@@ -30,7 +30,7 @@ def test_teleop_packet_uses_unrounded_axes_and_stable_device_ids():
 def test_teleop_config_requires_two_devices_and_fixed_20_hz(tmp_path):
     path = tmp_path / "teleop.json"
     value = {
-        "schema_version": "excavator_teleop_config.v2",
+        "schema_version": "excavator_teleop_config.v3",
         "orin_host": "192.168.0.55",
         "orin_port": 18090,
         "rate_hz": 20,
@@ -40,12 +40,12 @@ def test_teleop_config_requires_two_devices_and_fixed_20_hz(tmp_path):
             {
                 "device_id": "left-guid",
                 "device_path": "/dev/input/by-id/left-event-joystick",
-                "axis_indices": [0, 1, 2],
+                "axis_indices": [0, 1],
             },
             {
                 "device_id": "right-guid",
                 "device_path": "/dev/input/by-id/right-event-joystick",
-                "axis_indices": [3, 4, 5],
+                "axis_indices": [3, 4],
             },
         ],
         "deadman": {"controller_slot": 1, "button_index": 0},
@@ -56,7 +56,7 @@ def test_teleop_config_requires_two_devices_and_fixed_20_hz(tmp_path):
 
     assert config.rate_hz == 20
     assert config.device_ids == ("left-guid", "right-guid")
-    assert config.axis_indices[1] == (3, 4, 5)
+    assert config.axis_indices[1] == (3, 4)
 
     value["rate_hz"] = 10
     path.write_text(json.dumps(value), encoding="utf-8")
@@ -64,7 +64,7 @@ def test_teleop_config_requires_two_devices_and_fixed_20_hz(tmp_path):
         TeleopConfig.load(path)
 
     value["rate_hz"] = 20
-    value["schema_version"] = "excavator_teleop_config.v1"
+    value["schema_version"] = "excavator_teleop_config.v2"
     path.write_text(json.dumps(value), encoding="utf-8")
     with pytest.raises(ValueError, match="schema_version"):
         TeleopConfig.load(path)
@@ -84,7 +84,7 @@ def test_same_guid_devices_are_selected_by_stable_paths(tmp_path):
     config_path.write_text(
         json.dumps(
             {
-                "schema_version": "excavator_teleop_config.v2",
+                "schema_version": "excavator_teleop_config.v3",
                 "orin_host": "192.168.0.55",
                 "orin_port": 18090,
                 "rate_hz": 20,
@@ -94,12 +94,12 @@ def test_same_guid_devices_are_selected_by_stable_paths(tmp_path):
                     {
                         "device_id": guid,
                         "device_path": str(left_path),
-                        "axis_indices": [0, 1, 2],
+                        "axis_indices": [0, 1],
                     },
                     {
                         "device_id": guid,
                         "device_path": str(right_path),
-                        "axis_indices": [0, 1, 2],
+                        "axis_indices": [0, 1],
                     },
                 ],
                 "deadman": {"controller_slot": 1, "button_index": 0},
@@ -122,7 +122,7 @@ def test_teleop_config_rejects_duplicate_device_paths(tmp_path):
     config_path.write_text(
         json.dumps(
             {
-                "schema_version": "excavator_teleop_config.v2",
+                "schema_version": "excavator_teleop_config.v3",
                 "orin_host": "192.168.0.55",
                 "orin_port": 18090,
                 "rate_hz": 20,
@@ -132,12 +132,12 @@ def test_teleop_config_rejects_duplicate_device_paths(tmp_path):
                     {
                         "device_id": "same-guid",
                         "device_path": device_path,
-                        "axis_indices": [0, 1, 2],
+                        "axis_indices": [0, 1],
                     },
                     {
                         "device_id": "same-guid",
                         "device_path": device_path,
-                        "axis_indices": [0, 1, 2],
+                        "axis_indices": [0, 1],
                     },
                 ],
                 "deadman": {"controller_slot": 1, "button_index": 0},
@@ -166,7 +166,7 @@ def test_device_selection_rejects_two_paths_to_one_physical_device(tmp_path):
         calibration_id="raw.v1",
         device_ids=(guid, guid),
         device_paths=(first_path, second_path),
-        axis_indices=((0, 1, 2), (0, 1, 2)),
+        axis_indices=((0, 1), (0, 1)),
         deadman_slot=1,
         deadman_button=0,
     )
@@ -255,7 +255,7 @@ def test_hotplug_index_reuse_fails_before_udp_socket_creation(tmp_path, monkeypa
         calibration_id="raw.v1",
         device_ids=("same-guid", "same-guid"),
         device_paths=(left_event, right_event),
-        axis_indices=((0, 1, 2), (0, 1, 2)),
+        axis_indices=((0, 1), (0, 1)),
         deadman_slot=1,
         deadman_button=0,
     )

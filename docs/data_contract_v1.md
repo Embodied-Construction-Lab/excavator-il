@@ -6,7 +6,8 @@
 
 正式数据不得直接由当前 `deploy_scale_model/doublestick_send.py` 的 `formatted_data` 生成：
 该联调发送器目前以 10 Hz 发送四舍五入到两位小数的文本轴值，且没有样本序号和单调时间。
-正式采集必须保留 Orin 接收的未舍入六轴原始值，并另存映射后的四维专家 Action。
+正式采集必须保留 Orin 接收的未舍入四个 XY 原始值，并另存映射后的四维专家 Action。线上协议
+继续保留 Z1/Z2 字段以维持 schema 兼容，但人工示教链必须将两者固定为零。
 
 ## 在线接口
 
@@ -15,7 +16,7 @@
 UDP 数值包固定包含：
 
 - `session_id`、`sample_seq`、PC 单调/墙钟时间；
-- 六轴 `X1/Y1/Z1/X2/Y2/Z2`，均为未舍入的 `[-1,1]` 数值；
+- 六轴 `X1/Y1/Z1/X2/Y2/Z2`：四个 XY 为未舍入的 `[-1,1]` 数值，Z1/Z2 必须精确为零；
 - 两个手柄的 slot、GUID、名称和按钮数组；
 - `deadman_pressed`、`mapping_id`、`calibration_id`。
 
@@ -26,8 +27,10 @@ Orin/STM32 时钟直接相减。
 PC 本地使用带 USB 序列号的 `/dev/input/by-id/*-event-joystick` 稳定路径把物理手柄绑定到
 slot；该路径不进入 UDP 包。两个同型号手柄可以具有相同 GUID，但必须配置不同路径，且启动时
 同时校验路径、GUID 和 SDL 实例 ID，禁止依赖 SDL 枚举顺序猜测左右。此本地绑定要求 SDL 2.24
-或更新版本；`device_path` 必填的本地配置 schema 是 `excavator_teleop_config.v2`，不改变线上
-`excavator_joystick.v1` 协议。
+或更新版本；`device_path` 必填的本地配置 schema 是 `excavator_teleop_config.v3`，每只手柄只
+配置 X/Y 两个原始轴号。PC 构造线上六轴包时插入零 Z1/Z2，不改变线上
+`excavator_joystick.v1` 协议。Collector 在 STM32 串口边界再次强制 Z1/Z2 为零；即使异常或旧
+发送端提供非零 Z，也不得转发到固件的左右行走输出。
 
 Orin 收包后以自身 `CLOCK_MONOTONIC` 同时生成专家标签：
 
@@ -40,7 +43,7 @@ Orin 收包后以自身 `CLOCK_MONOTONIC` 同时生成专家标签：
 
 ### Orin → STM32：`stm32_manual_command.v1`
 
-换行结尾 JSON 包含 schema、未改变方向的六轴、`command_seq` 和
+换行结尾 JSON 包含 schema、未改变方向的四个 XY、固定为零的 Z1/Z2、`command_seq` 和
 `command_source_stamp_ms`。STM32 才负责死区后的阀角、PWM、泵和硬件方向适配。未知 schema、
 缺字段、重复/乱序帧不会更新控制目标；超过 300 ms 未收到有效命令时输出中位/零命令。
 Collector 每次启动都必须先读取一帧有效 STM32 遥测，以当前 `command_rx_seq` 恢复下一条

@@ -32,7 +32,7 @@ def test_validate_command_returns_nonzero_for_invalid_episode(tmp_path, capsys):
 
 
 def test_cli_dispatches_collection_tools_without_importing_training_stack(monkeypatch, capsys):
-    from excavator_il import episode_builder, teleop
+    from excavator_il import episode_builder, joystick_diagnostic, teleop
     from excavator_il.collector import client, config, service
 
     calls = []
@@ -41,6 +41,11 @@ def test_cli_dispatches_collection_tools_without_importing_training_stack(monkey
         teleop, "run_teleop", lambda loaded, print_every: calls.append((loaded, print_every))
     )
     monkeypatch.setattr(teleop, "list_pygame_devices", lambda: [{"device_id": "one"}])
+    monkeypatch.setattr(
+        joystick_diagnostic,
+        "run_joystick_diagnostic",
+        lambda loaded: SimpleNamespace(matches_config=True),
+    )
     monkeypatch.setattr(service, "run_collector", lambda path: calls.append(("collect", path)))
     monkeypatch.setattr(episode_builder, "build_steps", lambda *args, **kwargs: _Result())
     monkeypatch.setattr(
@@ -56,6 +61,7 @@ def test_cli_dispatches_collection_tools_without_importing_training_stack(monkey
 
     assert main(["teleop", "--config", "teleop.json", "--print-every", "7"]) == 0
     assert main(["list-joysticks"]) == 0
+    assert main(["diagnose-joysticks", "--config", "teleop.json"]) == 0
     assert main(["collect", "--config", "collection.json"]) == 0
     assert main(["build-steps", "episode_0001"]) == 0
     assert main(
@@ -80,6 +86,35 @@ def test_cli_dispatches_collection_tools_without_importing_training_stack(monkey
     assert main(["episode", "abort", "--reason", "emergency_stop"]) == 0
     assert calls == [("teleop:teleop.json", 7), ("collect", "collection.json")]
     assert "device_id" in capsys.readouterr().out
+
+
+def test_diagnose_joysticks_returns_nonzero_when_mapping_does_not_match(monkeypatch):
+    from excavator_il import joystick_diagnostic, teleop
+
+    monkeypatch.setattr(teleop.TeleopConfig, "load", lambda path: f"teleop:{path}")
+    monkeypatch.setattr(
+        joystick_diagnostic,
+        "run_joystick_diagnostic",
+        lambda loaded: SimpleNamespace(matches_config=False),
+    )
+
+    assert main(["diagnose-joysticks"]) == 3
+
+
+def test_diagnose_joysticks_handles_operator_interrupt_without_traceback(
+    monkeypatch, capsys
+):
+    from excavator_il import joystick_diagnostic, teleop
+
+    monkeypatch.setattr(teleop.TeleopConfig, "load", lambda path: f"teleop:{path}")
+
+    def interrupt(unused_config):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(joystick_diagnostic, "run_joystick_diagnostic", interrupt)
+
+    assert main(["diagnose-joysticks"]) == 130
+    assert "diagnostic interrupted" in capsys.readouterr().err
 
 
 def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):

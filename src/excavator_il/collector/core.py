@@ -210,7 +210,11 @@ class CollectorCore:
             },
         )
 
-        command_axes = packet.axes if packet.deadman_pressed else (0.0,) * 6
+        if packet.deadman_pressed:
+            x1, y1, _z1, x2, y2, _z2 = packet.axes
+            command_axes = (x1, y1, 0.0, x2, y2, 0.0)
+        else:
+            command_axes = (0.0,) * 6
         command_seq = self._command_seq
         action_seq = self._action_seq
         command_kind = "manual" if packet.deadman_pressed else "safe_zero:deadman_released"
