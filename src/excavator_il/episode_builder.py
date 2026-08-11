@@ -29,6 +29,7 @@ class StepBuildReport:
     duplicate_or_out_of_order_count: int
     serial_parse_failure_count: int
     command_write_failure_count: int
+    joystick_timeout_count: int
     sensor_invalid_count: int
     action_age_ms: Mapping[str, float]
     camera_age_ms: Mapping[str, float]
@@ -331,6 +332,11 @@ def build_steps(
         ),
         command_write_failure_count=sum(
             1 for record in command_records if record.get("write_ok") is not True
+        ),
+        joystick_timeout_count=sum(
+            1
+            for record in command_records
+            if record.get("command_kind") == "safe_zero:joystick_timeout"
         ),
         sensor_invalid_count=int(rejection_reasons.get("sensor_invalid", 0)),
         action_age_ms=_age_statistics(action_ages_ms),

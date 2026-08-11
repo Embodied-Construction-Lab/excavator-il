@@ -1,9 +1,11 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import excavator_il.teleop as teleop
+from excavator_il.joystick_protocol import decode_joystick_packet
 from excavator_il.teleop import DeviceSnapshot, TeleopConfig, build_joystick_packet
 
 
@@ -49,6 +51,11 @@ def test_teleop_config_requires_two_devices_and_fixed_20_hz(tmp_path):
             },
         ],
         "deadman": {"controller_slot": 1, "button_index": 0},
+        "startup_gate": {
+            "axis_abs_max": 0.15,
+            "stable_samples": 10,
+            "timeout_s": 5.0,
+        },
     }
     path.write_text(json.dumps(value), encoding="utf-8")
 
@@ -57,6 +64,9 @@ def test_teleop_config_requires_two_devices_and_fixed_20_hz(tmp_path):
     assert config.rate_hz == 20
     assert config.device_ids == ("left-guid", "right-guid")
     assert config.axis_indices[1] == (3, 4)
+    assert config.startup_axis_abs_max == 0.15
+    assert config.startup_stable_samples == 10
+    assert config.startup_timeout_s == 5.0
 
     value["rate_hz"] = 10
     path.write_text(json.dumps(value), encoding="utf-8")
@@ -300,3 +310,105 @@ def test_hotplug_index_reuse_fails_before_udp_socket_creation(tmp_path, monkeypa
     with pytest.raises(RuntimeError, match="changed during startup"):
         teleop.run_teleop(config)
     assert socket_created is False
+
+
+def test_teleop_never_sends_captured_startup_transient(monkeypatch):
+    """The FarmStick reports false axes/deadman briefly after SDL opens it."""
+
+    class StopAfterFirstPacket(Exception):
+        pass
+
+    class FakeJoystick:
+        def __init__(self, slot, pygame):
+            self.slot = slot
+            self.pygame = pygame
+
+        def get_numaxes(self):
+            return 8
+
+        def get_numbuttons(self):
+            return 33
+
+        def get_axis(self, index):
+            if self.slot == 2 and self.pygame.pump_count <= 2:
+                return (-0.635162353515625, 0.823822021484375)[index]
+            return 0.003 if index < 2 else 0.0
+
+        def get_button(self, index):
+            return bool(
+                self.slot == 1
+                and index == 22
+                and self.pygame.pump_count <= 2
+            )
+
+        def get_guid(self):
+            return "same-guid"
+
+        def get_name(self):
+            return f"slot-{self.slot}"
+
+        def quit(self):
+            return None
+
+    class FakePygame:
+        def __init__(self):
+            self.pump_count = 0
+            self.event = SimpleNamespace(pump=self.pump)
+            self.joystick = SimpleNamespace(init=lambda: None, quit=lambda: None)
+
+        def pump(self):
+            self.pump_count += 1
+
+        def init(self):
+            return None
+
+        def quit(self):
+            return None
+
+    pygame = FakePygame()
+    devices = (FakeJoystick(1, pygame), FakeJoystick(2, pygame))
+    config = TeleopConfig(
+        orin_host="192.0.2.10",
+        orin_port=18090,
+        rate_hz=20,
+        mapping_id="dual_stick.v1",
+        calibration_id="raw.v1",
+        device_ids=("same-guid", "same-guid"),
+        device_paths=(Path("/dev/input/event9"), Path("/dev/input/event10")),
+        axis_indices=((0, 1), (0, 1)),
+        deadman_slot=1,
+        deadman_button=22,
+    )
+    socket_created_at = None
+    sent_packets = []
+
+    class FakeSocket:
+        def setblocking(self, unused):
+            return None
+
+        def sendto(self, payload, unused_destination):
+            sent_packets.append(decode_joystick_packet(payload))
+            raise StopAfterFirstPacket
+
+        def close(self):
+            return None
+
+    def create_socket(*unused_args, **unused_kwargs):
+        nonlocal socket_created_at
+        socket_created_at = pygame.pump_count
+        return FakeSocket()
+
+    monkeypatch.setattr(teleop, "_load_pygame", lambda: pygame)
+    monkeypatch.setattr(
+        teleop, "_open_configured_devices", lambda unused_pygame, unused_config: devices
+    )
+    monkeypatch.setattr(teleop.socket, "socket", create_socket)
+    monkeypatch.setattr(teleop.time, "sleep", lambda unused_seconds: None)
+
+    with pytest.raises(StopAfterFirstPacket):
+        teleop.run_teleop(config, print_every=0)
+
+    assert socket_created_at is not None and socket_created_at >= 12
+    assert len(sent_packets) == 1
+    assert sent_packets[0].deadman_pressed is False
+    assert max(abs(value) for value in sent_packets[0].axes) <= 0.15

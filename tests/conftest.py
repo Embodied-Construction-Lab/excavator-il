@@ -24,6 +24,7 @@ def rgb_episode_factory(tmp_path):
                     "operator_id": "operator_01",
                     "dig_target_m": [0.8, 0.1, -0.2],
                     "material_id": "dry_soil_01",
+                    "status": "complete",
                     "success": True,
                     "failure_reason": "",
                     "intervention": False,

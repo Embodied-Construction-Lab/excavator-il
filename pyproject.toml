@@ -10,7 +10,11 @@ requires-python = ">=3.10,<3.13"
 dependencies = []
 
 [project.optional-dependencies]
-collector = ["opencv-python-headless>=4.8,<5", "pyserial>=3.5,<4"]
+collector = [
+    "opencv-python-headless>=4.8,<5",
+    "Pillow>=10",
+    "pyserial>=3.5,<4",
+]
 teleop = ["pygame>=2.5,<3"]
 training = [
     "lerobot @ git+https://github.com/freshmakerzhao/lerobot.git@12b88fce029cc3a8a94b061cd9e790018873c769",

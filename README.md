@@ -23,7 +23,7 @@ Orin Collector
 Orin 仅安装采集依赖（Python 3.10）：
 
 ```bash
-cd ~/workspace/excavator-il
+cd /home/jetson16/workspace_excavator/excavator-il
 conda env create -f environment.orin.yml
 conda activate excavator-il-collector
 ```
@@ -78,11 +78,41 @@ find /dev/input/by-id -maxdepth 1 -type l -name '*-event-joystick' \
 
 ## 3. 双端采集
 
+首次真机短 Episode 建议从 PC 使用引导脚本。它自行启动并清理 Orin Collector 和 PC teleop，
+先创建处于记录待命状态的 Episode，再启动 teleop 并通过 ACK 门禁；正常完成后自动运行
+`build-steps`、`validate` 并保存
+`quality_report.json` 输出：
+
+```bash
+conda activate excavator-il
+cd /home/zhaoshuai/workspace_uinty/RL_prj/excavator-il
+python scripts/collect_guided_episode.py
+```
+
+teleop 在创建 UDP socket 前先要求四个 XY 居中且 deadman 释放，连续稳定 10 个 20 Hz 样本；
+这样不会把 Pygame/SDL 初始化瞬态发送到 Orin。阈值、稳定样本数和超时集中在
+`config/teleop.pc.json` 的 `startup_gate`。
+
+现场参数集中在 `config/guided_episode.pc.json`。当前机器开机后液压即具备动作条件，没有独立的
+软件“锁定/解锁”阶段；运行脚本前必须清空作业区、保证急停可立即操作，异常时立即释放 deadman、
+手柄回中并按 `Ctrl+C`。Recorder、teleop 和 ACK 门禁都就绪后，脚本才提示等待 deadman；按下后
+看到“记录已开始”再操纵双杆 XY。回中并松开 deadman 时，脚本先立即关闭所有原始流并将
+Episode 标为 `pending_review`，随后才提示输入 `成功/s`、`失败/f` 或 `重录/r`，因此人工输入
+耗时不会继续写进该 Episode。脚本不设置固定采集时长。
+`重录`仅删除本轮刚封存的 Episode，下一次 deadman 复用同一个 Episode 编号。
+异常或人工 `Ctrl+C` 中止仍保留原始证据。该条诊断数据不进入 Pilot 训练集。
+
+原始 Episode 保存在 Orin 的 `config/collection.orin.json` 中 `data_root` 指定的位置；当前为
+`~/excavator-data/raw`，即 `/home/jetson16/excavator-data/raw`。PC 的引导、teleop 和校验输出
+仅保存在 `config/guided_episode.pc.json` 的 `runtime.log_dir`；当前解析为仓库内 `logs/`。
+
+常规多条 Episode 采集仍可使用以下分端命令。
+
 先在 Orin 停止所有会打开 STM32 串口的旧进程，然后启动 Collector：
 
 ```bash
 conda activate excavator-il-collector
-cd ~/workspace/excavator-il
+cd /home/jetson16/workspace_excavator/excavator-il
 excavator-il collect --config config/collection.orin.json
 ```
 
@@ -124,8 +154,10 @@ excavator-il build-steps ~/excavator-data/raw/episode_0001
 excavator-il validate ~/excavator-data/raw/episode_0001
 ```
 
-`quality_report.json` 给出各流频率/周期、序号缺口、乱序、串口解析失败、命令写失败、
+`quality_report.json` 给出各流频率/周期、序号缺口、乱序、串口解析失败、命令写失败、手柄
+超时安全回零次数 `joystick_timeout_count`、
 传感器无效数、动作/图像年龄分布，以及可训练样本数和拒绝原因。未通过校验的 Episode 不应转换。
+任一 `joystick_timeout_count > 0` 都会使校验失败，不能通过放宽 150 ms 安全超时来掩盖链路抖动。
 
 ## 5. 转换与 ACT 冒烟
 

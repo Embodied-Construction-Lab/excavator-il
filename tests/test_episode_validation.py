@@ -89,3 +89,28 @@ def test_validate_episode_rejects_future_expert_action(rgb_episode_factory):
 
     with pytest.raises(EpisodeValidationError, match="future expert action"):
         validate_episode(episode)
+
+
+def test_validate_episode_rejects_joystick_timeout_in_quality_report(
+    rgb_episode_factory,
+):
+    episode = rgb_episode_factory()
+    (episode / "quality_report.json").write_text(
+        json.dumps({"joystick_timeout_count": 1}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EpisodeValidationError, match="joystick timeout"):
+        validate_episode(episode)
+
+
+def test_validate_episode_rejects_pending_operator_review(rgb_episode_factory):
+    episode = rgb_episode_factory()
+    metadata_path = episode / "episode.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["status"] = "pending_review"
+    metadata["success"] = None
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(EpisodeValidationError, match="pending_review"):
+        validate_episode(episode)

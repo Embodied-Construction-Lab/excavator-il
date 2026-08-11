@@ -20,5 +20,10 @@
   "deadman": {
     "controller_slot": 1,
     "button_index": 22
+  },
+  "startup_gate": {
+    "axis_abs_max": 0.15,
+    "stable_samples": 10,
+    "timeout_s": 5.0
   }
 }

@@ -64,6 +64,13 @@ def _parser() -> argparse.ArgumentParser:
     stop.add_argument("--intervention", action="store_true")
     abort = episode_commands.add_parser("abort")
     abort.add_argument("--reason", required=True)
+    episode_commands.add_parser("seal")
+    finalize = episode_commands.add_parser("finalize")
+    finalize.add_argument("path")
+    finalize.add_argument(
+        "--result", choices=("success", "failure", "aborted"), required=True
+    )
+    finalize.add_argument("--failure-reason", default="")
     episode_commands.add_parser("status")
     return parser
 
@@ -159,6 +166,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
             elif args.episode_command == "abort":
                 request["reason"] = args.reason
+            elif args.episode_command == "finalize":
+                request.update(
+                    path=args.path,
+                    result=args.result,
+                    failure_reason=args.failure_reason,
+                )
             _print_json(send_episode_command(config.episode_control_socket, request))
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

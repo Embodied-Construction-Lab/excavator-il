@@ -84,6 +84,18 @@ def test_cli_dispatches_collection_tools_without_importing_training_stack(monkey
     ) == 0
     assert main(["episode", "stop", "--failure-reason", "bucket_empty"]) == 0
     assert main(["episode", "abort", "--reason", "emergency_stop"]) == 0
+    assert main(["episode", "seal"]) == 0
+    assert main(
+        [
+            "episode",
+            "finalize",
+            "/data/raw/episode_0001",
+            "--result",
+            "failure",
+            "--failure-reason",
+            "diagnostic_task_failed",
+        ]
+    ) == 0
     assert calls == [("teleop:teleop.json", 7), ("collect", "collection.json")]
     assert "device_id" in capsys.readouterr().out
 

@@ -32,6 +32,12 @@ slot；该路径不进入 UDP 包。两个同型号手柄可以具有相同 GUID
 `excavator_joystick.v1` 协议。Collector 在 STM32 串口边界再次强制 Z1/Z2 为零；即使异常或旧
 发送端提供非零 Z，也不得转发到固件的左右行走输出。
 
+Pygame/SDL 打开手柄后的初始读数可能短暂包含错误轴值或按钮状态。PC 在创建 UDP socket 前
+必须通过本地启动稳定门：配置的四个 XY 均在 `startup_gate.axis_abs_max` 内且 deadman 释放，
+连续满足 `startup_gate.stable_samples` 次后才允许发送首包；默认分别为 `0.15` 和 `10`，按
+20 Hz 等价于 0.5 秒。`startup_gate.timeout_s` 默认 5 秒，超时必须无网络输出地失败关闭，禁止
+把初始化瞬态当作人工动作发送。
+
 Orin 收包后以自身 `CLOCK_MONOTONIC` 同时生成专家标签：
 
 ```text
@@ -85,7 +91,13 @@ episode_xxxx/
 
 原始 JSONL 保留解析失败、重复/乱序和写失败事实。`command_tx.jsonl` 记录真实串口写结果，不能
 把“已生成命令”误当成“已写入 STM32”。相机编码完成后使用 Orin 单调时间打戳，并先原子落盘，
-再追加索引。正常完成、失败和中止分别写为 `complete`、`failed`、`aborted`。
+再追加索引。deadman 松开后必须先关闭全部原始流并把元数据写为 `pending_review`，再等待人工选择
+成功、失败或重录；分类只原子改写元数据，不得重新打开或继续追加原始流。正常完成、失败和中止
+最终分别写为 `complete`、`failed`、`aborted`，`pending_review` 不得进入构建、校验或转换。
+
+`quality_report.json` 必须记录 `joystick_timeout_count`。该值统计 Episode 内由于 PC 手柄包超过
+配置时限而触发的明确安全回零；只要大于零，该 Episode 就不满足训练校验条件。局域网通信仍会受
+Wi-Fi 重传、系统队列和进程调度影响，不能因为平均延迟较低而放宽 fail-closed 超时。
 
 ## 最终训练接口
 
@@ -163,6 +175,7 @@ pump_percent,sensor_valid,control_mode
   "operator_id": "operator_01",
   "dig_target_m": [0.8, 0.1, -0.2],
   "material_id": "dry_soil_01",
+  "status": "complete",
   "success": true,
   "intervention": false,
   "firmware_commit": "...",

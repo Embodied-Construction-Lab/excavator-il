@@ -76,10 +76,10 @@ class EpisodeRecorder:
             raise ValueError(f"{field} must be non-empty text")
         return value
 
-    def _write_metadata(self, value: Mapping[str, Any]) -> None:
-        assert self._episode_path is not None
-        target = self._episode_path / "episode.json"
-        temporary = self._episode_path / "episode.json.pending"
+    @staticmethod
+    def _write_metadata(episode_path: Path, value: Mapping[str, Any]) -> None:
+        target = episode_path / "episode.json"
+        temporary = episode_path / "episode.json.pending"
         temporary.write_text(
             json.dumps(value, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -165,7 +165,7 @@ class EpisodeRecorder:
         self._camera_handle = camera_handle
         self._camera_writer = camera_writer
         self._camera_frame_index = 0
-        self._write_metadata(metadata)
+        self._write_metadata(episode_path, metadata)
         self._writer_queue = queue.Queue(maxsize=_WRITER_QUEUE_CAPACITY)
         self._writer_error = None
         self._writer_thread = threading.Thread(
@@ -288,7 +288,6 @@ class EpisodeRecorder:
         with self._lock:
             if self._episode_path is None or self._metadata is None:
                 raise RuntimeError("no Episode is recording")
-            episode_path = self._episode_path
             final_metadata = {
                 **self._metadata,
                 "status": "aborted" if aborted else ("complete" if success else "failed"),
@@ -298,39 +297,108 @@ class EpisodeRecorder:
                 "end_wall_ns": int(end_wall_ns),
                 "end_monotonic_ns": int(end_monotonic_ns),
             }
-            assert self._writer_queue is not None
-            assert self._writer_thread is not None
-            self._writer_queue.put(_WRITER_STOP)
-            self._writer_thread.join(timeout=5.0)
-            if self._writer_thread.is_alive():
-                raise RuntimeError("Episode writer did not stop within 5 seconds")
-            writer_error = self._writer_error
-            if writer_error is not None:
-                final_metadata = {
-                    **final_metadata,
-                    "status": "aborted",
-                    "success": False,
-                    "failure_reason": f"episode_writer_failed: {writer_error}",
-                    "intervention": True,
-                }
-            for handle in self._streams.values():
+            return self._close(final_metadata)
+
+    def seal(self, *, end_wall_ns: int, end_monotonic_ns: int) -> Path:
+        """Close all raw streams immediately, leaving only result review pending."""
+        with self._lock:
+            if self._episode_path is None or self._metadata is None:
+                raise RuntimeError("no Episode is recording")
+            pending_metadata = {
+                **self._metadata,
+                "status": "pending_review",
+                "success": None,
+                "failure_reason": "",
+                "intervention": False,
+                "end_wall_ns": int(end_wall_ns),
+                "end_monotonic_ns": int(end_monotonic_ns),
+            }
+            return self._close(pending_metadata)
+
+    def _close(self, final_metadata: Mapping[str, Any]) -> Path:
+        assert self._episode_path is not None
+        episode_path = self._episode_path
+        assert self._writer_queue is not None
+        assert self._writer_thread is not None
+        self._writer_queue.put(_WRITER_STOP)
+        self._writer_thread.join(timeout=5.0)
+        if self._writer_thread.is_alive():
+            raise RuntimeError("Episode writer did not stop within 5 seconds")
+        writer_error = self._writer_error
+        if writer_error is not None:
+            final_metadata = {
+                **final_metadata,
+                "status": "aborted",
+                "success": False,
+                "failure_reason": f"episode_writer_failed: {writer_error}",
+                "intervention": True,
+            }
+        for handle in self._streams.values():
+            handle.flush()
+            handle.close()
+        for handle in (self._control_handle, self._camera_handle):
+            if handle is not None:
                 handle.flush()
                 handle.close()
-            for handle in (self._control_handle, self._camera_handle):
-                if handle is not None:
-                    handle.flush()
-                    handle.close()
-            self._write_metadata(final_metadata)
-            self._episode_path = None
-            self._metadata = None
-            self._streams = {}
-            self._control_handle = None
-            self._control_writer = None
-            self._camera_handle = None
-            self._camera_writer = None
-            self._writer_queue = None
-            self._writer_thread = None
-            self._writer_error = None
-            if writer_error is not None:
-                raise RuntimeError(f"Episode writer failed: {writer_error}")
-            return episode_path
+        self._write_metadata(episode_path, final_metadata)
+        self._episode_path = None
+        self._metadata = None
+        self._streams = {}
+        self._control_handle = None
+        self._control_writer = None
+        self._camera_handle = None
+        self._camera_writer = None
+        self._writer_queue = None
+        self._writer_thread = None
+        self._writer_error = None
+        if writer_error is not None:
+            raise RuntimeError(f"Episode writer failed: {writer_error}")
+        return episode_path
+
+    def finalize_pending(
+        self,
+        episode_path: str | Path,
+        *,
+        result: str,
+        failure_reason: str,
+    ) -> Path:
+        """Atomically classify a sealed Episode without reopening raw streams."""
+        with self._lock:
+            root = self._root.resolve()
+            path = Path(episode_path).expanduser().resolve()
+            if path.parent != root or _EPISODE_NAME.fullmatch(path.name) is None:
+                raise ValueError("pending Episode must be a direct child of data_root")
+            try:
+                metadata = json.loads(
+                    (path / "episode.json").read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError(f"cannot load pending Episode metadata: {exc}") from exc
+            if (
+                not isinstance(metadata, Mapping)
+                or metadata.get("status") != "pending_review"
+            ):
+                raise RuntimeError("Episode status must be pending_review")
+            if result == "success":
+                if failure_reason:
+                    raise ValueError("successful Episode cannot have a failure reason")
+                status = "complete"
+                success = True
+                intervention = False
+            elif result in ("failure", "aborted"):
+                if not failure_reason:
+                    raise ValueError(f"{result} Episode requires a failure reason")
+                status = "failed" if result == "failure" else "aborted"
+                success = False
+                intervention = result == "aborted"
+            else:
+                raise ValueError("result must be success, failure or aborted")
+            final_metadata = {
+                **dict(metadata),
+                "status": status,
+                "success": success,
+                "failure_reason": failure_reason,
+                "intervention": intervention,
+            }
+            self._write_metadata(path, final_metadata)
+            return path

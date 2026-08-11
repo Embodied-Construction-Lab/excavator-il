@@ -50,6 +50,9 @@ class TeleopConfig:
     axis_indices: tuple[tuple[int, int], tuple[int, int]]
     deadman_slot: int
     deadman_button: int
+    startup_axis_abs_max: float = 0.15
+    startup_stable_samples: int = 10
+    startup_timeout_s: float = 5.0
 
     @classmethod
     def load(cls, path: str | Path) -> "TeleopConfig":
@@ -91,6 +94,9 @@ class TeleopConfig:
         deadman = value.get("deadman")
         if not isinstance(deadman, Mapping):
             raise ValueError("teleop config deadman must be an object")
+        startup_gate = value.get("startup_gate", {})
+        if not isinstance(startup_gate, Mapping):
+            raise ValueError("teleop config startup_gate must be an object")
         if device_paths[0] == device_paths[1]:
             raise ValueError("devices device_path values must be distinct")
         config = cls(
@@ -104,6 +110,13 @@ class TeleopConfig:
             axis_indices=(axis_indices[0], axis_indices[1]),
             deadman_slot=int(deadman.get("controller_slot", 0)),
             deadman_button=int(deadman.get("button_index", -1)),
+            startup_axis_abs_max=float(
+                startup_gate.get("axis_abs_max", 0.15)
+            ),
+            startup_stable_samples=int(
+                startup_gate.get("stable_samples", 10)
+            ),
+            startup_timeout_s=float(startup_gate.get("timeout_s", 5.0)),
         )
         if not config.orin_host or not 1 <= config.orin_port <= 65535:
             raise ValueError("orin_host and orin_port must identify a valid UDP endpoint")
@@ -113,6 +126,12 @@ class TeleopConfig:
             raise ValueError("mapping_id and calibration_id must be non-empty")
         if config.deadman_slot not in (1, 2) or config.deadman_button < 0:
             raise ValueError("deadman must identify a non-negative button on slot 1 or 2")
+        if not 0.0 < config.startup_axis_abs_max < 1.0:
+            raise ValueError("startup_gate.axis_abs_max must be within (0, 1)")
+        if config.startup_stable_samples <= 0:
+            raise ValueError("startup_gate.stable_samples must be positive")
+        if not math.isfinite(config.startup_timeout_s) or config.startup_timeout_s <= 0:
+            raise ValueError("startup_gate.timeout_s must be finite and positive")
         return config
 
 
@@ -292,6 +311,42 @@ def _snapshot(joystick: Any, indices: Sequence[int]) -> DeviceSnapshot:
     )
 
 
+def _wait_for_safe_startup(
+    pygame: Any,
+    devices: tuple[Any, Any],
+    config: TeleopConfig,
+) -> None:
+    """Wait for stable neutral hardware before any UDP socket can exist."""
+    deadline = time.monotonic() + config.startup_timeout_s
+    stable_samples = 0
+    period_s = 1.0 / config.rate_hz
+    while stable_samples < config.startup_stable_samples:
+        pygame.event.pump()
+        snapshots = (
+            _snapshot(devices[0], config.axis_indices[0]),
+            _snapshot(devices[1], config.axis_indices[1]),
+        )
+        deadman_buttons = snapshots[config.deadman_slot - 1].buttons
+        if config.deadman_button >= len(deadman_buttons):
+            raise RuntimeError("configured deadman button does not exist")
+        neutral = (
+            not deadman_buttons[config.deadman_button]
+            and all(
+                abs(axis) <= config.startup_axis_abs_max
+                for snapshot in snapshots
+                for axis in snapshot.axes
+            )
+        )
+        stable_samples = stable_samples + 1 if neutral else 0
+        if stable_samples >= config.startup_stable_samples:
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "joystick startup gate timed out: release deadman and center both XY sticks"
+            )
+        time.sleep(period_s)
+
+
 def run_teleop(config: TeleopConfig, *, print_every: int = 20) -> None:
     """Continuously send numeric joystick samples at the configured 20 Hz."""
     pygame = _load_pygame()
@@ -308,6 +363,7 @@ def run_teleop(config: TeleopConfig, *, print_every: int = 20) -> None:
     rejected_ack_count = 0
     try:
         devices = _open_configured_devices(pygame, config)
+        _wait_for_safe_startup(pygame, devices, config)
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setblocking(False)
         while True:

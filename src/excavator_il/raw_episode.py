@@ -93,6 +93,15 @@ def _load_metadata(path: Path) -> dict:
         raise EpisodeValidationError("episode.json schema_version must be excavator_demo_raw.v1")
     if metadata.get("task") != "ExecuteDig":
         raise EpisodeValidationError("episode.json task must be ExecuteDig")
+    status = metadata.get("status")
+    if status == "pending_review":
+        raise EpisodeValidationError(
+            "episode.json status pending_review must be classified before validation"
+        )
+    if status not in {"complete", "failed", "aborted"}:
+        raise EpisodeValidationError(
+            "episode.json status must be complete, failed, or aborted"
+        )
     camera = metadata.get("camera_front")
     if not isinstance(camera, dict):
         raise EpisodeValidationError("episode.json camera_front must be an object")
@@ -112,6 +121,31 @@ def _load_metadata(path: Path) -> dict:
     if camera["timestamp_clock"] != "CLOCK_MONOTONIC":
         raise EpisodeValidationError("camera_front timestamp_clock must be CLOCK_MONOTONIC")
     return metadata
+
+
+def _validate_quality_health(path: Path) -> None:
+    report_path = path / "quality_report.json"
+    if not report_path.is_file():
+        return
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise EpisodeValidationError(f"invalid quality_report.json: {exc}") from exc
+    if not isinstance(report, dict):
+        raise EpisodeValidationError("quality_report.json must be an object")
+    timeout_count = report.get("joystick_timeout_count", 0)
+    if (
+        isinstance(timeout_count, bool)
+        or not isinstance(timeout_count, int)
+        or timeout_count < 0
+    ):
+        raise EpisodeValidationError(
+            "quality_report joystick_timeout_count must be a non-negative integer"
+        )
+    if timeout_count:
+        raise EpisodeValidationError(
+            f"quality report contains {timeout_count} joystick timeout event(s)"
+        )
 
 
 def _as_int(value: str, field: str) -> int:
@@ -140,6 +174,7 @@ def validate_episode(
     """Validate one timestamped RGB demonstration episode."""
     episode_path = Path(path)
     metadata = _load_metadata(episode_path)
+    _validate_quality_health(episode_path)
     episode_id = metadata["episode_id"]
     steps = _read_csv(episode_path / "steps.csv", STEP_FIELDS)
     camera_rows = _read_csv(episode_path / "camera_front_timestamps.csv", CAMERA_FIELDS)

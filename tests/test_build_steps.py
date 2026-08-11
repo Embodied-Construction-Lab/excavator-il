@@ -101,6 +101,17 @@ def test_build_steps_uses_only_new_state_and_latest_causal_action_and_image(tmp_
     (episode / "expert_action.jsonl").write_text(
         "".join(json.dumps(record) + "\n" for record in actions), encoding="utf-8"
     )
+    (episode / "command_tx.jsonl").write_text(
+        json.dumps(
+            {
+                "command_seq": 7,
+                "command_kind": "safe_zero:joystick_timeout",
+                "write_ok": True,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     report = build_steps(episode)
 
@@ -118,8 +129,10 @@ def test_build_steps_uses_only_new_state_and_latest_causal_action_and_image(tmp_
     assert report.max_action_age_ms == 20.0
     assert report.max_camera_age_ms == 50.0
     assert report.serial_parse_failure_count == 0
+    assert report.joystick_timeout_count == 1
     assert report.action_age_ms["p95"] == 20.0
     assert report.camera_age_ms["p95"] == 50.0
     quality = json.loads((episode / "quality_report.json").read_text(encoding="utf-8"))
     assert quality["training_step_count"] == 1
     assert quality["camera_queue_drop_count"] == 0
+    assert quality["joystick_timeout_count"] == 1
