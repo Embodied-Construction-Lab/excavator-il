@@ -23,6 +23,7 @@ from .runtime import CollectorRuntime
 
 LOGGER = logging.getLogger("excavator_il.collector")
 _MAX_CONTROL_REQUEST_BYTES = 16_384
+_STM32_SYNC_TIMEOUT_S = 2.0
 
 
 class CollectorService:
@@ -161,6 +162,24 @@ class CollectorService:
             thread.start()
             self._threads.append(thread)
 
+    def _synchronize_command_sequence(self) -> int:
+        deadline = time.monotonic() + _STM32_SYNC_TIMEOUT_S
+        while not self._stop.is_set() and time.monotonic() < deadline:
+            raw_line = self._serial.readline()
+            receive_monotonic_ns = time.monotonic_ns()
+            if not raw_line:
+                continue
+            frame = self._core.accept_stm32(
+                raw_line,
+                receive_monotonic_ns=receive_monotonic_ns,
+                receive_wall_ns=time.time_ns(),
+            )
+            if frame is not None:
+                return self._core.synchronize_command_sequence_from_stm32(frame)
+        raise RuntimeError(
+            "cannot synchronize command sequence: no valid STM32 telemetry"
+        )
+
     def _abort_active_episode(self, reason: str) -> None:
         if not self._recorder.active:
             return
@@ -173,17 +192,20 @@ class CollectorService:
         udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp.bind((self._config.joystick.bind_host, self._config.joystick.port))
         udp.settimeout(0.02)
+        next_command_seq = self._synchronize_command_sequence()
+        self._runtime.send_safe_zero(reason="collector_startup")
+        self._start_workers()
         LOGGER.info(
-            "collector ready: joystick=%s:%d allowed_pc=%s serial=%s@%d camera=%s",
+            "collector ready: joystick=%s:%d allowed_pc=%s serial=%s@%d "
+            "camera=%s initial_command_seq=%d",
             self._config.joystick.bind_host,
             self._config.joystick.port,
             self._config.joystick.allowed_pc_host,
             self._config.serial.port,
             self._config.serial.baudrate,
             self._config.camera.device,
+            next_command_seq,
         )
-        self._runtime.send_safe_zero(reason="collector_startup")
-        self._start_workers()
         try:
             while not self._stop.is_set():
                 try:

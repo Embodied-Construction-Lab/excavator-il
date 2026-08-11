@@ -55,6 +55,20 @@ class CollectorCore:
         self._stm32_raw_frame_seq = 0
         self._stm32_parser = Stm32TelemetryParser()
 
+    def synchronize_command_sequence_from_stm32(
+        self, frame: Stm32TelemetryFrame
+    ) -> int:
+        values = frame.values
+        command_received = bool(
+            int(values["command_valid"]) or int(values["command_timed_out"])
+        )
+        if not command_received:
+            self._command_seq = 0
+        else:
+            last_received = int(values["command_rx_seq"])
+            self._command_seq = (last_received + 1) & 0xFFFFFFFF
+        return self._command_seq
+
     @staticmethod
     def _source_host(source_addr: str) -> str:
         return source_addr.rsplit(":", maxsplit=1)[0]

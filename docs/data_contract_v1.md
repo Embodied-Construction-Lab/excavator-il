@@ -43,6 +43,9 @@ Orin 收包后以自身 `CLOCK_MONOTONIC` 同时生成专家标签：
 换行结尾 JSON 包含 schema、未改变方向的六轴、`command_seq` 和
 `command_source_stamp_ms`。STM32 才负责死区后的阀角、PWM、泵和硬件方向适配。未知 schema、
 缺字段、重复/乱序帧不会更新控制目标；超过 300 ms 未收到有效命令时输出中位/零命令。
+Collector 每次启动都必须先读取一帧有效 STM32 遥测，以当前 `command_rx_seq` 恢复下一条
+`command_seq`，再发送启动零命令；2 秒内无法取得有效遥测时不得进入 ready 状态。这样既保留
+STM32 的重复/乱序拒绝，也避免 Collector 或 Orin 重启后从零计数导致合法命令被长时间拒绝。
 
 ### STM32 → Orin：`stm32_control_telemetry.v2`
 

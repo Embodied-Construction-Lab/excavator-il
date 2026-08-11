@@ -18,11 +18,13 @@ from excavator_il.joystick_protocol import (
     JoystickPacket,
     encode_joystick_packet,
 )
+from excavator_il.stm32_protocol import STM32_TELEMETRY_FIELDS
 
 
 class _Serial:
-    def __init__(self):
+    def __init__(self, lines):
         self.writes = []
+        self.lines = list(lines)
 
     def write(self, payload):
         self.writes.append(payload)
@@ -32,6 +34,8 @@ class _Serial:
         pass
 
     def readline(self):
+        if self.lines:
+            return self.lines.pop(0)
         time.sleep(0.005)
         return b""
 
@@ -73,7 +77,18 @@ def test_collector_service_connects_udp_episode_socket_camera_and_safe_shutdown(
         episode_control_socket=control_socket,
         episode_defaults=EpisodeDefaults((0.8, 0.1, -0.2), "soil", {}),
     )
-    serial = _Serial()
+    telemetry = {field: "0" for field in STM32_TELEMETRY_FIELDS}
+    telemetry.update(
+        {
+            "schema_version": "stm32_control_telemetry.v2",
+            "command_rx_seq": "197",
+            "command_timed_out": "1",
+        }
+    )
+    telemetry_row = ",".join(
+        telemetry[field] for field in STM32_TELEMETRY_FIELDS
+    ).encode("ascii")
+    serial = _Serial([telemetry_row])
     service = CollectorService(config, serial_port=serial, camera=_Camera())
     thread = threading.Thread(target=service.run)
     thread.start()
@@ -115,6 +130,8 @@ def test_collector_service_connects_udp_episode_socket_camera_and_safe_shutdown(
     assert started["episode_id"] == "episode_0001"
     assert stopped["status"] == "complete"
     assert len(serial.writes) >= 3  # startup zero, manual sample, shutdown zero
+    startup_zero = json.loads(serial.writes[0].decode("ascii"))
+    assert startup_zero["command_seq"] == 198
     episode = tmp_path / "raw" / "episode_0001"
     assert (episode / "joystick_raw.jsonl").stat().st_size > 0
     assert (episode / "camera_front_timestamps.csv").stat().st_size > 0

@@ -154,3 +154,33 @@ def test_collector_builds_explicit_safe_zero_after_joystick_timeout(tmp_path):
         0.0,
     ]
     assert zero.command_kind == "safe_zero:joystick_timeout"
+
+
+def test_collector_resumes_command_sequence_from_stm32_telemetry(tmp_path):
+    recorder = EpisodeRecorder(tmp_path)
+    core = CollectorCore(
+        recorder=recorder,
+        expected_device_ids=("left-guid", "right-guid"),
+        mapping_id="dual_stick.v1",
+        calibration_id="raw.v1",
+        deadzone=0.15,
+    )
+    values = {field: "0" for field in STM32_TELEMETRY_FIELDS}
+    values.update(
+        {
+            "schema_version": "stm32_control_telemetry.v2",
+            "command_rx_seq": "197",
+            "command_timed_out": "1",
+        }
+    )
+    row = ",".join(values[field] for field in STM32_TELEMETRY_FIELDS).encode("ascii")
+    frame = core.accept_stm32(
+        row, receive_monotonic_ns=1_000, receive_wall_ns=2_000
+    )
+    assert frame is not None
+
+    core.synchronize_command_sequence_from_stm32(frame)
+    zero = core.make_safe_zero(monotonic_ns=3_000, reason="collector_startup")
+
+    command = json.loads(zero.serial_payload.decode("ascii"))
+    assert command["command_seq"] == 198
