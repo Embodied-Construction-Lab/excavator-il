@@ -32,7 +32,7 @@
     "dig_target_m": [0.8, 0.0, -0.2],
     "material_id": "soil_default",
     "provenance": {
-      "firmware_commit": "6278969561d3c9ca0e6aa5edc00a02f398f26fb1",
+      "firmware_commit": "dda4a403aacb4ef770cd02898efcc42e03ae71b8",
       "urdf_hash": "c1dffdac1e460682c4d6c45187e0fbb6e5a8323a189ddbc4fd66e0696919ef62",
       "machine_profile_hash": "4b8c94484389429c2c3871857d928e46ec93fa1b62c66df459336868b00d2f89",
       "valve_calibration_id": "REPLACE_BEFORE_COLLECTION",
