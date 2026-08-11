@@ -39,21 +39,36 @@ python -m pip install -e '.[teleop]'
 ```bash
 conda env create -f environment.yml
 conda activate excavator-il
-python -m pip install -e '.[training,test]'
 ```
+
+`training` extra 将 LeRobot 固定到项目验证过的 fork commit
+`12b88fce029cc3a8a94b061cd9e790018873c769`，不要改用旧的 `lerobot`、`act_env` 或
+`collect_data_env` 环境执行本项目。
 
 ## 2. 首次配置
 
-PC 查看手柄 GUID：
+PC 查看手柄 GUID 和 SDL 设备路径：
 
 ```bash
 excavator-il list-joysticks
 ```
 
-将两个 GUID 同步写入：
+Linux 上同时确认带 USB 序列号的稳定路径：
+
+```bash
+find /dev/input/by-id -maxdepth 1 -type l -name '*-event-joystick' \
+  -printf '%f -> %l\n' | sort
+```
+
+将两个 GUID 同步写入以下配置，并在 PC 配置的每个 `devices` 项中写入对应的绝对
+`device_path`：
 
 - `config/teleop.pc.json`
 - `config/collection.orin.json`
+
+同型号手柄可以具有相同 GUID，但两个 `device_path` 必须按 USB 序列号区分左右并解析到不同的
+物理设备。路径缺失、GUID 不匹配或两个路径指向同一设备时，Teleop 会在创建发送 socket 前退出。
+稳定路径识别要求 Pygame 实际加载 SDL 2.24 或更新版本；版本过低时命令会直接报错退出。
 
 同时确认 PC/Orin IP、`/dev/ttyTHS1`、`/dev/video0`、相机尺寸，以及
 `episode_defaults.provenance` 中的固件和标定版本。配置文件是现场副本，换网络或设备后应显式修改，

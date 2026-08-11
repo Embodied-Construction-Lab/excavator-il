@@ -58,12 +58,17 @@ PC：
 ```bash
 cd /home/zhaoshuai/workspace_uinty/RL_prj/excavator-il
 conda activate excavator-il
-python -m pip install -e '.[teleop,training,test]'
 excavator-il list-joysticks
 ```
 
+`environment.yml` 已固定训练使用的 LeRobot fork commit，并安装 PC 手柄依赖；不要混用历史
+`lerobot`、`act_env` 或 `collect_data_env` 环境。
+
 将手柄 GUID 写入 `config/teleop.pc.json` 和 Orin 上的
-`config/collection.orin.json`。同时核对 PC/Orin IP、串口、相机设备和 provenance 字段。
+`config/collection.orin.json`。PC 配置还必须为每个手柄写入带 USB 序列号的绝对
+`/dev/input/by-id/*-event-joystick` 路径；同型号设备 GUID 可以相同，但路径必须不同并固定左右槽。
+PC 上 Pygame 实际加载的 SDL 必须为 2.24 或更新版本。
+同时核对 PC/Orin IP、串口、相机设备和 provenance 字段。
 
 Orin：
 

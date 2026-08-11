@@ -4,13 +4,13 @@
   "joystick_udp": {
     "bind_host": "0.0.0.0",
     "port": 18090,
-    "allowed_pc_host": "192.168.0.220",
+    "allowed_pc_host": "192.168.31.219",
     "timeout_ms": 150
   },
   "controllers": {
     "device_ids": [
-      "REPLACE_WITH_LEFT_JOYSTICK_GUID",
-      "REPLACE_WITH_RIGHT_JOYSTICK_GUID"
+      "03008bc34f0400001604000011010000",
+      "03008bc34f0400001604000011010000"
     ],
     "mapping_id": "dual_stick.v1",
     "calibration_id": "raw.v1",
@@ -32,11 +32,11 @@
     "dig_target_m": [0.8, 0.0, -0.2],
     "material_id": "soil_default",
     "provenance": {
-      "firmware_commit": "REPLACE_BEFORE_COLLECTION",
-      "urdf_hash": "REPLACE_BEFORE_COLLECTION",
-      "machine_profile_hash": "REPLACE_BEFORE_COLLECTION",
+      "firmware_commit": "6278969561d3c9ca0e6aa5edc00a02f398f26fb1",
+      "urdf_hash": "c1dffdac1e460682c4d6c45187e0fbb6e5a8323a189ddbc4fd66e0696919ef62",
+      "machine_profile_hash": "4b8c94484389429c2c3871857d928e46ec93fa1b62c66df459336868b00d2f89",
       "valve_calibration_id": "REPLACE_BEFORE_COLLECTION",
-      "pump_setting": "REPLACE_BEFORE_COLLECTION"
+      "pump_setting": "JOYSTICK_FIXED_PUMP_PERCENT=-30.0f"
     }
   }
 }

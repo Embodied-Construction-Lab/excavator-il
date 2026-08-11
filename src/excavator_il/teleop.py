@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import math
 import socket
@@ -18,7 +19,7 @@ from .joystick_protocol import (
 )
 
 
-TELEOP_CONFIG_SCHEMA_VERSION = "excavator_teleop_config.v1"
+TELEOP_CONFIG_SCHEMA_VERSION = "excavator_teleop_config.v2"
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,14 @@ class DeviceSnapshot:
 
 
 @dataclass(frozen=True)
+class ConnectedJoystick:
+    index: int
+    device_id: str
+    device_path: Path
+    instance_id: int
+
+
+@dataclass(frozen=True)
 class TeleopConfig:
     orin_host: str
     orin_port: int
@@ -37,6 +46,7 @@ class TeleopConfig:
     mapping_id: str
     calibration_id: str
     device_ids: tuple[str, str]
+    device_paths: tuple[Path, Path]
     axis_indices: tuple[tuple[int, int, int], tuple[int, int, int]]
     deadman_slot: int
     deadman_button: int
@@ -54,14 +64,21 @@ class TeleopConfig:
         if not isinstance(devices, list) or len(devices) != 2:
             raise ValueError("teleop config devices must contain exactly two entries")
         device_ids: list[str] = []
+        device_paths: list[Path] = []
         axis_indices: list[tuple[int, int, int]] = []
         for index, device in enumerate(devices, start=1):
             if not isinstance(device, Mapping):
                 raise ValueError(f"devices[{index}] must be an object")
             device_id = device.get("device_id")
+            device_path = device.get("device_path")
             indices = device.get("axis_indices")
             if not isinstance(device_id, str) or not device_id:
                 raise ValueError(f"devices[{index}].device_id must be non-empty")
+            if not isinstance(device_path, str) or not device_path:
+                raise ValueError(f"devices[{index}].device_path must be non-empty")
+            parsed_path = Path(device_path).expanduser()
+            if not parsed_path.is_absolute():
+                raise ValueError(f"devices[{index}].device_path must be absolute")
             if (
                 not isinstance(indices, list)
                 or len(indices) != 3
@@ -69,10 +86,13 @@ class TeleopConfig:
             ):
                 raise ValueError(f"devices[{index}].axis_indices must contain three indices")
             device_ids.append(device_id)
+            device_paths.append(parsed_path)
             axis_indices.append(tuple(indices))
         deadman = value.get("deadman")
         if not isinstance(deadman, Mapping):
             raise ValueError("teleop config deadman must be an object")
+        if device_paths[0] == device_paths[1]:
+            raise ValueError("devices device_path values must be distinct")
         config = cls(
             orin_host=str(value.get("orin_host", "")),
             orin_port=int(value.get("orin_port", 0)),
@@ -80,6 +100,7 @@ class TeleopConfig:
             mapping_id=str(value.get("mapping_id", "")),
             calibration_id=str(value.get("calibration_id", "")),
             device_ids=(device_ids[0], device_ids[1]),
+            device_paths=(device_paths[0], device_paths[1]),
             axis_indices=(axis_indices[0], axis_indices[1]),
             deadman_slot=int(deadman.get("controller_slot", 0)),
             deadman_button=int(deadman.get("button_index", -1)),
@@ -93,6 +114,35 @@ class TeleopConfig:
         if config.deadman_slot not in (1, 2) or config.deadman_button < 0:
             raise ValueError("deadman must identify a non-negative button on slot 1 or 2")
         return config
+
+
+def select_configured_device_indices(
+    config: TeleopConfig,
+    available: Sequence[ConnectedJoystick],
+) -> tuple[int, int]:
+    selected: list[int] = []
+    for device_id, device_path in zip(
+        config.device_ids, config.device_paths, strict=True
+    ):
+        try:
+            expected_path = device_path.resolve(strict=True)
+        except OSError as exc:
+            raise RuntimeError(f"configured joystick path is unavailable: {device_path}") from exc
+        matches = [
+            device.index
+            for device in available
+            if device.device_id == device_id
+            and device.device_path.resolve(strict=True) == expected_path
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"configured joystick identity did not match exactly one device: "
+                f"{device_id} at {device_path}"
+            )
+        selected.append(matches[0])
+    if len(set(selected)) != len(selected):
+        raise RuntimeError("configured joystick paths must resolve to distinct physical devices")
+    return selected[0], selected[1]
 
 
 def build_joystick_packet(
@@ -133,13 +183,14 @@ def list_pygame_devices() -> list[dict[str, Any]]:
     pygame.joystick.init()
     devices: list[dict[str, Any]] = []
     try:
-        for index in range(pygame.joystick.get_count()):
-            joystick = pygame.joystick.Joystick(index)
+        for connected in _connected_pygame_devices(pygame):
+            joystick = pygame.joystick.Joystick(connected.index)
             joystick.init()
             devices.append(
                 {
-                    "index": index,
-                    "device_id": joystick.get_guid(),
+                    "index": connected.index,
+                    "device_id": connected.device_id,
+                    "device_path": str(connected.device_path),
                     "name": joystick.get_name(),
                     "axis_count": joystick.get_numaxes(),
                     "button_count": joystick.get_numbuttons(),
@@ -159,24 +210,72 @@ def _load_pygame():
     return pygame
 
 
-def _open_configured_devices(pygame: Any, config: TeleopConfig) -> tuple[Any, Any]:
-    available: dict[str, list[Any]] = {}
+def _sdl_joystick_path_function(pygame: Any):
+    sdl_version = tuple(pygame.get_sdl_version())
+    if sdl_version < (2, 24, 0):
+        rendered_version = ".".join(str(part) for part in sdl_version)
+        raise RuntimeError(
+            "stable joystick device paths require SDL 2.24 or newer; "
+            f"loaded SDL {rendered_version}"
+        )
+    candidates: set[Path] = set()
+    maps_path = Path("/proc/self/maps")
+    if maps_path.is_file():
+        for line in maps_path.read_text(encoding="utf-8").splitlines():
+            raw_path = line.split()[-1]
+            if "libSDL2" in raw_path and raw_path.startswith("/"):
+                candidates.add(Path(raw_path))
+    package_root = Path(pygame.__file__).resolve().parent.parent
+    candidates.update((package_root / "pygame.libs").glob("libSDL2-*.so*"))
+
+    for candidate in sorted(candidates):
+        try:
+            library = ctypes.CDLL(str(candidate))
+            function = library.SDL_JoystickPathForIndex
+        except (OSError, AttributeError):
+            continue
+        function.argtypes = [ctypes.c_int]
+        function.restype = ctypes.c_char_p
+        return function
+    raise RuntimeError("pygame SDL does not expose joystick device paths")
+
+
+def _connected_pygame_devices(pygame: Any) -> tuple[ConnectedJoystick, ...]:
+    path_for_index = _sdl_joystick_path_function(pygame)
+    connected: list[ConnectedJoystick] = []
     for index in range(pygame.joystick.get_count()):
         joystick = pygame.joystick.Joystick(index)
         joystick.init()
-        available.setdefault(joystick.get_guid(), []).append(joystick)
-    selected: list[Any] = []
-    used_instances: set[int] = set()
-    for device_id in config.device_ids:
-        candidates = available.get(device_id, [])
-        joystick = next(
-            (item for item in candidates if item.get_instance_id() not in used_instances),
-            None,
+        raw_path = path_for_index(index)
+        if raw_path is None:
+            raise RuntimeError(f"SDL did not report a path for joystick index {index}")
+        connected.append(
+            ConnectedJoystick(
+                index=index,
+                device_id=joystick.get_guid(),
+                device_path=Path(raw_path.decode("utf-8")),
+                instance_id=joystick.get_instance_id(),
+            )
         )
-        if joystick is None:
-            raise RuntimeError(f"configured joystick is not connected: {device_id}")
-        selected.append(joystick)
-        used_instances.add(joystick.get_instance_id())
+    return tuple(connected)
+
+
+def _open_configured_devices(pygame: Any, config: TeleopConfig) -> tuple[Any, Any]:
+    connected = _connected_pygame_devices(pygame)
+    indices = select_configured_device_indices(config, connected)
+    snapshots = {device.index: device for device in connected}
+    selected = tuple(pygame.joystick.Joystick(index) for index in indices)
+    for index, joystick in zip(indices, selected, strict=True):
+        joystick.init()
+        snapshot = snapshots[index]
+        if (
+            joystick.get_instance_id() != snapshot.instance_id
+            or joystick.get_guid() != snapshot.device_id
+        ):
+            for opened in selected:
+                if hasattr(opened, "quit"):
+                    opened.quit()
+            raise RuntimeError("joystick device changed during startup")
     return selected[0], selected[1]
 
 
@@ -196,8 +295,7 @@ def run_teleop(config: TeleopConfig, *, print_every: int = 20) -> None:
     pygame = _load_pygame()
     pygame.init()
     pygame.joystick.init()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setblocking(False)
+    sock: socket.socket | None = None
     destination = (config.orin_host, config.orin_port)
     period_ns = int(1_000_000_000 / config.rate_hz)
     sequence = 0
@@ -208,6 +306,8 @@ def run_teleop(config: TeleopConfig, *, print_every: int = 20) -> None:
     rejected_ack_count = 0
     try:
         devices = _open_configured_devices(pygame, config)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setblocking(False)
         while True:
             pygame.event.pump()
             snapshots = (
@@ -258,6 +358,7 @@ def run_teleop(config: TeleopConfig, *, print_every: int = 20) -> None:
             elif remaining_ns < -period_ns:
                 next_deadline = time.monotonic_ns()
     finally:
-        sock.close()
+        if sock is not None:
+            sock.close()
         pygame.joystick.quit()
         pygame.quit()

@@ -23,6 +23,12 @@ PC 以 20 Hz 发送。Orin 只接受配置的 PC 地址、设备 ID、映射和�
 `(PC地址, session_id, sample_seq)` 检查重复和乱序。PC 的单调时间仅用于来源审计，不能与
 Orin/STM32 时钟直接相减。
 
+PC 本地使用带 USB 序列号的 `/dev/input/by-id/*-event-joystick` 稳定路径把物理手柄绑定到
+slot；该路径不进入 UDP 包。两个同型号手柄可以具有相同 GUID，但必须配置不同路径，且启动时
+同时校验路径、GUID 和 SDL 实例 ID，禁止依赖 SDL 枚举顺序猜测左右。此本地绑定要求 SDL 2.24
+或更新版本；`device_path` 必填的本地配置 schema 是 `excavator_teleop_config.v2`，不改变线上
+`excavator_joystick.v1` 协议。
+
 Orin 收包后以自身 `CLOCK_MONOTONIC` 同时生成专家标签：
 
 ```text

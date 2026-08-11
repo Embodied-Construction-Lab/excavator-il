@@ -12,7 +12,11 @@ dependencies = []
 [project.optional-dependencies]
 collector = ["opencv-python-headless>=4.8,<5", "pyserial>=3.5,<4"]
 teleop = ["pygame>=2.5,<3"]
-training = ["lerobot==0.5.2", "numpy>=1.26,<3", "Pillow>=10"]
+training = [
+    "lerobot @ git+https://github.com/freshmakerzhao/lerobot.git@12b88fce029cc3a8a94b061cd9e790018873c769",
+    "numpy>=1.26,<3",
+    "Pillow>=10",
+]
 test = ["pytest>=8", "pytest-cov>=6", "numpy>=1.26,<3", "Pillow>=10"]
 
 [project.scripts]
