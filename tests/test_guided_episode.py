@@ -441,10 +441,34 @@ def test_system_operations_manage_exact_collector_and_episode_commands(
     operations.build_and_validate("/data/raw/episode_0001")
 
     assert len(popen_calls) == 2
+    teleop_argv = next(call for call in popen_calls if "teleop" in call)
+    assert teleop_argv[1:3] == ["-u", "-m"]
     assert any("kill -TERM 4321" in " ".join(call) for call in run_calls)
     assert any("build-steps" in " ".join(call) for call in run_calls)
     assert any("validate" in " ".join(call) for call in run_calls)
     assert signal_calls
+
+
+def test_inspect_zero_soak_preserves_failed_quality_report(tmp_path, monkeypatch):
+    (tmp_path / "teleop.json").write_text("{}", encoding="utf-8")
+    config = _guided_config(tmp_path)
+    report = {
+        "episode_id": "episode_0001",
+        "passed": False,
+        "failure_reasons": ["new_sensor_state rate is outside its allowed range"],
+    }
+
+    def fake_run(argv, **kwargs):
+        return SimpleNamespace(
+            returncode=3,
+            stdout=json.dumps(report),
+            stderr="",
+        )
+
+    monkeypatch.setattr("excavator_il.guided_episode.subprocess.run", fake_run)
+    operations = SystemGuidedEpisodeOperations(config, output=lambda message: None)
+
+    assert operations.inspect_zero_soak("/data/raw/episode_0001") == report
 
 
 def test_system_operations_only_discard_retake_episode_started_by_this_run(

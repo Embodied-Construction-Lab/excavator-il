@@ -302,21 +302,34 @@ class SystemGuidedEpisodeOperations:
             f"{shlex.join(argv)}"
         )
 
-    def _run_ssh(self, remote_command: str) -> str:
+    def _run_ssh(
+        self,
+        remote_command: str,
+        *,
+        accepted_returncodes: tuple[int, ...] = (0,),
+    ) -> str:
         result = subprocess.run(
             self._ssh_argv(remote_command),
             capture_output=True,
             text=True,
             timeout=30,
         )
-        if result.returncode != 0:
+        if result.returncode not in accepted_returncodes:
             detail = (result.stderr or result.stdout).strip()
             raise RuntimeError(f"remote command failed: {detail}")
         return result.stdout
 
-    def _remote_cli(self, argv: list[str]) -> Mapping[str, Any]:
+    def _remote_cli(
+        self,
+        argv: list[str],
+        *,
+        accepted_returncodes: tuple[int, ...] = (0,),
+    ) -> Mapping[str, Any]:
         executable = str(self._config.orin_executable)
-        output = self._run_ssh(self._in_repo([executable, *argv]))
+        output = self._run_ssh(
+            self._in_repo([executable, *argv]),
+            accepted_returncodes=accepted_returncodes,
+        )
         try:
             response = json.loads(output)
         except json.JSONDecodeError as exc:
@@ -384,6 +397,7 @@ class SystemGuidedEpisodeOperations:
         self._teleop = _LineProcess(
             [
                 sys.executable,
+                "-u",
                 "-m",
                 "excavator_il.cli",
                 "teleop",
@@ -609,7 +623,10 @@ class SystemGuidedEpisodeOperations:
         self._output(json.dumps(report, ensure_ascii=False, indent=2))
 
     def inspect_zero_soak(self, episode_path: str) -> Mapping[str, Any]:
-        return self._remote_cli(["inspect-zero-soak", episode_path])
+        return self._remote_cli(
+            ["inspect-zero-soak", episode_path],
+            accepted_returncodes=(0, 3),
+        )
 
 
 def run_guided_episode(
