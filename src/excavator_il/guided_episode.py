@@ -603,7 +603,7 @@ class SystemGuidedEpisodeOperations:
             and self._collector is not None
             and self._collector.running
         ):
-            self._run_ssh(f"kill -TERM {self._collector_pid}")
+            self._run_ssh(f"kill -TERM -- -{self._collector_pid}")
         self._collector_pid = None
         if self._collector is not None:
             self._collector.wait(timeout_s=15.0)

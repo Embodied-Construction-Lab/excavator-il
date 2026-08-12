@@ -466,7 +466,7 @@ def test_system_operations_manage_exact_collector_and_episode_commands(
     assert len(popen_calls) == 2
     teleop_argv = next(call for call in popen_calls if "teleop" in call)
     assert teleop_argv[1:3] == ["-u", "-m"]
-    assert any("kill -TERM 4321" in " ".join(call) for call in run_calls)
+    assert any("kill -TERM -- -4321" in " ".join(call) for call in run_calls)
     assert any("build-steps" in " ".join(call) for call in run_calls)
     assert any("validate" in " ".join(call) for call in run_calls)
     assert signal_calls
@@ -570,6 +570,7 @@ def test_stop_collector_does_not_kill_remote_pid_after_collector_exited(
 def test_stop_collector_allows_bounded_remote_shutdown_time(tmp_path, monkeypatch):
     config = _guided_config(tmp_path)
     wait_timeouts = []
+    remote_commands = []
 
     class RunningCollector:
         running = True
@@ -580,10 +581,15 @@ def test_stop_collector_allows_bounded_remote_shutdown_time(tmp_path, monkeypatc
     operations = SystemGuidedEpisodeOperations(config, output=lambda message: None)
     operations._collector = RunningCollector()
     operations._collector_pid = 14313
-    monkeypatch.setattr(operations, "_run_ssh", lambda command: "")
+    monkeypatch.setattr(
+        operations,
+        "_run_ssh",
+        lambda command: remote_commands.append(command) or "",
+    )
 
     operations.stop_collector()
 
+    assert remote_commands == ["kill -TERM -- -14313"]
     assert wait_timeouts == [15.0]
 
 
