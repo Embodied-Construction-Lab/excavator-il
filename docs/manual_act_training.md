@@ -154,6 +154,8 @@ excavator-il smoke-infer \
   `[boom, stick, bucket, swing]`。
 
 `smoke-infer` 只对一条离线样本推理，不连接 Orin/STM32。
+将通过校验的 checkpoint 转移到 Orin 做 GPU 兼容性验证时，执行
+[Orin ACT 离线推理操作手册](orin_act_inference.md)，不要从训练环境直接增加串口或运动设备权限。
 
 ## 6. 断点续训
 

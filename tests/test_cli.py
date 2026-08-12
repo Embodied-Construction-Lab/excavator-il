@@ -152,11 +152,15 @@ def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
     pytest.importorskip("lerobot")
     from excavator_il import act_smoke, lerobot_conversion
 
+    inference_arguments = {}
+
+    def infer(**kwargs):
+        inference_arguments.update(kwargs)
+        return _Result()
+
     monkeypatch.setattr(lerobot_conversion, "convert_episodes", lambda *a, **k: _Result())
     monkeypatch.setattr(act_smoke, "run_act_smoke_train_step", lambda **k: _Result())
-    monkeypatch.setattr(
-        act_smoke, "run_act_checkpoint_inference", lambda **k: _Result()
-    )
+    monkeypatch.setattr(act_smoke, "run_act_checkpoint_inference", infer)
 
     assert main(["convert", "ep", "--output-root", "out"]) == 0
     assert main(["smoke-train"]) == 0
@@ -168,8 +172,17 @@ def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
             "dataset",
             "--repo-id",
             "local/dataset",
+            "--warmup-runs",
+            "2",
+            "--timed-runs",
+            "3",
+            "--max-inference-ms",
+            "100",
         ]
     ) == 0
+    assert inference_arguments["warmup_runs"] == 2
+    assert inference_arguments["timed_runs"] == 3
+    assert inference_arguments["max_inference_ms"] == 100.0
     assert capsys.readouterr().out.count('"value": "ok"') == 3
 
 

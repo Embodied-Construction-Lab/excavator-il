@@ -209,6 +209,8 @@ ACT 接口固定为一台前视 RGB、11 维状态、4 维动作
 ACT 训练命令见 [docs/collection_training_runbook.md](docs/collection_training_runbook.md)。
 逐条人工训练、监控、checkpoint 校验和断点续训命令见
 [docs/manual_act_training.md](docs/manual_act_training.md)。
+Orin NVIDIA PyTorch 镜像构建、GPU 自检、checkpoint 传输和只读离线推理见
+[docs/orin_act_inference.md](docs/orin_act_inference.md)。
 每个连续 Training Segment 写成独立 LeRobot Episode，并使用 LeRobot 原生 `action_is_pad` 防止
 ACT 动作块跨越故障边界；转换帧保留 parent Episode、segment 和原始 frame index。
 

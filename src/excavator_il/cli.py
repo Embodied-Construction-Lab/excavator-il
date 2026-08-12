@@ -43,6 +43,9 @@ def _parser() -> argparse.ArgumentParser:
     infer.add_argument("--repo-id", required=True)
     infer.add_argument("--sample-index", type=int, default=0)
     infer.add_argument("--device", default="cpu")
+    infer.add_argument("--warmup-runs", type=int, default=0)
+    infer.add_argument("--timed-runs", type=int, default=1)
+    infer.add_argument("--max-inference-ms", type=float)
 
     synthesize = commands.add_parser(
         "synthesize-episodes",
@@ -149,6 +152,9 @@ def main(argv: list[str] | None = None) -> int:
                 repo_id=args.repo_id,
                 sample_index=args.sample_index,
                 device=args.device,
+                warmup_runs=args.warmup_runs,
+                timed_runs=args.timed_runs,
+                max_inference_ms=args.max_inference_ms,
             )
             _print_json(asdict(result))
         elif args.command == "synthesize-episodes":

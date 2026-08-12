@@ -1,7 +1,9 @@
-"""Small CPU-only ACT compatibility check for the excavator feature contract."""
+"""Offline ACT compatibility checks for the excavator feature contract."""
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
+import time
 
 import torch
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -30,9 +32,16 @@ class ActCheckpointInferenceResult:
     action_min: float
     action_max: float
     all_finite: bool
+    inference_ms: float
+    inference_min_ms: float
+    inference_max_ms: float
+    timed_runs: int
+    peak_cuda_memory_mb: float | None
 
 
 def _validate_excavator_act_contract(config: object, dataset: LeRobotDataset) -> None:
+    if config.chunk_size != 20 or config.n_action_steps != 10:
+        raise ValueError("ACT checkpoint must use chunk_size=20 and n_action_steps=10")
     required_inputs = {
         "observation.state": (len(STATE_FIELDS),),
         "observation.images.front": None,
@@ -73,6 +82,33 @@ def _validate_excavator_act_contract(config: object, dataset: LeRobotDataset) ->
         raise ValueError(f"dataset front RGB shape is invalid: {image_shape}")
     if policy_image_shape != (3, image_shape[0], image_shape[1]):
         raise ValueError("checkpoint and dataset front RGB shapes do not match")
+
+
+def _summarize_action_chunks(action_chunks: list[torch.Tensor]) -> tuple[float, float]:
+    if not action_chunks or not all(
+        bool(torch.isfinite(chunk).all().item()) for chunk in action_chunks
+    ):
+        raise ValueError("ACT checkpoint inference produced non-finite actions")
+    action_range = (
+        min(float(chunk.min().item()) for chunk in action_chunks),
+        max(float(chunk.max().item()) for chunk in action_chunks),
+    )
+    if action_range[0] < -1.000001 or action_range[1] > 1.000001:
+        raise ValueError(f"ACT checkpoint inference action range {action_range} exceeds [-1, 1]")
+    return action_range
+
+
+def _enforce_inference_budget(
+    inference_max_ms: float, max_inference_ms: float | None
+) -> None:
+    if max_inference_ms is not None:
+        if not math.isfinite(max_inference_ms) or max_inference_ms <= 0:
+            raise ValueError("maximum inference time must be positive")
+        if inference_max_ms > max_inference_ms:
+            raise ValueError(
+                f"ACT inference {inference_max_ms:.3f} ms exceeds "
+                f"{max_inference_ms:.3f} ms budget"
+            )
 
 
 def run_act_smoke_train_step(
@@ -141,6 +177,9 @@ def run_act_checkpoint_inference(
     repo_id: str,
     sample_index: int = 0,
     device: str = "cpu",
+    warmup_runs: int = 0,
+    timed_runs: int = 1,
+    max_inference_ms: float | None = None,
 ) -> ActCheckpointInferenceResult:
     """Reload one ACT checkpoint and infer on one real LeRobotDataset sample."""
     checkpoint = Path(checkpoint_path)
@@ -149,6 +188,9 @@ def run_act_checkpoint_inference(
         raise ValueError(f"ACT checkpoint does not exist: {checkpoint}")
     if not root.is_dir():
         raise ValueError(f"LeRobotDataset root does not exist: {root}")
+    if warmup_runs < 0 or timed_runs < 1:
+        raise ValueError("warmup runs must be non-negative and timed runs must be positive")
+    _enforce_inference_budget(0.0, max_inference_ms)
     dataset = LeRobotDataset(repo_id=repo_id, root=root, video_backend="pyav")
     if sample_index < 0 or sample_index >= dataset.num_frames:
         raise ValueError(
@@ -177,28 +219,55 @@ def run_act_checkpoint_inference(
         raise ValueError(
             f"dataset sample is missing ACT input features: {', '.join(sorted(missing))}"
         )
-    processed = preprocessor(batch)
     policy.reset()
     policy.eval()
     with torch.no_grad():
-        normalized_chunk = policy.predict_action_chunk(processed)
-        action_chunk = postprocessor(normalized_chunk)
+        for _ in range(warmup_runs):
+            processed = preprocessor(batch)
+            policy.predict_action_chunk(processed)
+            policy.reset()
+    policy.reset()
+    if device.startswith("cuda"):
+        torch.cuda.synchronize(device)
+        torch.cuda.reset_peak_memory_stats(device)
+    durations_ms: list[float] = []
+    action_chunks: list[torch.Tensor] = []
+    with torch.no_grad():
+        for _ in range(timed_runs):
+            started = time.perf_counter()
+            processed = preprocessor(batch)
+            normalized_chunk = policy.predict_action_chunk(processed)
+            action_chunk = postprocessor(normalized_chunk)
+            if device.startswith("cuda"):
+                torch.cuda.synchronize(device)
+            durations_ms.append((time.perf_counter() - started) * 1000.0)
+            action_chunks.append(action_chunk)
+            policy.reset()
+    peak_cuda_memory_mb = (
+        torch.cuda.max_memory_allocated(device) / 1024**2
+        if device.startswith("cuda")
+        else None
+    )
     action_dim = policy.config.output_features["action"].shape[0]
     expected_shape = (1, policy.config.chunk_size, action_dim)
     if tuple(action_chunk.shape) != expected_shape:
         raise ValueError(
             f"ACT action chunk shape {tuple(action_chunk.shape)} does not match {expected_shape}"
         )
-    finite = bool(torch.isfinite(action_chunk).all().item())
-    if not finite:
-        raise ValueError("ACT checkpoint inference produced non-finite actions")
+    action_min, action_max = _summarize_action_chunks(action_chunks)
+    _enforce_inference_budget(max(durations_ms), max_inference_ms)
     return ActCheckpointInferenceResult(
         checkpoint_path=checkpoint,
         dataset_root=root,
         sample_index=sample_index,
         predicted_chunk_shape=tuple(action_chunk.shape),
         action_dim=action_dim,
-        action_min=float(action_chunk.min().item()),
-        action_max=float(action_chunk.max().item()),
-        all_finite=finite,
+        action_min=action_min,
+        action_max=action_max,
+        all_finite=True,
+        inference_ms=sum(durations_ms) / len(durations_ms),
+        inference_min_ms=min(durations_ms),
+        inference_max_ms=max(durations_ms),
+        timed_runs=timed_runs,
+        peak_cuda_memory_mb=peak_cuda_memory_mb,
     )
