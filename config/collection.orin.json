@@ -1,6 +1,6 @@
 {
   "schema_version": "excavator_collection_config.v1",
-  "data_root": "~/excavator-data/raw",
+  "data_root": "/home/jetson16/workspace_excavator/data/excavator-data",
   "joystick_udp": {
     "bind_host": "0.0.0.0",
     "port": 18090,
@@ -27,7 +27,7 @@
     "fps": 30,
     "jpeg_quality": 95
   },
-  "episode_control_socket": "~/.local/run/excavator-il/collector.sock",
+  "episode_control_socket": "/home/jetson16/.local/run/excavator-il/collector.sock",
   "episode_defaults": {
     "dig_target_m": [0.8, 0.0, -0.2],
     "material_id": "soil_default",

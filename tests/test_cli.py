@@ -12,6 +12,12 @@ class _Result:
     value: str = "ok"
 
 
+@dataclass(frozen=True)
+class _ZeroResult:
+    passed: bool
+    episode_id: str
+
+
 def test_validate_command_prints_machine_readable_report(rgb_episode_factory, capsys):
     episode = rgb_episode_factory()
 
@@ -111,6 +117,19 @@ def test_diagnose_joysticks_returns_nonzero_when_mapping_does_not_match(monkeypa
     )
 
     assert main(["diagnose-joysticks"]) == 3
+
+
+def test_inspect_zero_soak_returns_nonzero_for_unsafe_episode(monkeypatch, capsys):
+    from excavator_il import zero_soak
+
+    monkeypatch.setattr(
+        zero_soak,
+        "inspect_zero_command_episode",
+        lambda path: _ZeroResult(passed=False, episode_id=str(path)),
+    )
+
+    assert main(["inspect-zero-soak", "episode_0007"]) == 3
+    assert json.loads(capsys.readouterr().out)["passed"] is False
 
 
 def test_diagnose_joysticks_handles_operator_interrupt_without_traceback(

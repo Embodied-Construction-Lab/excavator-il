@@ -18,6 +18,7 @@
     "collector_ready_timeout_s": 8,
     "ack_timeout_s": 8,
     "teleop_print_every": 1,
+    "zero_soak_duration_s": 30,
     "log_dir": "../logs"
   }
 }

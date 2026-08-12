@@ -78,6 +78,19 @@ find /dev/input/by-id -maxdepth 1 -type l -name '*-event-joystick' \
 
 ## 3. 双端采集
 
+发动机关闭、Orin/STM32/传感器/相机上电且 deadman 保持释放时，先运行一次自动零命令 soak：
+
+```bash
+conda activate excavator-il
+python scripts/run_zero_command_soak.py
+```
+
+脚本根据 `config/guided_episode.pc.json` 的 `runtime.zero_soak_duration_s`（默认 30 秒）自动启动
+Collector、诊断 Episode 和 teleop，全程监视 deadman，结束后以
+`aborted: zero_command_soak_complete` 保留原始证据，并检查 STM32/新状态/手柄/相机频率分别约为
+20/10/20/30 Hz。任一非零串口命令、非零 STM32 动作回显、有效专家动作、手柄超时、解析/写入
+失败、传感器无效或序号异常都会让脚本非零退出。该 Episode 永不进入训练集。
+
 首次真机短 Episode 建议从 PC 使用引导脚本。它自行启动并清理 Orin Collector 和 PC teleop，
 先创建处于记录待命状态的 Episode，再启动 teleop 并通过 ACK 门禁；正常完成后自动运行
 `build-steps`、`validate` 并保存
@@ -103,7 +116,7 @@ Episode 标为 `pending_review`，随后才提示输入 `成功/s`、`失败/f` 
 异常或人工 `Ctrl+C` 中止仍保留原始证据。该条诊断数据不进入 Pilot 训练集。
 
 原始 Episode 保存在 Orin 的 `config/collection.orin.json` 中 `data_root` 指定的位置；当前为
-`~/excavator-data/raw`，即 `/home/jetson16/excavator-data/raw`。PC 的引导、teleop 和校验输出
+`/home/jetson16/workspace_excavator/data/excavator-data`。PC 的引导、teleop 和校验输出
 仅保存在 `config/guided_episode.pc.json` 的 `runtime.log_dir`；当前解析为仓库内 `logs/`。
 
 常规多条 Episode 采集仍可使用以下分端命令。
@@ -150,8 +163,10 @@ excavator-il episode --config config/collection.orin.json abort \
 不超过 100 ms、图像年龄不超过 120 ms：
 
 ```bash
-excavator-il build-steps ~/excavator-data/raw/episode_0001
-excavator-il validate ~/excavator-data/raw/episode_0001
+excavator-il build-steps \
+  /home/jetson16/workspace_excavator/data/excavator-data/episode_0001
+excavator-il validate \
+  /home/jetson16/workspace_excavator/data/excavator-data/episode_0001
 ```
 
 `quality_report.json` 给出各流频率/周期、序号缺口、乱序、串口解析失败、命令写失败、手柄
@@ -163,7 +178,7 @@ excavator-il validate ~/excavator-data/raw/episode_0001
 
 ```bash
 excavator-il convert \
-  ~/excavator-data/raw/episode_0001 \
+  /home/jetson16/workspace_excavator/data/excavator-data/episode_0001 \
   --output-root data/lerobot/excavator_rgb_v1 \
   --repo-id local/excavator_rgb_v1 --fps 10
 

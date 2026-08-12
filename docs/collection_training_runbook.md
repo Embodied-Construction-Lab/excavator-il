@@ -215,6 +215,20 @@ SSH，并重启对应的 VS Code Server/进程，再检查其实际环境。不�
 当前机器开机后液压即具备动作条件，不存在额外的“液压安全锁定/解锁”软件阶段。第一条短
 Episode 从 PC 运行引导脚本，作业区必须无人且急停可立即操作：
 
+在发动机关闭、所有采集硬件上电且 deadman 保持释放时，先运行 30 秒零命令 soak：
+
+```bash
+conda activate excavator-il
+cd /home/zhaoshuai/workspace_uinty/RL_prj/excavator-il
+python scripts/run_zero_command_soak.py
+```
+
+持续时间由 `config/guided_episode.pc.json` 的 `runtime.zero_soak_duration_s` 设置。脚本创建并保留
+一条明确标记为 `aborted: zero_command_soak_complete` 的诊断 Episode，自动检查全部 STM32 串口
+命令和遥测动作回显为零、无有效专家动作、20/10/20/30 Hz 流频率、无 joystick timeout、无解析/
+写入/传感器/序号错误。该条禁止执行 `build-steps` 或加入训练集。脚本返回 0 后，才能进入以下
+deadman 动作诊断：
+
 ```bash
 conda activate excavator-il
 cd /home/zhaoshuai/workspace_uinty/RL_prj/excavator-il
@@ -240,8 +254,8 @@ python scripts/collect_guided_episode.py
 Collector 或 teleop 的本地日志保存在 `logs/`，该目录不进入 Git。
 
 原始 Episode 只保存在 Orin；根目录由 Orin 的 `config/collection.orin.json` 中 `data_root`
-设置。当前 `~/excavator-data/raw` 在 `jetson16` 用户下展开为
-`/home/jetson16/excavator-data/raw`。PC 的 `config/guided_episode.pc.json` 中
+设置。当前为 `/home/jetson16/workspace_excavator/data/excavator-data`。PC 的
+`config/guided_episode.pc.json` 中
 `runtime.log_dir` 只控制引导、teleop 和校验日志位置，不是数据集存储位置。迁移机器时必须显式
 检查这两个配置，不能仅复制 shell 历史中的绝对路径。
 
@@ -299,7 +313,7 @@ excavator-il episode --config config/collection.orin.json abort \
 在保存 Episode 的机器上执行：
 
 ```bash
-EPISODE=~/excavator-data/raw/episode_0001
+EPISODE=/home/jetson16/workspace_excavator/data/excavator-data/episode_0001
 
 excavator-il build-steps "$EPISODE"
 excavator-il validate "$EPISODE"
@@ -314,7 +328,7 @@ python -m json.tool "$EPISODE/quality_report.json"
 批量校验时逐条处理，任一命令失败都不应把该 Episode 加入训练集：
 
 ```bash
-for episode in ~/excavator-data/raw/episode_*; do
+for episode in /home/jetson16/workspace_excavator/data/excavator-data/episode_*; do
   excavator-il build-steps "$episode" || break
   excavator-il validate "$episode" || break
 done

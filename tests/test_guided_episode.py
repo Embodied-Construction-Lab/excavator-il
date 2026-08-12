@@ -92,6 +92,7 @@ def test_guided_episode_config_resolves_pc_paths_and_validates_contract(tmp_path
                     "collector_ready_timeout_s": 8,
                     "ack_timeout_s": 8,
                     "teleop_print_every": 1,
+                    "zero_soak_duration_s": 30,
                     "log_dir": "../logs",
                 },
             }
@@ -106,6 +107,7 @@ def test_guided_episode_config_resolves_pc_paths_and_validates_contract(tmp_path
     assert config.orin_ssh_host == "operator@192.0.2.10"
     assert config.dig_target_m == (0.8, 0.0, -0.2)
     assert config.teleop_print_every == 1
+    assert config.zero_soak_duration_s == 30
 
 
 def test_guided_episode_config_rejects_unsafe_or_inconsistent_values(tmp_path):

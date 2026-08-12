@@ -58,6 +58,7 @@ class GuidedEpisodeConfig:
     teleop_print_every: int
     log_dir: Path
     failure_reason: str = "diagnostic_task_failed"
+    zero_soak_duration_s: int = 30
 
     @classmethod
     def load(cls, path: str | Path) -> "GuidedEpisodeConfig":
@@ -117,6 +118,10 @@ class GuidedEpisodeConfig:
             failure_reason=_text(
                 episode.get("failure_reason", "diagnostic_task_failed"),
                 "episode.failure_reason",
+            ),
+            zero_soak_duration_s=_positive_int(
+                runtime.get("zero_soak_duration_s", 30),
+                "runtime.zero_soak_duration_s",
             ),
         )
 
@@ -431,6 +436,35 @@ class SystemGuidedEpisodeOperations:
     def wait_for_deadman_released(self) -> None:
         self._wait_for_deadman(False)
 
+    def monitor_deadman_released(self, duration_s: int) -> None:
+        """Require continuous safe ACK samples for one bounded soak interval."""
+        if self._teleop is None:
+            raise RuntimeError("teleop is not running")
+        if duration_s <= 0:
+            raise ValueError("duration_s must be positive")
+        deadline = time.monotonic() + duration_s
+        sample_count = 0
+        while True:
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0:
+                break
+            self._teleop_cursor, line = self._teleop.wait_for(
+                lambda candidate: self._ACK.search(candidate) is not None,
+                min(1.0, remaining_s),
+                after_index=self._teleop_cursor,
+            )
+            match = self._ACK.search(line)
+            assert match is not None
+            if match.group("deadman") == "True":
+                raise RuntimeError("zero-command soak failed: deadman was pressed")
+            if int(match.group("rejected")):
+                raise RuntimeError("zero-command soak failed: Collector rejected an ACK")
+            sample_count += 1
+        if sample_count < duration_s * 15:
+            raise RuntimeError(
+                f"zero-command soak received only {sample_count} teleop samples"
+            )
+
     def start_episode(self) -> str:
         response = self._remote_cli(
             [
@@ -565,6 +599,9 @@ class SystemGuidedEpisodeOperations:
             log.write(f"=== {episode_path} ===\n")
             log.write("\n".join(outputs) + "\n")
         self._output(json.dumps(report, ensure_ascii=False, indent=2))
+
+    def inspect_zero_soak(self, episode_path: str) -> Mapping[str, Any]:
+        return self._remote_cli(["inspect-zero-soak", episode_path])
 
 
 def run_guided_episode(

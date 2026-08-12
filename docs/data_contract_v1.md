@@ -99,6 +99,11 @@ episode_xxxx/
 配置时限而触发的明确安全回零；只要大于零，该 Episode 就不满足训练校验条件。局域网通信仍会受
 Wi-Fi 重传、系统队列和进程调度影响，不能因为平均延迟较低而放宽 fail-closed 超时。
 
+正式 deadman 动作前的零命令 soak 使用独立的 `inspect-zero-soak` 质量入口。它必须以
+`aborted: zero_command_soak_complete` 保留诊断原始流，并要求串口下发六轴和 STM32 回显四动作
+始终为零、`action_valid` 始终为假、无手柄超时/解析/写入/传感器/序号错误，同时满足约
+20 Hz STM32、10 Hz 新状态、20 Hz 手柄和 25～35 Hz 相机。该条不是失败训练样本，也不得转换。
+
 ## 最终训练接口
 
 每个 10 Hz 样本包含以下内容。

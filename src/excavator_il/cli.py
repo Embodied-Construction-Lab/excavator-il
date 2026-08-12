@@ -49,6 +49,11 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--max-action-age-ms", type=float, default=100.0)
     build.add_argument("--max-camera-age-ms", type=float, default=120.0)
 
+    zero_soak = commands.add_parser(
+        "inspect-zero-soak", help="validate one deadman-released diagnostic Episode"
+    )
+    zero_soak.add_argument("episode")
+
     episode = commands.add_parser("episode", help="control a running local Collector")
     episode.add_argument("--config", default="config/collection.orin.json")
     episode_commands = episode.add_subparsers(dest="episode_command", required=True)
@@ -146,6 +151,12 @@ def main(argv: list[str] | None = None) -> int:
                 max_camera_age_ms=args.max_camera_age_ms,
             )
             _print_json(asdict(report))
+        elif args.command == "inspect-zero-soak":
+            from .zero_soak import inspect_zero_command_episode
+
+            report = inspect_zero_command_episode(args.episode)
+            _print_json(asdict(report))
+            return 0 if report.passed else 3
         elif args.command == "episode":
             from .collector.client import send_episode_command
             from .collector.config import load_collection_config
