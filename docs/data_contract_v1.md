@@ -84,6 +84,7 @@ episode_xxxx/
 ├── command_tx.jsonl
 ├── control.csv
 ├── steps.csv
+├── training_segments.json
 ├── camera_front/
 ├── camera_front_timestamps.csv
 └── quality_report.json
@@ -96,8 +97,16 @@ episode_xxxx/
 最终分别写为 `complete`、`failed`、`aborted`，`pending_review` 不得进入构建、校验或转换。
 
 `quality_report.json` 必须记录 `joystick_timeout_count`。该值统计 Episode 内由于 PC 手柄包超过
-配置时限而触发的明确安全回零；只要大于零，该 Episode 就不满足训练校验条件。局域网通信仍会受
-Wi-Fi 重传、系统队列和进程调度影响，不能因为平均延迟较低而放宽 fail-closed 超时。
+配置时限而触发的明确安全回零。运行时仍在 150 ms 后立即回零；离线流程不得插值或把旧手柄动作
+冒充为专家标签。若每个事件都有 Orin 单调时钟、串口写成功和连续 10 个有效手柄包的恢复证据，
+`build-steps` 排除故障至恢复之间的状态并在 `training_segments.json` 中建立边界；无法定位或
+确认恢复的事件仍使训练校验失败。局域网平均延迟不能用于放宽 fail-closed 超时。
+
+`training_segments.json` 的 schema 为 `excavator_training_segments.v1`。它记录 parent Episode、
+安全事件、恢复时刻、被排除的样本数和连续训练片段。每个片段使用 `steps.csv` 的半开 frame 范围
+`[start_frame_index, end_frame_index_exclusive)`；片段内部 `state_seq` 必须连续，片段不得跨安全
+事件或包含恢复隔离窗口。原始 JSONL 和 `episode.json` 不因切段而改写。旧 Episode 若没有该清单
+且 `steps.csv` 存在 `state_seq` 缺口，必须用当前版本重新执行 `build-steps`，禁止按单个连续片段转换。
 
 正式 deadman 动作前的零命令 soak 使用独立的 `inspect-zero-soak` 质量入口。它必须以
 `aborted: zero_command_soak_complete` 保留诊断原始流，并要求串口下发六轴和 STM32 回显四动作
@@ -166,7 +175,13 @@ pump_percent,sensor_valid,control_mode
 ```
 
 第一版训练 episode 中 `sensor_valid` 必须为 `1`，`control_mode` 必须为
-`manual_joystick`。无效帧仍应留在 Orin 原始记录中，但不得写进供 ACT 转换的 `steps.csv`。
+`manual_joystick`。无效帧仍应留在 Orin 原始记录中，但不得写进供 ACT 转换的 `steps.csv`；若
+无效帧位于中间，相邻有效帧必须属于不同 Training Segment，不能压缩成看似连续的 10 Hz 序列。
+
+每个 Training Segment 转换为独立 LeRobot Episode。LeRobot 根据 Episode 边界限制 ACT 的未来
+action delta indices，并生成 `action_is_pad`；ACT loss 使用该 mask 忽略越界动作。转换后的帧额外
+保存 `source.episode_id`、`source.segment_id` 和 `source.frame_index`，用于回溯原始数据。来自同一
+parent Episode 的所有片段必须整体进入 train、validation 或 test，禁止跨集合分配。
 
 ## `episode.json`
 

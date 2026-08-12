@@ -4,6 +4,7 @@ import json
 from PIL import Image
 
 from excavator_il.episode_builder import build_steps
+from excavator_il.training_segments import locate_joystick_timeout_events
 from excavator_il.stm32_protocol import STM32_TELEMETRY_FIELDS
 
 
@@ -136,3 +137,144 @@ def test_build_steps_uses_only_new_state_and_latest_causal_action_and_image(tmp_
     assert quality["training_step_count"] == 1
     assert quality["camera_queue_drop_count"] == 0
     assert quality["joystick_timeout_count"] == 1
+
+
+def test_build_steps_splits_around_recovered_joystick_timeout(tmp_path):
+    episode = tmp_path / "episode_0005"
+    camera = episode / "camera_front"
+    camera.mkdir(parents=True)
+
+    telemetry_template = {field: 0 for field in STM32_TELEMETRY_FIELDS}
+    telemetry_template.update(
+        {
+            "schema_version": "stm32_control_telemetry.v2",
+            "sensor_is_new": 1,
+            "control_mode": 1,
+            "command_valid": 1,
+            "control_enabled": 1,
+            "rs485_ok": 1,
+            "dwj_ok": 1,
+            "imu_ok": 1,
+        }
+    )
+    stm32_records = []
+    actions = []
+    camera_rows = []
+    for index in range(6):
+        state_ns = 1_000_000_000 + index * 100_000_000
+        telemetry = {
+            **telemetry_template,
+            "sensor_seq": 10 + index,
+            "sensor_stamp_ms": 5_000 + index * 100,
+        }
+        stm32_records.append(
+            {
+                "episode_id": "episode_0005",
+                "raw_frame_seq": index,
+                "orin_receive_monotonic_ns": state_ns,
+                "parse_ok": True,
+                "parse_error": "",
+                "raw_payload": "fixture",
+                "telemetry": telemetry,
+            }
+        )
+        actions.append(
+            {
+                "episode_id": "episode_0005",
+                "action_seq": index,
+                "source_joystick_sample_seq": index,
+                "action_stamp_monotonic_ns": state_ns - 10_000_000,
+                "action_boom": 0.1,
+                "action_stick": 0.2,
+                "action_bucket": 0.3,
+                "action_swing": 0.4,
+                "action_valid": True,
+                "mapping_id": "dual_stick.v1",
+                "calibration_id": "raw.v1",
+            }
+        )
+        image_name = f"{index:06d}.jpg"
+        Image.new("RGB", (32, 24), color=(index, index, index)).save(
+            camera / image_name
+        )
+        camera_rows.append(
+            f"{index},{state_ns - 5_000_000},camera_front/{image_name}\n"
+        )
+
+    (episode / "stm32_raw.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in stm32_records),
+        encoding="utf-8",
+    )
+    (episode / "expert_action.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in actions),
+        encoding="utf-8",
+    )
+    (episode / "camera_front_timestamps.csv").write_text(
+        "camera_frame_index,camera_stamp_monotonic_ns,image_path\n"
+        + "".join(camera_rows),
+        encoding="utf-8",
+    )
+    (episode / "command_tx.jsonl").write_text(
+        json.dumps(
+            {
+                "command_seq": 50,
+                "command_tx_monotonic_ns": 1_250_000_000,
+                "command_kind": "safe_zero:joystick_timeout",
+                "write_ok": True,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    joystick_records = [
+        {
+            "joystick_sample_seq": index,
+            "orin_receive_monotonic_ns": 1_260_000_000 + index * 10_000_000,
+            "parse_ok": True,
+            "parse_error": "",
+        }
+        for index in range(10)
+    ]
+    (episode / "joystick_raw.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in joystick_records),
+        encoding="utf-8",
+    )
+
+    report = build_steps(episode)
+
+    segments = json.loads(
+        (episode / "training_segments.json").read_text(encoding="utf-8")
+    )
+    assert report.training_step_count == 5
+    assert report.training_segment_count == 2
+    assert report.excluded_training_step_count == 1
+    assert report.rejection_reasons["safety_event_quarantine"] == 1
+    assert [segment["step_count"] for segment in segments["segments"]] == [3, 2]
+    assert segments["segments"][0]["end_frame_index_exclusive"] == 3
+    assert segments["segments"][1]["start_frame_index"] == 3
+    assert segments["fault_events"][0]["recovered"] is True
+
+
+def test_timeout_recovery_requires_successful_safe_zero_write():
+    events = locate_joystick_timeout_events(
+        [
+            {
+                "command_kind": "safe_zero:joystick_timeout",
+                "command_tx_monotonic_ns": 1_000,
+                "write_ok": False,
+            }
+        ],
+        [
+            {
+                "joystick_sample_seq": sequence,
+                "orin_receive_monotonic_ns": 1_001 + sequence,
+                "parse_ok": True,
+            }
+            for sequence in range(10)
+        ],
+    )
+
+    assert len(events) == 1
+    assert events[0].event_stamp_monotonic_ns == 1_000
+    assert events[0].recovery_stamp_monotonic_ns is None
+    assert events[0].recovered is False

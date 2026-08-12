@@ -28,6 +28,7 @@ STATE_FIELDS = (
 
 @dataclass(frozen=True)
 class ConversionSummary:
+    source_episode_count: int
     episode_count: int
     frame_count: int
     fps: int
@@ -88,6 +89,21 @@ def convert_episodes(
             "shape": image_shape,
             "names": ["height", "width", "channel"],
         },
+        "source.episode_id": {
+            "dtype": "string",
+            "shape": (1,),
+            "names": None,
+        },
+        "source.segment_id": {
+            "dtype": "string",
+            "shape": (1,),
+            "names": None,
+        },
+        "source.frame_index": {
+            "dtype": "string",
+            "shape": (1,),
+            "names": None,
+        },
     }
     dataset = LeRobotDataset.create(
         repo_id=repo_id,
@@ -102,35 +118,46 @@ def convert_episodes(
 
     frame_count = 0
     try:
-        for episode_path in validated_paths:
+        for episode_path, report in zip(validated_paths, reports, strict=True):
             metadata = json.loads((episode_path / "episode.json").read_text(encoding="utf-8"))
             steps = _read_rows(episode_path / "steps.csv")
             camera_rows = _read_rows(episode_path / "camera_front_timestamps.csv")
             image_paths = _causal_image_paths(episode_path, steps, camera_rows)
             task = f"excavate {metadata['material_id']} at configured dig target"
 
-            for step, image_path in zip(steps, image_paths, strict=True):
-                with Image.open(image_path) as image:
-                    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
-                dataset.add_frame(
-                    {
-                        "observation.state": np.asarray(
-                            [float(step[field]) for field in STATE_FIELDS], dtype=np.float32
-                        ),
-                        "action": np.asarray(
-                            [float(step[field]) for field in ACTION_FIELDS], dtype=np.float32
-                        ),
-                        "observation.images.front": rgb,
-                        "task": task,
-                    }
-                )
-                frame_count += 1
-            dataset.save_episode()
+            for segment in report.training_segments:
+                start = segment.start_frame_index
+                end = segment.end_frame_index_exclusive
+                for step, image_path in zip(
+                    steps[start:end], image_paths[start:end], strict=True
+                ):
+                    with Image.open(image_path) as image:
+                        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+                    dataset.add_frame(
+                        {
+                            "observation.state": np.asarray(
+                                [float(step[field]) for field in STATE_FIELDS],
+                                dtype=np.float32,
+                            ),
+                            "action": np.asarray(
+                                [float(step[field]) for field in ACTION_FIELDS],
+                                dtype=np.float32,
+                            ),
+                            "observation.images.front": rgb,
+                            "source.episode_id": metadata["episode_id"],
+                            "source.segment_id": segment.segment_id,
+                            "source.frame_index": step["frame_index"],
+                            "task": task,
+                        }
+                    )
+                    frame_count += 1
+                dataset.save_episode()
     finally:
         dataset.finalize()
 
     return ConversionSummary(
-        episode_count=len(validated_paths),
+        source_episode_count=len(validated_paths),
+        episode_count=sum(report.training_segment_count for report in reports),
         frame_count=frame_count,
         fps=fps,
         output_root=root,

@@ -263,7 +263,9 @@ Wi-Fi 局域网避免了公网路由，但不是实时总线：无线信道争�
 Orin 进程调度都可能把若干 20 Hz 包延后后再成批交付。`episode_0004` 中 PC 采样间隔仍约
 49.9 ms，而 Orin 应用层一次接收间隔达到 167 ms，随后出现约 16 ms 的成批到达；现有证据只能
 确认延迟发生在 PC 采样之后，不能把无线传输与 Orin 调度精确分开。150 ms 超时继续保持安全
-门槛；`quality_report.json` 的 `joystick_timeout_count` 只要大于零，`validate` 就会拒绝该条。
+门槛。离线构建对每个 timeout 要求可定位的安全回零和连续 10 个有效手柄包作为恢复证据，排除
+恢复窗口并生成 Training Segment；事件无法定位或恢复时 `validate` 拒绝该条。不要通过插值、
+沿用旧动作或直接忽略 timeout 计数来挽救数据。
 
 ### 3.2 常规分端命令
 
@@ -359,6 +361,9 @@ excavator-il convert \
 ```
 
 输出目录必须是新的空目录；不要在已有 LeRobotDataset 上重复运行转换。
+输入列表按原始 Episode 分配集合；同一 parent Episode 产生的所有 Training Segment 会转换为
+多个 LeRobot Episode，但必须留在同一个 train/val/test 集合。LeRobot 原生 Episode 边界会限制
+ACT future-action delta indices，并通过 `action_is_pad` 屏蔽片段末端越界动作。
 
 ## 6. ACT 训练
 

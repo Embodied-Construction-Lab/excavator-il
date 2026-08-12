@@ -171,8 +171,9 @@ excavator-il validate \
 
 `quality_report.json` 给出各流频率/周期、序号缺口、乱序、串口解析失败、命令写失败、手柄
 超时安全回零次数 `joystick_timeout_count`、
-传感器无效数、动作/图像年龄分布，以及可训练样本数和拒绝原因。未通过校验的 Episode 不应转换。
-任一 `joystick_timeout_count > 0` 都会使校验失败，不能通过放宽 150 ms 安全超时来掩盖链路抖动。
+传感器无效数、动作/图像年龄分布，以及可训练样本数、片段数和拒绝原因。150 ms 安全回零门不
+放宽；能定位并确认连续恢复的孤立事件会生成 `training_segments.json`，只隔离故障窗口，无法
+恢复的事件仍校验失败。未通过校验的 Episode 不应转换。
 
 ## 5. 转换与 ACT 冒烟
 
@@ -189,6 +190,8 @@ ACT 接口固定为一台前视 RGB、11 维状态、4 维动作
 `[boom, stick, bucket, swing]`，训练频率 10 Hz。详细字段和时钟语义见
 [docs/data_contract_v1.md](docs/data_contract_v1.md)。下一阶段的采集数量、质量门槛、数据集划分和
 ACT 训练命令见 [docs/collection_training_runbook.md](docs/collection_training_runbook.md)。
+每个连续 Training Segment 写成独立 LeRobot Episode，并使用 LeRobot 原生 `action_is_pad` 防止
+ACT 动作块跨越故障边界；转换帧保留 parent Episode、segment 和原始 frame index。
 
 ## 6. STM32 固件配套
 

@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .raw_episode import STEP_FIELDS
+from .training_segments import (
+    DEFAULT_RECOVERY_JOYSTICK_SAMPLES,
+    build_training_segment_manifest,
+    locate_joystick_timeout_events,
+    state_is_quarantined,
+)
 
 
 @dataclass(frozen=True)
@@ -35,6 +41,8 @@ class StepBuildReport:
     camera_age_ms: Mapping[str, float]
     camera_queue_drop_count: int
     disk_queue_drop_count: int
+    training_segment_count: int
+    excluded_training_step_count: int
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -183,6 +191,11 @@ def build_steps(
     camera_stamps = [int(item["camera_stamp_monotonic_ns"]) for item in cameras]
     joystick_records = _read_optional_jsonl(episode / "joystick_raw.jsonl")
     command_records = _read_optional_jsonl(episode / "command_tx.jsonl")
+    safety_events = locate_joystick_timeout_events(
+        command_records,
+        joystick_records,
+        recovery_sample_count=DEFAULT_RECOVERY_JOYSTICK_SAMPLES,
+    )
 
     episode_id = str(stm32_records[0].get("episode_id", episode.name))
     output_rows: list[dict[str, Any]] = []
@@ -206,6 +219,9 @@ def build_steps(
         seen_sensor_sequences.add(sensor_seq)
 
         state_receive_ns = int(raw_record["orin_receive_monotonic_ns"])
+        if state_is_quarantined(state_receive_ns, safety_events):
+            rejection_reasons["safety_event_quarantine"] += 1
+            continue
         if not all(int(telemetry.get(field, 0)) == 1 for field in ("rs485_ok", "dwj_ok", "imu_ok")):
             rejection_reasons["sensor_invalid"] += 1
             continue
@@ -272,6 +288,17 @@ def build_steps(
         details = ", ".join(f"{key}={value}" for key, value in rejection_reasons.items())
         raise ValueError(f"episode contains no eligible training steps ({details})")
     _write_steps(episode / "steps.csv", output_rows)
+    segment_manifest = build_training_segment_manifest(
+        episode_id,
+        output_rows,
+        safety_events,
+        excluded_step_count=sum(rejection_reasons.values()),
+        recovery_sample_count=DEFAULT_RECOVERY_JOYSTICK_SAMPLES,
+    )
+    (episode / "training_segments.json").write_text(
+        json.dumps(segment_manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     report = StepBuildReport(
         episode_id=episode_id,
         raw_stm32_record_count=len(stm32_records),
@@ -343,6 +370,8 @@ def build_steps(
         camera_age_ms=_age_statistics(camera_ages_ms),
         camera_queue_drop_count=0,
         disk_queue_drop_count=0,
+        training_segment_count=len(segment_manifest["segments"]),
+        excluded_training_step_count=sum(rejection_reasons.values()),
     )
     (episode / "quality_report.json").write_text(
         json.dumps(asdict(report), ensure_ascii=False, indent=2) + "\n",
