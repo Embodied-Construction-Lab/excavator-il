@@ -23,11 +23,34 @@ def _parser() -> argparse.ArgumentParser:
     convert.add_argument("--output-root", required=True)
     convert.add_argument("--repo-id", default="local/excavator_rgb_v1")
     convert.add_argument("--fps", type=int, default=10)
+    convert.add_argument(
+        "--allow-synthetic",
+        action="store_true",
+        help="explicitly allow pipeline-only synthetic Episodes",
+    )
 
     smoke = commands.add_parser("smoke-train", help="run one CPU ACT train and inference step")
     smoke.add_argument("--image-height", type=int, default=64)
     smoke.add_argument("--image-width", type=int, default=64)
     smoke.add_argument("--chunk-size", type=int, default=10)
+
+    infer = commands.add_parser(
+        "smoke-infer",
+        help="reload an ACT checkpoint and infer one LeRobotDataset sample",
+    )
+    infer.add_argument("checkpoint")
+    infer.add_argument("--dataset-root", required=True)
+    infer.add_argument("--repo-id", required=True)
+    infer.add_argument("--sample-index", type=int, default=0)
+    infer.add_argument("--device", default="cpu")
+
+    synthesize = commands.add_parser(
+        "synthesize-episodes",
+        help="duplicate one Episode for isolated offline pipeline validation",
+    )
+    synthesize.add_argument("source_episode")
+    synthesize.add_argument("--output-root", required=True)
+    synthesize.add_argument("--count", type=int, required=True)
 
     teleop = commands.add_parser("teleop", help="send two PC joysticks to Orin at 20 Hz")
     teleop.add_argument("--config", default="config/teleop.pc.json")
@@ -104,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.output_root,
                 args.repo_id,
                 fps=args.fps,
+                allow_synthetic=args.allow_synthetic,
             )
             _print_json(asdict(summary))
         elif args.command == "smoke-train":
@@ -114,6 +138,26 @@ def main(argv: list[str] | None = None) -> int:
                 state_dim=11,
                 action_dim=4,
                 chunk_size=args.chunk_size,
+            )
+            _print_json(asdict(result))
+        elif args.command == "smoke-infer":
+            from .act_smoke import run_act_checkpoint_inference
+
+            result = run_act_checkpoint_inference(
+                checkpoint_path=args.checkpoint,
+                dataset_root=args.dataset_root,
+                repo_id=args.repo_id,
+                sample_index=args.sample_index,
+                device=args.device,
+            )
+            _print_json(asdict(result))
+        elif args.command == "synthesize-episodes":
+            from .synthetic_episodes import synthesize_episodes
+
+            result = synthesize_episodes(
+                args.source_episode,
+                args.output_root,
+                count=args.count,
             )
             _print_json(asdict(result))
         elif args.command == "teleop":

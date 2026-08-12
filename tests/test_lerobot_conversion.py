@@ -1,3 +1,6 @@
+import json
+import shutil
+
 import numpy as np
 import pytest
 
@@ -6,6 +9,107 @@ pytest.importorskip("lerobot", reason="install excavator-il[training] for conver
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from excavator_il.lerobot_conversion import convert_episodes
+
+
+def test_convert_requires_explicit_opt_in_for_synthetic_episode(
+    tmp_path, rgb_episode_factory
+):
+    episode = rgb_episode_factory(step_count=3)
+    metadata_path = episode / "episode.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["synthetic_provenance"] = {
+        "source_episode_id": metadata["episode_id"],
+        "method": "exact_duplicate_for_pipeline_validation",
+        "training_eligible": False,
+    }
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="allow-synthetic"):
+        convert_episodes(
+            episode_paths=[episode],
+            output_root=tmp_path / "rejected",
+            repo_id="local/rejected_synthetic",
+        )
+
+    summary = convert_episodes(
+        episode_paths=[episode],
+        output_root=tmp_path / "allowed",
+        repo_id="local/allowed_synthetic",
+        allow_synthetic=True,
+    )
+    assert summary.frame_count == 3
+    marker = json.loads(
+        (tmp_path / "allowed" / "pipeline_validation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert marker["training_eligible"] is False
+    assert marker["contains_synthetic_episodes"] is True
+    assert marker["synthetic_episode_ids"] == [metadata["episode_id"]]
+    assert marker["source_episode_ids"] == [metadata["episode_id"]]
+
+
+def test_convert_rejects_mixed_real_and_synthetic_episodes(
+    tmp_path, rgb_episode_factory
+):
+    real = rgb_episode_factory(episode_id="episode_real", step_count=3)
+    synthetic = rgb_episode_factory(episode_id="episode_synthetic", step_count=3)
+    metadata_path = synthetic / "episode.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["synthetic_provenance"] = {
+        "source_episode_id": "episode_real",
+        "method": "exact_duplicate_for_pipeline_validation",
+        "training_eligible": False,
+    }
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must not be mixed"):
+        convert_episodes(
+            episode_paths=[real, synthetic],
+            output_root=tmp_path / "mixed",
+            repo_id="local/mixed",
+            allow_synthetic=True,
+        )
+
+
+def test_convert_rejects_invalid_synthetic_provenance(tmp_path, rgb_episode_factory):
+    episode = rgb_episode_factory(step_count=3)
+    metadata_path = episode / "episode.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["synthetic_provenance"] = {
+        "source_episode_id": metadata["episode_id"],
+        "method": "unknown",
+        "training_eligible": True,
+    }
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="invalid synthetic provenance"):
+        convert_episodes(
+            episode_paths=[episode],
+            output_root=tmp_path / "invalid",
+            repo_id="local/invalid_synthetic",
+            allow_synthetic=True,
+        )
+
+
+def test_convert_rejects_duplicate_paths_and_episode_ids(tmp_path, rgb_episode_factory):
+    episode = rgb_episode_factory(episode_id="episode_0001", step_count=3)
+
+    with pytest.raises(ValueError, match="duplicate Episode path"):
+        convert_episodes(
+            episode_paths=[episode, episode],
+            output_root=tmp_path / "duplicate_path",
+            repo_id="local/duplicate_path",
+        )
+
+    duplicate_id = tmp_path / "different_path"
+    shutil.copytree(episode, duplicate_id)
+    with pytest.raises(ValueError, match="duplicate episode_id"):
+        convert_episodes(
+            episode_paths=[episode, duplicate_id],
+            output_root=tmp_path / "duplicate_id",
+            repo_id="local/duplicate_id",
+        )
 
 
 def test_convert_episode_builds_rgb_state_action_lerobot_dataset(tmp_path, rgb_episode_factory):

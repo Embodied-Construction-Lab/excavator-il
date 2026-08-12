@@ -365,6 +365,57 @@ excavator-il convert \
 多个 LeRobot Episode，但必须留在同一个 train/val/test 集合。LeRobot 原生 Episode 边界会限制
 ACT future-action delta indices，并通过 `action_is_pad` 屏蔽片段末端越界动作。
 
+### 5.1 重复数据的离线管线验证
+
+正式采集前可以将一条已经通过 `build-steps` 和 `validate` 的测试 Episode 复制为唯一 ID，专门
+检查 10-Episode 转换、ACT checkpoint 和推理链路：
+
+```bash
+excavator-il synthesize-episodes data/raw/pipeline_source/episode_0004 \
+  --output-root data/raw/synthetic_episode_0004_x10 --count 10
+
+for episode in data/raw/synthetic_episode_0004_x10/synthetic_episode_*; do
+  excavator-il build-steps "$episode" || break
+  excavator-il validate "$episode" || break
+done
+
+excavator-il convert data/raw/synthetic_episode_0004_x10/synthetic_episode_* \
+  --output-root data/lerobot/synthetic_episode_0004_x10 \
+  --repo-id local/synthetic_episode_0004_x10 --fps 10 --allow-synthetic
+```
+
+每个副本的 `episode.json` 都包含 `synthetic_provenance` 且
+`training_eligible=false`。转换器默认拒绝它们，只有显式 `--allow-synthetic` 才能用于离线
+管线测试，并在 LeRobotDataset 根目录写入 `pipeline_validation.json`。转换器拒绝真实与合成
+Episode 混合。十份完全相同的数据不是十次独立示教，不能用于评价收敛、泛化、成功率或正式
+checkpoint，也不得与 Pilot 数据混合。原生 `lerobot-train` 不读取该门禁文件，启动训练前仍需
+人工确认数据集路径。图像通过硬链接共享，只允许读取，禁止原地编辑。
+
+以下是 16 GB 显存训练机验证过的 3-step checkpoint smoke 命令。它刻意使用小模型，只验证读取
+4850 帧、反向传播、保存 checkpoint，不用于评价 loss：
+
+```bash
+lerobot-train \
+  --dataset.repo_id=local/synthetic_episode_0004_x10 \
+  --dataset.root=data/lerobot/synthetic_episode_0004_x10 \
+  --dataset.video_backend=pyav \
+  --policy.type=act --policy.device=cuda --policy.push_to_hub=false \
+  --policy.chunk_size=20 --policy.n_action_steps=10 \
+  --policy.vision_backbone=resnet18 --policy.pretrained_backbone_weights=null \
+  --policy.dim_model=64 --policy.n_heads=4 --policy.dim_feedforward=128 \
+  --policy.n_encoder_layers=1 --policy.n_decoder_layers=1 \
+  --policy.latent_dim=16 --policy.n_vae_encoder_layers=1 \
+  --output_dir=outputs/act_synthetic_episode_0004_x10_smoke \
+  --job_name=act_synthetic_episode_0004_x10_smoke \
+  --batch_size=2 --num_workers=0 --steps=3 --log_freq=1 \
+  --save_checkpoint=true --save_freq=3 --eval_freq=0 --wandb.enable=false
+
+excavator-il smoke-infer \
+  outputs/act_synthetic_episode_0004_x10_smoke/checkpoints/last/pretrained_model \
+  --dataset-root data/lerobot/synthetic_episode_0004_x10 \
+  --repo-id local/synthetic_episode_0004_x10 --sample-index 0 --device cuda
+```
+
 ## 6. ACT 训练
 
 先验证特征契约和 ACT 安装：
@@ -381,6 +432,7 @@ lerobot-train \
   --dataset.root=data/lerobot/excavator_rgb_v1_train \
   --policy.type=act \
   --policy.device=cuda \
+  --policy.push_to_hub=false \
   --policy.chunk_size=20 \
   --policy.n_action_steps=10 \
   --output_dir=outputs/act_excavator_rgb_v1 \
@@ -392,6 +444,21 @@ lerobot-train \
   --log_freq=100 \
   --wandb.enable=false
 ```
+
+LeRobot 0.5.2 的 ACT 默认要求 Hub repo；本地训练必须显式设置
+`--policy.push_to_hub=false`。短 smoke-train 成功保存 checkpoint 后，使用一条真实转换样本验证
+预处理、checkpoint 回载、动作块推理和反归一化：
+
+```bash
+excavator-il smoke-infer \
+  outputs/act_excavator_rgb_v1/checkpoints/last/pretrained_model \
+  --dataset-root data/lerobot/excavator_rgb_v1_train \
+  --repo-id local/excavator_rgb_v1_train \
+  --sample-index 0 --device cuda
+```
+
+预期 `predicted_chunk_shape` 为 `[1, 20, 4]`、`action_dim` 为 4 且
+`all_finite=true`。这一步只验证离线推理接口，不授权向 Orin 或 STM32 发送模型动作。
 
 显存不足时先把 `--batch_size` 降为 4 或 2。训练开始前记录 GPU、LeRobot 版本、数据集清单、
 三个仓库的 commit 和完整命令。正式实验至少运行 3 个随机种子，第一轮只需跑通一个种子。

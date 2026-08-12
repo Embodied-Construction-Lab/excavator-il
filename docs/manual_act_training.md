@@ -1,0 +1,244 @@
+# ACT 人工训练操作手册
+
+本文给出训练 PC 上从 LeRobotDataset 检查、ACT 训练、监控、checkpoint 回载到断点续训的完整
+命令。命令已于 2026-08-12 在以下环境验证：
+
+- GPU：NVIDIA GeForce RTX 5070 Ti，16 GB；
+- Python 3.12.13、PyTorch 2.10.0+cu128、LeRobot 0.5.2；
+- 输入：前视 RGB `3×480×640`、11 维状态；
+- 输出：4 维动作 `[boom, stick, bucket, swing]`；
+- ACT 频率 10 Hz，`chunk_size=20`，`n_action_steps=10`。
+
+本文只涉及离线训练和推理，不启动 Orin Collector，不打开 STM32 串口，也不向真机发送模型动作。
+
+## 1. 进入环境
+
+```bash
+cd /home/zhaoshuai/workspace_uinty/RL_prj/excavator-il
+conda activate excavator-il
+
+python --version
+python -c 'import torch, lerobot; print(torch.__version__, torch.cuda.is_available(), lerobot.__version__)'
+nvidia-smi
+df -h .
+```
+
+预期 Python 为 3.10～3.12，`torch.cuda.is_available()` 为 `True`，磁盘应有足够空间。标准 ACT
+每个完整 checkpoint（模型、optimizer 和状态）约占 580 MB；频繁保存会明显增加磁盘占用。
+
+## 2. 确认数据集类型
+
+当前用于管线验证的数据集为：
+
+```text
+data/lerobot/synthetic_episode_0004_x10
+```
+
+先检查合成数据门禁：
+
+```bash
+python -m json.tool \
+  data/lerobot/synthetic_episode_0004_x10/pipeline_validation.json
+```
+
+应看到：
+
+```json
+{
+  "contains_synthetic_episodes": true,
+  "training_eligible": false
+}
+```
+
+这十条数据是同一条 `episode_0004` 的精确副本，只能验证训练软件链。它们不能用于评价泛化、
+成功率或选择部署 checkpoint。原生 `lerobot-train` 不读取上述门禁文件，因此操作人必须主动核对
+数据集路径。
+
+正式训练时必须换成由不同示教组成、按 parent Episode 划分的 train/val/test 数据集，并确认
+数据集根目录不存在 `pipeline_validation.json`。禁止把合成数据与 Pilot 混合。
+
+## 3. 首次标准 ACT 训练
+
+输出目录必须不存在。以下命令使用标准规模 ACT 主体，关闭 Hub 上传和网络预训练权重，适合先做
+100-step 本地闭环：
+
+```bash
+set -o pipefail
+
+lerobot-train \
+  --dataset.repo_id=local/synthetic_episode_0004_x10 \
+  --dataset.root=data/lerobot/synthetic_episode_0004_x10 \
+  --dataset.video_backend=pyav \
+  --policy.type=act \
+  --policy.device=cuda \
+  --policy.push_to_hub=false \
+  --policy.chunk_size=20 \
+  --policy.n_action_steps=10 \
+  --policy.pretrained_backbone_weights=null \
+  --output_dir=outputs/act_synthetic_episode_0004_x10_standard_smoke \
+  --job_name=act_synthetic_episode_0004_x10_standard_smoke \
+  --batch_size=2 \
+  --num_workers=2 \
+  --steps=100 \
+  --log_freq=10 \
+  --save_checkpoint=true \
+  --save_freq=50 \
+  --eval_freq=0 \
+  --wandb.enable=false \
+  --seed=1000 \
+  2>&1 | tee logs/act_synthetic_standard_100step.log
+```
+
+关键启动输出应包括：
+
+```text
+dataset.num_frames=4850
+dataset.num_episodes=10
+num_learnable_params=51559300
+Effective batch size: 2 x 1 = 2
+```
+
+`--steps` 是目标总更新次数，不是 epoch 数。100 step、batch 2 只读取约 200 个训练样本，不等于
+完整遍历 4850 帧。正式训练步数必须根据真实数据和验证集表现确定，不能照搬本例。
+
+## 4. 实时监控
+
+另开一个终端监控 GPU：
+
+```bash
+watch -n 1 nvidia-smi
+```
+
+查看训练关键事件：
+
+```bash
+grep -E 'step:|Checkpoint policy|End of training|Traceback|Error' \
+  logs/act_synthetic_standard_100step.log
+```
+
+每个日志窗口重点检查：
+
+- `loss`、`grdn` 必须为有限值，不能出现 `nan` 或 `inf`；
+- step 应持续增长，不能长期停在视频解码；
+- GPU 显存不能持续增长至 OOM；
+- 保存点应打印 `Checkpoint policy after step ...`；
+- 最终应打印 `End of training`，进程退出码为 0。
+
+短训练里 loss 可以波动，不能因为单个窗口上升就判定失败。合成重复数据上的 loss 下降也不代表
+模型具备真机能力。
+
+## 5. 检查 checkpoint 并离线推理
+
+```bash
+find outputs/act_synthetic_episode_0004_x10_standard_smoke/checkpoints \
+  -mindepth 1 -maxdepth 1 -printf '%f -> %l\n' | sort
+
+cat outputs/act_synthetic_episode_0004_x10_standard_smoke/checkpoints/last/\
+training_state/training_step.json
+
+excavator-il smoke-infer \
+  outputs/act_synthetic_episode_0004_x10_standard_smoke/checkpoints/last/pretrained_model \
+  --dataset-root data/lerobot/synthetic_episode_0004_x10 \
+  --repo-id local/synthetic_episode_0004_x10 \
+  --sample-index 484 \
+  --device cuda
+```
+
+通过标准：
+
+- `training_step.json` 中 step 与目标一致；
+- `predicted_chunk_shape` 为 `[1, 20, 4]`；
+- `action_dim` 为 4；
+- `all_finite` 为 `true`；
+- checkpoint 和数据集严格匹配 11 维状态、前视 RGB，以及动作顺序
+  `[boom, stick, bucket, swing]`。
+
+`smoke-infer` 只对一条离线样本推理，不连接 Orin/STM32。
+
+## 6. 断点续训
+
+假设 `last` 当前保存于 step 100，要继续训练到总 step 200：
+
+```bash
+set -o pipefail
+
+lerobot-train \
+  --config_path=outputs/act_synthetic_episode_0004_x10_standard_smoke/checkpoints/last/pretrained_model/train_config.json \
+  --resume=true \
+  --steps=200 \
+  --log_freq=10 \
+  --save_freq=50 \
+  --eval_freq=0 \
+  --wandb.enable=false \
+  2>&1 | tee logs/act_synthetic_standard_resume_to_200.log
+```
+
+恢复时不要重新指定 policy 结构、数据集或 output directory；它们从 checkpoint 的
+`train_config.json` 恢复。`--steps=200` 表示训练到全局 step 200，因此从 step 100 恢复时只执行
+100 个增量 step。启动日志应显示：
+
+```text
+resume: True
+checkpoint_path: .../checkpoints/last
+Training: 0/...  # 总数为目标 step 减去已保存 step
+```
+
+若按 `Ctrl+C` 中止，LeRobot 不保证立即产生新 checkpoint；只能从最近一次完整保存点恢复。不要
+手工改写 `last`、optimizer state 或 `training_step.json`。
+
+## 7. 常见问题
+
+### 输出目录已存在
+
+非 resume 训练会拒绝覆盖已有目录。使用新的 `--output_dir`，或按照第 6 节从完整 checkpoint
+恢复；不要删除目录内的部分状态后强行重跑。
+
+### `policy.repo_id` 缺失
+
+本地训练必须设置：
+
+```text
+--policy.push_to_hub=false
+```
+
+### GPU 显存不足
+
+先把 `--batch_size=2` 降为 `--batch_size=1`。修改后必须使用新的 output directory 重新训练，
+不能用不同 batch 配置冒充原 checkpoint 的同一次实验。不要先改图像分辨率或动作/状态维度，
+这些属于数据和模型契约变化。
+
+### 视频解码错误或训练卡住
+
+确认命令包含：
+
+```text
+--dataset.video_backend=pyav
+```
+
+先用 `excavator-il smoke-infer` 读取同一数据集样本；若同样失败，优先检查 LeRobotDataset 视频、
+路径和磁盘，而不是修改 ACT。
+
+### loss 出现 `nan`/`inf`
+
+立即停止训练并保留日志与最近 checkpoint。依次检查数据集统计、状态/action 是否有限、输入契约和
+损坏视频。不能把非有限 loss 的 checkpoint 用于后续推理或真机。
+
+## 8. 本次实测结果
+
+标准 ACT（51,559,300 参数、batch 2）已完成：
+
+| 阶段 | 结果 |
+|---|---|
+| 首次训练 | step 0 → 10，checkpoint 正常保存 |
+| 断点续训 | step 10 → 100，optimizer/step 正确恢复 |
+| 吞吐 | 稳态约 4.2 step/s |
+| loss | step 20 窗口 13.933；step 100 窗口 5.422 |
+| 最终推理 | `[1,20,4]`，全部有限 |
+
+最终管线测试 checkpoint 位于：
+
+```text
+outputs/act_synthetic_episode_0004_x10_standard_smoke/checkpoints/last/pretrained_model
+```
+
+该目录由 `.gitignore` 排除，不提交 Git；它是管线验证产物，不是可部署模型。

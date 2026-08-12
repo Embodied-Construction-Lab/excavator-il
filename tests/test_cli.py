@@ -154,7 +154,42 @@ def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
 
     monkeypatch.setattr(lerobot_conversion, "convert_episodes", lambda *a, **k: _Result())
     monkeypatch.setattr(act_smoke, "run_act_smoke_train_step", lambda **k: _Result())
+    monkeypatch.setattr(
+        act_smoke, "run_act_checkpoint_inference", lambda **k: _Result()
+    )
 
     assert main(["convert", "ep", "--output-root", "out"]) == 0
     assert main(["smoke-train"]) == 0
-    assert capsys.readouterr().out.count('"value": "ok"') == 2
+    assert main(
+        [
+            "smoke-infer",
+            "checkpoint",
+            "--dataset-root",
+            "dataset",
+            "--repo-id",
+            "local/dataset",
+        ]
+    ) == 0
+    assert capsys.readouterr().out.count('"value": "ok"') == 3
+
+
+def test_cli_synthesizes_pipeline_validation_episodes(monkeypatch, capsys):
+    from excavator_il import synthetic_episodes
+
+    monkeypatch.setattr(
+        synthetic_episodes,
+        "synthesize_episodes",
+        lambda *args, **kwargs: _Result(),
+    )
+
+    assert main(
+        [
+            "synthesize-episodes",
+            "episode_0004",
+            "--output-root",
+            "data/raw/synthetic",
+            "--count",
+            "10",
+        ]
+    ) == 0
+    assert '"value": "ok"' in capsys.readouterr().out

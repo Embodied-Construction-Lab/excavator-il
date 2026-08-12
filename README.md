@@ -186,10 +186,29 @@ excavator-il convert \
 excavator-il smoke-train
 ```
 
+只验证离线数据链时，可把一条已校验 Episode 生成为带唯一 ID 的合成副本。合成副本在
+`episode.json` 中固定标记 `training_eligible=false`，转换时必须显式使用
+`--allow-synthetic`；它们只能验证转换、训练、checkpoint 保存和推理，不能证明模型学会挖掘，
+也不得混入正式 Pilot：
+
+```bash
+excavator-il synthesize-episodes data/raw/pipeline_source/episode_0004 \
+  --output-root data/raw/synthetic_episode_0004_x10 --count 10
+
+excavator-il convert data/raw/synthetic_episode_0004_x10/synthetic_episode_* \
+  --output-root data/lerobot/synthetic_episode_0004_x10 \
+  --repo-id local/synthetic_episode_0004_x10 --fps 10 --allow-synthetic
+```
+
+合成 Episode 的图像使用硬链接节省空间，任何流程都不得原地修改这些图像；删除合成目录不会
+删除源图像。
+
 ACT 接口固定为一台前视 RGB、11 维状态、4 维动作
 `[boom, stick, bucket, swing]`，训练频率 10 Hz。详细字段和时钟语义见
 [docs/data_contract_v1.md](docs/data_contract_v1.md)。下一阶段的采集数量、质量门槛、数据集划分和
 ACT 训练命令见 [docs/collection_training_runbook.md](docs/collection_training_runbook.md)。
+逐条人工训练、监控、checkpoint 校验和断点续训命令见
+[docs/manual_act_training.md](docs/manual_act_training.md)。
 每个连续 Training Segment 写成独立 LeRobot Episode，并使用 LeRobot 原生 `action_is_pad` 防止
 ACT 动作块跨越故障边界；转换帧保留 parent Episode、segment 和原始 frame index。
 
