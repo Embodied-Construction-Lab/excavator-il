@@ -139,6 +139,73 @@ def test_build_steps_uses_only_new_state_and_latest_causal_action_and_image(tmp_
     assert quality["joystick_timeout_count"] == 1
 
 
+def test_build_steps_uses_episode_metadata_when_preroll_telemetry_has_null_id(
+    tmp_path,
+):
+    episode = tmp_path / "episode_0009"
+    camera = episode / "camera_front"
+    camera.mkdir(parents=True)
+    (episode / "episode.json").write_text(
+        json.dumps({"episode_id": "episode_0009"}) + "\n", encoding="utf-8"
+    )
+    Image.new("RGB", (32, 24)).save(camera / "000000.jpg")
+    (episode / "camera_front_timestamps.csv").write_text(
+        "camera_frame_index,camera_stamp_monotonic_ns,image_path\n"
+        "0,950000000,camera_front/000000.jpg\n",
+        encoding="utf-8",
+    )
+    telemetry = {field: 0 for field in STM32_TELEMETRY_FIELDS}
+    telemetry.update(
+        {
+            "schema_version": "stm32_control_telemetry.v2",
+            "sensor_seq": 1,
+            "sensor_stamp_ms": 1000,
+            "sensor_is_new": 1,
+            "control_mode": 1,
+            "rs485_ok": 1,
+            "dwj_ok": 1,
+            "imu_ok": 1,
+        }
+    )
+    (episode / "stm32_raw.jsonl").write_text(
+        json.dumps(
+            {
+                "episode_id": None,
+                "raw_frame_seq": 0,
+                "orin_receive_monotonic_ns": 1_000_000_000,
+                "parse_ok": True,
+                "telemetry": telemetry,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (episode / "expert_action.jsonl").write_text(
+        json.dumps(
+            {
+                "action_stamp_monotonic_ns": 980_000_000,
+                "action_boom": 0.0,
+                "action_stick": 0.0,
+                "action_bucket": 0.0,
+                "action_swing": 0.0,
+                "action_valid": True,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = build_steps(episode)
+
+    assert report.episode_id == "episode_0009"
+    with (episode / "steps.csv").open(newline="", encoding="utf-8") as stream:
+        assert next(csv.DictReader(stream))["episode_id"] == "episode_0009"
+    segments = json.loads(
+        (episode / "training_segments.json").read_text(encoding="utf-8")
+    )
+    assert segments["parent_episode_id"] == "episode_0009"
+
+
 def test_build_steps_splits_around_recovered_joystick_timeout(tmp_path):
     episode = tmp_path / "episode_0005"
     camera = episode / "camera_front"

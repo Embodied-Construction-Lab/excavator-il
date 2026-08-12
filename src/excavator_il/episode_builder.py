@@ -80,6 +80,22 @@ def _read_camera_rows(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+def _read_episode_id(episode: Path) -> str:
+    metadata_path = episode / "episode.json"
+    if not metadata_path.is_file():
+        return episode.name
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"episode.json contains invalid JSON: {exc}") from exc
+    episode_id = metadata.get("episode_id") if isinstance(metadata, dict) else None
+    if not isinstance(episode_id, str) or not episode_id:
+        raise ValueError("episode.json episode_id must be non-empty text")
+    if episode_id != episode.name:
+        raise ValueError("episode.json episode_id does not match directory name")
+    return episode_id
+
+
 def _latest_causal(
     records: list[dict[str, Any]],
     stamps: list[int],
@@ -197,7 +213,7 @@ def build_steps(
         recovery_sample_count=DEFAULT_RECOVERY_JOYSTICK_SAMPLES,
     )
 
-    episode_id = str(stm32_records[0].get("episode_id", episode.name))
+    episode_id = _read_episode_id(episode)
     output_rows: list[dict[str, Any]] = []
     rejection_reasons: Counter[str] = Counter()
     action_ages_ms: list[float] = []

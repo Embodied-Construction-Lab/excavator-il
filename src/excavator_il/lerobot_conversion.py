@@ -57,6 +57,34 @@ def _causal_image_paths(
     return paths
 
 
+def _verify_converted_dataset(
+    root: Path,
+    repo_id: str,
+    *,
+    expected_episode_count: int,
+    expected_frame_count: int,
+    expected_source_episode_ids: set[str],
+) -> None:
+    converted = LeRobotDataset(repo_id=repo_id, root=root)
+    if converted.num_episodes != expected_episode_count:
+        raise RuntimeError(
+            "converted dataset episode count mismatch: "
+            f"expected {expected_episode_count}, got {converted.num_episodes}"
+        )
+    if converted.num_frames != expected_frame_count:
+        raise RuntimeError(
+            "converted dataset frame count mismatch: "
+            f"expected {expected_frame_count}, got {converted.num_frames}"
+        )
+    actual_source_episode_ids = set(converted.hf_dataset["source.episode_id"])
+    if actual_source_episode_ids != expected_source_episode_ids:
+        raise RuntimeError(
+            "converted dataset source Episode IDs mismatch: "
+            f"expected {sorted(expected_source_episode_ids)}, "
+            f"got {sorted(actual_source_episode_ids)}"
+        )
+
+
 def convert_episodes(
     episode_paths: list[str | Path],
     output_root: str | Path,
@@ -188,6 +216,15 @@ def convert_episodes(
     finally:
         dataset.finalize()
 
+    expected_episode_count = sum(report.training_segment_count for report in reports)
+    _verify_converted_dataset(
+        root,
+        repo_id,
+        expected_episode_count=expected_episode_count,
+        expected_frame_count=frame_count,
+        expected_source_episode_ids={str(episode_id) for episode_id in episode_ids},
+    )
+
     if synthetic_paths:
         (root / "pipeline_validation.json").write_text(
             json.dumps(
@@ -215,7 +252,7 @@ def convert_episodes(
 
     return ConversionSummary(
         source_episode_count=len(validated_paths),
-        episode_count=sum(report.training_segment_count for report in reports),
+        episode_count=expected_episode_count,
         frame_count=frame_count,
         fps=fps,
         output_root=root,

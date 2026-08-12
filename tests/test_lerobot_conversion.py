@@ -141,6 +141,61 @@ def test_convert_episode_builds_rgb_state_action_lerobot_dataset(tmp_path, rgb_e
     np.testing.assert_allclose(row["action"], [0.2, -0.3, 0.4, 0.0])
 
 
+def test_convert_preserves_all_source_episode_boundaries(tmp_path, rgb_episode_factory):
+    episodes = [
+        rgb_episode_factory(episode_id=f"episode_{index:04d}", step_count=3)
+        for index in range(1, 6)
+    ]
+    output = tmp_path / "five_episode_dataset"
+
+    summary = convert_episodes(
+        episode_paths=episodes,
+        output_root=output,
+        repo_id="local/five_episode_dataset",
+    )
+
+    dataset = LeRobotDataset(repo_id="local/five_episode_dataset", root=output)
+    assert summary.source_episode_count == 5
+    assert summary.episode_count == 5
+    assert summary.frame_count == 15
+    assert dataset.num_episodes == 5
+    assert dataset.num_frames == 15
+    assert set(dataset.hf_dataset["source.episode_id"]) == {
+        f"episode_{index:04d}" for index in range(1, 6)
+    }
+
+
+def test_convert_fails_if_reloaded_dataset_is_incomplete(
+    tmp_path, rgb_episode_factory, monkeypatch
+):
+    episode = rgb_episode_factory(step_count=3)
+
+    class _IncompleteDataset:
+        num_episodes = 0
+        num_frames = 0
+
+    from excavator_il import lerobot_conversion
+
+    real_dataset = lerobot_conversion.LeRobotDataset
+
+    class _DatasetProxy:
+        create = real_dataset.create
+
+        def __new__(cls, *args, **kwargs):
+            if kwargs.get("root") == tmp_path / "incomplete":
+                return _IncompleteDataset()
+            return real_dataset(*args, **kwargs)
+
+    monkeypatch.setattr(lerobot_conversion, "LeRobotDataset", _DatasetProxy)
+
+    with pytest.raises(RuntimeError, match="episode count mismatch"):
+        convert_episodes(
+            episode_paths=[episode],
+            output_root=tmp_path / "incomplete",
+            repo_id="local/incomplete",
+        )
+
+
 def test_convert_uses_lerobot_episode_boundaries_for_training_segments(
     tmp_path, rgb_episode_factory
 ):

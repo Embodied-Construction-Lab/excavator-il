@@ -113,6 +113,14 @@ rsync -a --info=progress2 \
 rsync -a --info=progress2 \
   data/lerobot/orin_offline_smoke/ \
   jetson16@192.168.31.10:/home/jetson16/workspace_excavator/act_inference/data/orin_offline_smoke/
+
+# cap-drop=ALL 的容器只能读取明确授予读取权限的离线输入。
+# rsync 会保留 PC 文件权限；若 safetensors 是 0600，只调整刚复制的推理副本：
+ssh jetson16@192.168.31.10 \
+  'find /home/jetson16/workspace_excavator/act_inference/checkpoint -type d -exec chmod 0755 {} + &&
+   find /home/jetson16/workspace_excavator/act_inference/checkpoint -type f -exec chmod 0644 {} + &&
+   find /home/jetson16/workspace_excavator/act_inference/data/orin_offline_smoke -type d -exec chmod 0755 {} + &&
+   find /home/jetson16/workspace_excavator/act_inference/data/orin_offline_smoke -type f -exec chmod 0644 {} +'
 ```
 
 本次模型文件 SHA-256 为：

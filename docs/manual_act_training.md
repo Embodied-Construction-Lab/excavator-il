@@ -101,6 +101,87 @@ Effective batch size: 2 x 1 = 2
 `--steps` 是目标总更新次数，不是 epoch 数。100 step、batch 2 只读取约 200 个训练样本，不等于
 完整遍历 4850 帧。正式训练步数必须根据真实数据和验证集表现确定，不能照搬本例。
 
+### 3.1 五条真实示教的 20-epoch 基线
+
+2026-08-12 的相机新视角基线由五条相互独立、均通过 `build-steps` 和 `validate` 的真实示教组成：
+
+```text
+episode_0005 ... episode_0009
+```
+
+从 Orin 同步后，先把五条原始 Episode 放在
+`data/raw/camera_angle_ep0005_0009/`，再转换并回载检查：
+
+```bash
+excavator-il convert \
+  data/raw/camera_angle_ep0005_0009/episode_0005 \
+  data/raw/camera_angle_ep0005_0009/episode_0006 \
+  data/raw/camera_angle_ep0005_0009/episode_0007 \
+  data/raw/camera_angle_ep0005_0009/episode_0008 \
+  data/raw/camera_angle_ep0005_0009/episode_0009 \
+  --output-root data/lerobot/camera_angle_ep0005_0009 \
+  --repo-id local/camera_angle_ep0005_0009 \
+  --fps 10
+
+python - <<'PY'
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+dataset = LeRobotDataset(
+    repo_id="local/camera_angle_ep0005_0009",
+    root="data/lerobot/camera_angle_ep0005_0009",
+)
+assert dataset.num_episodes == 5
+assert dataset.num_frames == 623
+assert dataset.features["observation.state"]["shape"] == (11,)
+assert dataset.features["action"]["shape"] == (4,)
+assert dataset.features["action"]["names"] == [
+    "action_boom", "action_stick", "action_bucket", "action_swing"
+]
+print("dataset gate passed")
+PY
+```
+
+输出目录必须事先不存在。转换进程退出后必须重新加载数据集并通过上述断言，不能根据转换期间的
+中间文件或目录大小推断完成。
+
+不要为了把 Episode 数量凑成 20 或 50 而复制这五条数据。复制不会增加信息量，还会破坏正式
+数据集的 provenance。下面的 6250 step、batch 2 会读取约 12500 个样本，相当于对 623 帧执行
+约 20.1 次等效遍历：
+
+```bash
+set -o pipefail
+
+lerobot-train \
+  --dataset.repo_id=local/camera_angle_ep0005_0009 \
+  --dataset.root=data/lerobot/camera_angle_ep0005_0009 \
+  --dataset.video_backend=pyav \
+  --policy.type=act \
+  --policy.device=cuda \
+  --policy.push_to_hub=false \
+  --policy.chunk_size=20 \
+  --policy.n_action_steps=10 \
+  --policy.pretrained_backbone_weights=null \
+  --output_dir=outputs/act_camera_angle_ep0005_0009_20epochs \
+  --job_name=act_camera_angle_ep0005_0009_20epochs \
+  --batch_size=2 \
+  --num_workers=2 \
+  --steps=6250 \
+  --log_freq=50 \
+  --save_checkpoint=true \
+  --save_freq=1250 \
+  --eval_freq=0 \
+  --wandb.enable=false \
+  --seed=1000 \
+  2>&1 | tee logs/act_camera_angle_ep0005_0009_20epochs.log
+```
+
+这个基线使用全部五条数据训练，只适合验证训练和离线推理，不提供独立验证/测试集，也不能据此
+评估泛化或放行真机闭环。正式部署候选必须增加不同初始位姿、完整四轴动作和独立留出 Episode。
+本次实测最终 checkpoint 虽完成训练，但完整样本扫描发现部分 action chunk 超出 `[-1,1]`，已被
+推理门禁拒绝；详见
+`../../EvaluationReport/2026-08-12_act_camera_angle_real_episode_training.md`。不能只用一个样本通过
+`smoke-infer` 就宣布 checkpoint 可部署，也不能在 STM32 中静默截断越界输出来绕过门禁。
+
 ## 4. 实时监控
 
 另开一个终端监控 GPU：
