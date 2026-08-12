@@ -1,5 +1,7 @@
 import json
 import io
+import signal
+import subprocess
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +11,7 @@ import pytest
 from excavator_il.guided_episode import (
     GuidedEpisodeConfig,
     SystemGuidedEpisodeOperations,
+    _LineProcess,
     run_guided_episode,
 )
 
@@ -590,7 +593,126 @@ def test_stop_collector_allows_bounded_remote_shutdown_time(tmp_path, monkeypatc
     operations.stop_collector()
 
     assert remote_commands == ["kill -TERM -- -14313"]
-    assert wait_timeouts == [15.0]
+    assert wait_timeouts == [2.0]
+
+
+def test_stop_collector_closes_stale_ssh_after_remote_process_exited(
+    tmp_path, monkeypatch
+):
+    config = _guided_config(tmp_path)
+    remote_commands = []
+    local_stop_calls = []
+
+    class StaleSshCollector:
+        running = True
+
+        def wait(self, timeout_s=5.0):
+            raise subprocess.TimeoutExpired("ssh collector", timeout_s)
+
+        def stop(self, signum, *, timeout_s=5.0):
+            local_stop_calls.append((signum, timeout_s))
+
+    def fake_run_ssh(command):
+        remote_commands.append(command)
+        return "exited\n" if "for attempt in" in command else ""
+
+    operations = SystemGuidedEpisodeOperations(config, output=lambda message: None)
+    operations._collector = StaleSshCollector()
+    operations._collector_pid = 15867
+    monkeypatch.setattr(operations, "_run_ssh", fake_run_ssh)
+
+    operations.stop_collector()
+
+    assert remote_commands == [
+        "kill -TERM -- -15867",
+        (
+            "for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 "
+            "18 19 20; do if ! kill -0 -- -15867 2>/dev/null; then "
+            "echo exited; exit 0; fi; sleep 0.25; done; echo running"
+        ),
+    ]
+    assert local_stop_calls == [(signal.SIGKILL, 2.0)]
+    assert operations._collector is None
+    assert operations._collector_pid is None
+
+
+def test_stop_collector_reports_remote_process_still_running_after_timeout(
+    tmp_path, monkeypatch
+):
+    config = _guided_config(tmp_path)
+    local_stop_calls = []
+
+    class HungCollector:
+        running = True
+
+        def wait(self, timeout_s=5.0):
+            raise subprocess.TimeoutExpired("ssh collector", timeout_s)
+
+        def stop(self, signum, *, timeout_s=5.0):
+            local_stop_calls.append((signum, timeout_s))
+
+    operations = SystemGuidedEpisodeOperations(config, output=lambda message: None)
+    operations._collector = HungCollector()
+    operations._collector_pid = 15867
+    monkeypatch.setattr(
+        operations,
+        "_run_ssh",
+        lambda command: "running\n" if "for attempt in" in command else "",
+    )
+
+    with pytest.raises(RuntimeError, match="still running"):
+        operations.stop_collector()
+
+    assert local_stop_calls == [(signal.SIGKILL, 2.0)]
+    assert operations._collector is None
+    assert operations._collector_pid is None
+
+
+def test_line_process_stop_escalates_to_kill_when_ssh_ignores_term(
+    tmp_path, monkeypatch
+):
+    calls = []
+
+    class TermIgnoringPopen:
+        def __init__(self, argv, **kwargs):
+            self.stdout = io.StringIO("")
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def send_signal(self, signum):
+            calls.append(("send_signal", signum))
+
+        def terminate(self):
+            calls.append(("terminate", signal.SIGTERM))
+
+        def kill(self):
+            calls.append(("kill", signal.SIGKILL))
+            self.returncode = -signal.SIGKILL
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                raise subprocess.TimeoutExpired("ssh collector", timeout)
+            return self.returncode
+
+    monkeypatch.setattr(
+        "excavator_il.guided_episode.subprocess.Popen", TermIgnoringPopen
+    )
+    process = _LineProcess(
+        ["ssh", "collector"],
+        log_path=tmp_path / "collector.log",
+        prefix="collector",
+        output=lambda message: None,
+    )
+
+    process.stop(signal.SIGTERM, timeout_s=0.01)
+
+    assert calls == [
+        ("send_signal", signal.SIGTERM),
+        ("terminate", signal.SIGTERM),
+        ("kill", signal.SIGKILL),
+    ]
 
 
 def test_collector_extra_includes_episode_image_validation_dependency():

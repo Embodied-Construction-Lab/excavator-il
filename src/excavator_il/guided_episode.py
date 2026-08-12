@@ -243,7 +243,11 @@ class _LineProcess:
             self._process.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
             self._process.terminate()
-            self._process.wait(timeout=timeout_s)
+            try:
+                self._process.wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+                self._process.wait(timeout=timeout_s)
         self._reader.join(timeout=1.0)
 
     def wait(self, timeout_s: float = 5.0) -> None:
@@ -598,16 +602,40 @@ class SystemGuidedEpisodeOperations:
             self._teleop = None
 
     def stop_collector(self) -> None:
+        collector = self._collector
+        collector_pid = self._collector_pid
         if (
-            self._collector_pid is not None
-            and self._collector is not None
-            and self._collector.running
+            collector_pid is not None
+            and collector is not None
+            and collector.running
         ):
-            self._run_ssh(f"kill -TERM -- -{self._collector_pid}")
-        self._collector_pid = None
-        if self._collector is not None:
-            self._collector.wait(timeout_s=15.0)
+            self._run_ssh(f"kill -TERM -- -{collector_pid}")
+        try:
+            if collector is not None:
+                collector.wait(timeout_s=2.0)
+        except subprocess.TimeoutExpired as exc:
+            if collector_pid is None:
+                assert collector is not None
+                collector.stop(signal.SIGKILL, timeout_s=2.0)
+                raise RuntimeError(
+                    "Collector SSH transport did not exit and its remote PID is unknown"
+                ) from exc
+            remote_state = self._run_ssh(
+                "for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 "
+                "18 19 20; do "
+                f"if ! kill -0 -- -{collector_pid} 2>/dev/null; then "
+                "echo exited; exit 0; fi; sleep 0.25; done; echo running"
+            ).strip()
+            assert collector is not None
+            collector.stop(signal.SIGKILL, timeout_s=2.0)
+            if remote_state != "exited":
+                raise RuntimeError(
+                    f"remote Collector process group {collector_pid} is still running "
+                    "after TERM timeout"
+                ) from exc
+        finally:
             self._collector = None
+            self._collector_pid = None
 
     def build_and_validate(self, episode_path: str) -> None:
         _, _, validation_log = self.log_paths
