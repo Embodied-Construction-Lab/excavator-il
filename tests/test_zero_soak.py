@@ -229,6 +229,58 @@ def test_zero_soak_monitor_fails_closed_if_deadman_is_pressed(tmp_path, monkeypa
         operations.monitor_deadman_released(30)
 
 
+def test_zero_soak_monitor_accepts_timeout_at_completed_deadline(
+    tmp_path, monkeypatch
+):
+    clock = [0.0]
+
+    class TeleopLines:
+        def __init__(self):
+            self.sample_count = 0
+
+        def wait_for(self, predicate, timeout_s, after_index=-1):
+            if self.sample_count == 450:
+                clock[0] = 30.0
+                raise guided_episode._LineWaitTimeout(
+                    "timed out waiting for teleop readiness"
+                )
+            self.sample_count += 1
+            clock[0] = self.sample_count * (29.9 / 450)
+            line = (
+                f"teleop seq={self.sample_count} ack={self.sample_count} "
+                f"ack_lag=0 accepted_acks={self.sample_count} rejected_acks=0 "
+                "deadman=False axes=(0,0,0,0,0,0)"
+            )
+            assert predicate(line)
+            return after_index + 1, line
+
+    config = type("Config", (), {"log_dir": tmp_path})()
+    operations = SystemGuidedEpisodeOperations(config)
+    operations._teleop = TeleopLines()
+    monkeypatch.setattr(guided_episode.time, "monotonic", lambda: clock[0])
+
+    operations.monitor_deadman_released(30)
+
+
+def test_zero_soak_monitor_rejects_timeout_before_deadline(tmp_path, monkeypatch):
+    clock = [0.0]
+
+    class TeleopLines:
+        def wait_for(self, predicate, timeout_s, after_index=-1):
+            clock[0] = 1.0
+            raise guided_episode._LineWaitTimeout(
+                "timed out waiting for teleop readiness"
+            )
+
+    config = type("Config", (), {"log_dir": tmp_path})()
+    operations = SystemGuidedEpisodeOperations(config)
+    operations._teleop = TeleopLines()
+    monkeypatch.setattr(guided_episode.time, "monotonic", lambda: clock[0])
+
+    with pytest.raises(RuntimeError, match="timed out waiting"):
+        operations.monitor_deadman_released(30)
+
+
 def test_zero_soak_rejects_invalid_joystick_packet(tmp_path):
     episode = _safe_episode(tmp_path)
     joystick_path = episode / "joystick_raw.jsonl"

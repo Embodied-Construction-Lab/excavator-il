@@ -158,6 +158,10 @@ class GuidedEpisodeOperations(Protocol):
     def build_and_validate(self, episode_path: str) -> None: ...
 
 
+class _LineWaitTimeout(RuntimeError):
+    """A bounded line wait expired while the child process remained active."""
+
+
 class _LineProcess:
     def __init__(
         self,
@@ -227,7 +231,7 @@ class _LineProcess:
                 else:
                     remaining_s = deadline - time.monotonic()
                     if remaining_s <= 0:
-                        raise RuntimeError(
+                        raise _LineWaitTimeout(
                             f"timed out waiting for {self._prefix} readiness"
                         )
                     self._condition.wait(remaining_s)
@@ -466,11 +470,16 @@ class SystemGuidedEpisodeOperations:
             remaining_s = deadline - time.monotonic()
             if remaining_s <= 0:
                 break
-            self._teleop_cursor, line = self._teleop.wait_for(
-                lambda candidate: self._ACK.search(candidate) is not None,
-                min(1.0, remaining_s),
-                after_index=self._teleop_cursor,
-            )
+            try:
+                self._teleop_cursor, line = self._teleop.wait_for(
+                    lambda candidate: self._ACK.search(candidate) is not None,
+                    min(1.0, remaining_s),
+                    after_index=self._teleop_cursor,
+                )
+            except _LineWaitTimeout:
+                if time.monotonic() >= deadline:
+                    break
+                raise
             match = self._ACK.search(line)
             assert match is not None
             if match.group("deadman") == "True":
