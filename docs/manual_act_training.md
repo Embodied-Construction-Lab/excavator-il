@@ -57,6 +57,37 @@ python -m json.tool \
 正式训练时必须换成由不同示教组成、按 parent Episode 划分的 train/val/test 数据集，并确认
 数据集根目录不存在 `pipeline_validation.json`。禁止把合成数据与 Pilot 混合。
 
+### 2.1 按 parent Episode 固定训练/验证集
+
+转换完成后，先生成可复用拆分清单。拆分依据是 `source.episode_id`，因此同一条原始示教因链路
+故障恢复切出的多个 LeRobot Episode 一定留在同一侧，不会形成数据泄漏：
+
+```bash
+excavator-il prepare-training-split \
+  --dataset-root data/lerobot/excavator_rgb_v1 \
+  --repo-id local/excavator_rgb_v1 \
+  --output data/lerobot/split_manifests/excavator_rgb_v1.json \
+  --train-ratio 0.8 \
+  --seed 1000
+```
+
+若输出文件已存在，命令只接受完全相同的 dataset、seed、ratio 和 Episode 映射；参数漂移会失败，
+不能静默重写拆分。`training_eligible=false` 的管线合成数据也会被拒绝。
+
+再物化两个独立 LeRobotDataset：
+
+```bash
+excavator-il materialize-training-split \
+  --manifest data/lerobot/split_manifests/excavator_rgb_v1.json \
+  --output-root data/lerobot/excavator_rgb_v1_split
+```
+
+输出为 `..._split/train` 和 `..._split/validation`。LeRobot 会按各自 Episode 重新聚合
+`meta/stats.json`，正式训练只能使用 train 的统计量。该过程需要重编码视频，因此占用额外磁盘；
+它通过同目录暂存和原子改名发布，中断不会留下名称正常但内容不完整的数据集。
+
+拆分清单不要写入训练的 `--output_dir`；LeRobot 要求首次训练时该目录不存在。
+
 ## 3. 首次标准 ACT 训练
 
 输出目录必须不存在。以下命令使用标准规模 ACT 主体，关闭 Hub 上传和网络预训练权重，适合先做
@@ -237,6 +268,71 @@ excavator-il smoke-infer \
 `smoke-infer` 只对一条离线样本推理，不连接 Orin/STM32。
 将通过校验的 checkpoint 转移到 Orin 做 GPU 兼容性验证时，执行
 [Orin ACT 离线推理操作手册](orin_act_inference.md)，不要从训练环境直接增加串口或运动设备权限。
+
+### 5.1 用留出 Episode 选择 checkpoint
+
+训练时把 dataset 明确指向物化后的 `train/`，并保存多个 checkpoint。例如：
+
+```bash
+set -o pipefail
+
+lerobot-train \
+  --dataset.repo_id=local/excavator_rgb_v1_train \
+  --dataset.root=data/lerobot/excavator_rgb_v1_split/train \
+  --dataset.video_backend=pyav \
+  --policy.type=act \
+  --policy.device=cuda \
+  --policy.push_to_hub=false \
+  --policy.chunk_size=20 \
+  --policy.n_action_steps=10 \
+  --policy.pretrained_backbone_weights=null \
+  --output_dir=outputs/act_excavator_rgb_v1 \
+  --job_name=act_excavator_rgb_v1 \
+  --batch_size=2 \
+  --num_workers=2 \
+  --steps=5000 \
+  --log_freq=50 \
+  --save_checkpoint=true \
+  --save_freq=1000 \
+  --eval_freq=0 \
+  --wandb.enable=false \
+  --seed=1000 \
+  2>&1 | tee logs/act_excavator_rgb_v1.log
+```
+
+`--steps` 仍按 train 子集帧数和目标等效 epoch 计算：
+
+```text
+steps = ceil(target_epochs * train_num_frames / batch_size)
+```
+
+不要根据 validation loss 自动反向训练，也不要把 validation Episode 加回 train。训练结束后在
+`validation/` 上统一评估：
+
+```bash
+excavator-il evaluate-checkpoints \
+  outputs/act_excavator_rgb_v1/checkpoints/001000/pretrained_model \
+  outputs/act_excavator_rgb_v1/checkpoints/002000/pretrained_model \
+  outputs/act_excavator_rgb_v1/checkpoints/003000/pretrained_model \
+  outputs/act_excavator_rgb_v1/checkpoints/004000/pretrained_model \
+  outputs/act_excavator_rgb_v1/checkpoints/005000/pretrained_model \
+  --split-root data/lerobot/excavator_rgb_v1_split \
+  --device cuda --batch-size 4 --num-workers 2
+```
+
+命令按 `<split-root>/train` 和 `<split-root>/validation` 目录约定定位数据，并用
+`split_provenance.json` 复核内容指纹；还要求每个 checkpoint 的 `train_config.json` 确实指向同一个
+train 数据集。历史上用全量数据训练的 checkpoint 会被拒绝，不能冒充留出验证结果。评估结束前
+会再次检查两个数据集的指纹，评估期间发生修改时不会产生选择结果。
+
+验证指标 `deployment_prior_l1` 在死区后的归一化专家动作原始空间计算：checkpoint 自带的训练集
+归一化器只用于模型输入和模型输出反归一化，在所有留出帧上执行确定性的 ACT 部署先验
+（VAE latent 取零），再计算 padding-aware action L1。不同 checkpoint 的归一化统计不会改变 L1
+比较尺度。这不是在线 rollout 成功率，也不是 LeRobot 0.5.2 的 VAE posterior loss。
+
+选择顺序是 fail-closed：checkpoint 必须先满足所有预测有限、所有反归一化动作保持在 `[-1,1]`，
+然后才在安全候选中选择最低 L1。若没有候选，命令退出码为 3。选中的 checkpoint 后续仍必须通过
+完整样本范围扫描、Orin GPU 延迟验证和真机上线前安全审查；validation loss 不能替代这些门禁。
 
 ## 6. 断点续训
 

@@ -29,6 +29,33 @@ def _parser() -> argparse.ArgumentParser:
         help="explicitly allow pipeline-only synthetic Episodes",
     )
 
+    split = commands.add_parser(
+        "prepare-training-split",
+        help="create a stable parent-Episode train/validation manifest",
+    )
+    split.add_argument("--dataset-root", required=True)
+    split.add_argument("--repo-id", required=True)
+    split.add_argument("--output", required=True)
+    split.add_argument("--train-ratio", type=float, default=0.8)
+    split.add_argument("--seed", type=int, default=0)
+
+    materialize = commands.add_parser(
+        "materialize-training-split",
+        help="write isolated train/validation datasets with subset statistics",
+    )
+    materialize.add_argument("--manifest", required=True)
+    materialize.add_argument("--output-root", required=True)
+
+    evaluate = commands.add_parser(
+        "evaluate-checkpoints",
+        help="rank ACT checkpoints on held-out Episodes with action safety gates",
+    )
+    evaluate.add_argument("checkpoints", nargs="+")
+    evaluate.add_argument("--split-root", required=True)
+    evaluate.add_argument("--device", default="cpu")
+    evaluate.add_argument("--batch-size", type=int, default=4)
+    evaluate.add_argument("--num-workers", type=int, default=0)
+
     smoke = commands.add_parser("smoke-train", help="run one CPU ACT train and inference step")
     smoke.add_argument("--image-height", type=int, default=64)
     smoke.add_argument("--image-width", type=int, default=64)
@@ -133,6 +160,37 @@ def main(argv: list[str] | None = None) -> int:
                 allow_synthetic=args.allow_synthetic,
             )
             _print_json(asdict(summary))
+        elif args.command == "prepare-training-split":
+            from .training_split import prepare_training_split
+
+            split = prepare_training_split(
+                dataset_root=args.dataset_root,
+                repo_id=args.repo_id,
+                output_path=args.output,
+                train_ratio=args.train_ratio,
+                seed=args.seed,
+            )
+            _print_json(asdict(split))
+        elif args.command == "materialize-training-split":
+            from .training_split import materialize_training_split
+
+            split = materialize_training_split(
+                manifest_path=args.manifest,
+                output_root=args.output_root,
+            )
+            _print_json(asdict(split))
+        elif args.command == "evaluate-checkpoints":
+            from .checkpoint_evaluation import evaluate_act_checkpoints
+
+            result = evaluate_act_checkpoints(
+                checkpoint_paths=args.checkpoints,
+                split_root=args.split_root,
+                device=args.device,
+                batch_size=args.batch_size,
+                num_workers=args.num_workers,
+            )
+            _print_json(asdict(result))
+            return 0 if result.selected_checkpoint is not None else 3
         elif args.command == "smoke-train":
             from .act_smoke import run_act_smoke_train_step
 

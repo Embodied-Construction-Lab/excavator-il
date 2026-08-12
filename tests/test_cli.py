@@ -18,6 +18,12 @@ class _ZeroResult:
     episode_id: str
 
 
+@dataclass(frozen=True)
+class _CheckpointResult:
+    value: str = "ok"
+    selected_checkpoint: str = "checkpoint-a"
+
+
 def test_validate_command_prints_machine_readable_report(rgb_episode_factory, capsys):
     episode = rgb_episode_factory()
 
@@ -150,7 +156,12 @@ def test_diagnose_joysticks_handles_operator_interrupt_without_traceback(
 
 def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
     pytest.importorskip("lerobot")
-    from excavator_il import act_smoke, lerobot_conversion
+    from excavator_il import (
+        act_smoke,
+        checkpoint_evaluation,
+        lerobot_conversion,
+        training_split,
+    )
 
     inference_arguments = {}
 
@@ -161,8 +172,48 @@ def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
     monkeypatch.setattr(lerobot_conversion, "convert_episodes", lambda *a, **k: _Result())
     monkeypatch.setattr(act_smoke, "run_act_smoke_train_step", lambda **k: _Result())
     monkeypatch.setattr(act_smoke, "run_act_checkpoint_inference", infer)
+    monkeypatch.setattr(training_split, "prepare_training_split", lambda **k: _Result())
+    monkeypatch.setattr(training_split, "materialize_training_split", lambda **k: _Result())
+    monkeypatch.setattr(
+        checkpoint_evaluation, "evaluate_act_checkpoints", lambda **k: _CheckpointResult()
+    )
 
     assert main(["convert", "ep", "--output-root", "out"]) == 0
+    assert main(
+        [
+            "prepare-training-split",
+            "--dataset-root",
+            "dataset",
+            "--repo-id",
+            "local/dataset",
+            "--output",
+            "training_split.json",
+            "--train-ratio",
+            "0.8",
+            "--seed",
+            "7",
+        ]
+    ) == 0
+    assert main(
+        [
+            "evaluate-checkpoints",
+            "checkpoint-a",
+            "checkpoint-b",
+            "--split-root",
+            "data/lerobot/split",
+            "--device",
+            "cuda",
+        ]
+    ) == 0
+    assert main(
+        [
+            "materialize-training-split",
+            "--manifest",
+            "training_split.json",
+            "--output-root",
+            "data/lerobot/splits",
+        ]
+    ) == 0
     assert main(["smoke-train"]) == 0
     assert main(
         [
@@ -183,7 +234,7 @@ def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
     assert inference_arguments["warmup_runs"] == 2
     assert inference_arguments["timed_runs"] == 3
     assert inference_arguments["max_inference_ms"] == 100.0
-    assert capsys.readouterr().out.count('"value": "ok"') == 3
+    assert capsys.readouterr().out.count('"value": "ok"') == 6
 
 
 def test_cli_synthesizes_pipeline_validation_episodes(monkeypatch, capsys):
