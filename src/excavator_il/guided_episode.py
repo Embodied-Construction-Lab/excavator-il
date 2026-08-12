@@ -606,7 +606,7 @@ class SystemGuidedEpisodeOperations:
             self._run_ssh(f"kill -TERM {self._collector_pid}")
         self._collector_pid = None
         if self._collector is not None:
-            self._collector.wait()
+            self._collector.wait(timeout_s=15.0)
             self._collector = None
 
     def build_and_validate(self, episode_path: str) -> None:
@@ -747,18 +747,17 @@ def run_guided_episode(
                 output(f"ERROR: {message}")
             else:
                 failure = RuntimeError(message)
-    if not cleanup_errors:
-        for episode_path in retained_paths:
-            try:
-                operations.build_and_validate(episode_path)
-            except BaseException as build_exc:
-                if failure is None:
-                    failure = build_exc
-                else:
-                    output(
-                        f"ERROR: failed to validate retained Episode "
-                        f"{episode_path}: {build_exc}"
-                    )
+    for episode_path in retained_paths:
+        try:
+            operations.build_and_validate(episode_path)
+        except BaseException as build_exc:
+            if failure is None:
+                failure = build_exc
+            else:
+                output(
+                    f"ERROR: failed to validate retained Episode "
+                    f"{episode_path}: {build_exc}"
+                )
     if failure is not None:
         raise failure.with_traceback(failure.__traceback__)
     assert completed_path is not None

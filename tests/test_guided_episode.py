@@ -318,6 +318,29 @@ def test_guided_episode_can_retain_a_failed_attempt_and_validate_it(tmp_path):
     )
 
 
+def test_guided_episode_validates_saved_episode_after_cleanup_error(tmp_path):
+    class CleanupFailureOperations(_FakeOperations):
+        def stop_collector(self):
+            self.events.append("stop_collector")
+            raise RuntimeError("collector SSH cleanup timed out")
+
+    config = _guided_config(tmp_path)
+    operations = CleanupFailureOperations()
+
+    with pytest.raises(RuntimeError, match="Collector cleanup failed"):
+        run_guided_episode(
+            config,
+            operations,
+            input_fn=lambda prompt: "s",
+            output=lambda message: None,
+        )
+
+    assert operations.events[-1] == (
+        "build_and_validate",
+        "/data/raw/episode_0001",
+    )
+
+
 def test_system_operations_manage_exact_collector_and_episode_commands(
     tmp_path, monkeypatch
 ):
@@ -525,7 +548,7 @@ def test_stop_collector_does_not_kill_remote_pid_after_collector_exited(
     class ExitedCollector:
         running = False
 
-        def wait(self):
+        def wait(self, timeout_s=5.0):
             return None
 
     operations = SystemGuidedEpisodeOperations(config, output=lambda message: None)
@@ -542,6 +565,26 @@ def test_stop_collector_does_not_kill_remote_pid_after_collector_exited(
     assert remote_commands == []
     assert operations._collector is None
     assert operations._collector_pid is None
+
+
+def test_stop_collector_allows_bounded_remote_shutdown_time(tmp_path, monkeypatch):
+    config = _guided_config(tmp_path)
+    wait_timeouts = []
+
+    class RunningCollector:
+        running = True
+
+        def wait(self, timeout_s=5.0):
+            wait_timeouts.append(timeout_s)
+
+    operations = SystemGuidedEpisodeOperations(config, output=lambda message: None)
+    operations._collector = RunningCollector()
+    operations._collector_pid = 14313
+    monkeypatch.setattr(operations, "_run_ssh", lambda command: "")
+
+    operations.stop_collector()
+
+    assert wait_timeouts == [15.0]
 
 
 def test_collector_extra_includes_episode_image_validation_dependency():
