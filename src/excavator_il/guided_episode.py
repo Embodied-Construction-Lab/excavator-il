@@ -246,6 +246,10 @@ class _LineProcess:
         self._process.wait(timeout=timeout_s)
         self._reader.join(timeout=1.0)
 
+    @property
+    def running(self) -> bool:
+        return self._process.poll() is None
+
 
 class SystemGuidedEpisodeOperations:
     """Real PC/SSH boundary used by the guided Episode script."""
@@ -571,9 +575,13 @@ class SystemGuidedEpisodeOperations:
             self._teleop = None
 
     def stop_collector(self) -> None:
-        if self._collector_pid is not None:
+        if (
+            self._collector_pid is not None
+            and self._collector is not None
+            and self._collector.running
+        ):
             self._run_ssh(f"kill -TERM {self._collector_pid}")
-            self._collector_pid = None
+        self._collector_pid = None
         if self._collector is not None:
             self._collector.wait()
             self._collector = None

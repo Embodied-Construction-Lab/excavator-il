@@ -492,6 +492,34 @@ def test_system_operations_only_discard_retake_episode_started_by_this_run(
         operations.discard_episode("/data/raw/episode_0007")
 
 
+def test_stop_collector_does_not_kill_remote_pid_after_collector_exited(
+    tmp_path, monkeypatch
+):
+    config = _guided_config(tmp_path)
+    remote_commands = []
+
+    class ExitedCollector:
+        running = False
+
+        def wait(self):
+            return None
+
+    operations = SystemGuidedEpisodeOperations(config, output=lambda message: None)
+    operations._collector = ExitedCollector()
+    operations._collector_pid = 15303
+    monkeypatch.setattr(
+        operations,
+        "_run_ssh",
+        lambda command: remote_commands.append(command) or "",
+    )
+
+    operations.stop_collector()
+
+    assert remote_commands == []
+    assert operations._collector is None
+    assert operations._collector_pid is None
+
+
 def test_collector_extra_includes_episode_image_validation_dependency():
     pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
     pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
