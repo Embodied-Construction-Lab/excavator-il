@@ -12,6 +12,7 @@ opencv-python-headless==4.13.0.92
 packaging==25.0
 pandas==2.3.3
 Pillow==12.3.0
+pyserial==3.5
 pyarrow==25.0.1
 requests==2.34.2
 safetensors==0.8.0

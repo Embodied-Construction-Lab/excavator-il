@@ -6,7 +6,10 @@ import pytest
 
 pytest.importorskip("lerobot", reason="install excavator-il[training] for ACT tests")
 
-from excavator_il.checkpoint_evaluation import evaluate_act_checkpoints
+from excavator_il.checkpoint_evaluation import (
+    evaluate_act_checkpoints,
+    write_act_deployment_manifest,
+)
 import excavator_il.checkpoint_evaluation as checkpoint_evaluation
 from excavator_il.lerobot_conversion import convert_episodes
 from excavator_il.training_split import (
@@ -137,6 +140,51 @@ def test_evaluate_act_checkpoints_selects_safe_lowest_validation_loss(
     assert metric.out_of_range_sample_count == 0
     assert -1.0 <= metric.action_min <= metric.action_max <= 1.0
 
+    machine_profile = tmp_path / "machine_profile.json"
+    machine_profile.write_text(
+        json.dumps(
+            {
+                "schema_version": "0.3.0",
+                "machine_id": "scale_excavator_v1",
+                "action_order": ["boom", "stick", "bucket", "swing"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    deployment = tmp_path / "deployment_manifest.json"
+    write_act_deployment_manifest(
+        result=result,
+        split_root=tmp_path / "split",
+        machine_profile_path=machine_profile,
+        output_path=deployment,
+        max_deployment_prior_l1=0.2,
+    )
+
+    manifest = json.loads(deployment.read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == "excavator_act_deployment.v1"
+    assert manifest["checkpoint"]["files_sha256"]["model.safetensors"]
+    assert manifest["data"]["pipeline_validation_present"] is False
+    assert manifest["contract"]["action_order"] == [
+        "boom",
+        "stick",
+        "bucket",
+        "swing",
+    ]
+    assert manifest["contract"]["state_dim"] == 11
+    assert manifest["contract"]["action_dim"] == 4
+    assert manifest["contract"]["chunk_size"] == 20
+    assert manifest["contract"]["n_action_steps"] == 10
+
+    (checkpoint / "model.safetensors").write_bytes(b"replaced-after-evaluation")
+    with pytest.raises(ValueError, match="changed since checkpoint evaluation"):
+        write_act_deployment_manifest(
+            result=result,
+            split_root=tmp_path / "split",
+            machine_profile_path=machine_profile,
+            output_path=tmp_path / "must_not_exist.json",
+            max_deployment_prior_l1=0.2,
+        )
+
 
 def test_evaluate_act_checkpoints_never_selects_out_of_range_checkpoint(
     tmp_path, rgb_episode_factory
@@ -179,6 +227,53 @@ def test_evaluate_act_checkpoints_never_selects_out_of_range_checkpoint(
     assert result.selected_checkpoint is None
     assert result.selection_reason.startswith("no checkpoint passed")
     assert result.checkpoints[0].out_of_range_sample_count == 3
+
+
+def test_deployment_manifest_rejects_selected_checkpoint_above_l1_threshold(
+    tmp_path, rgb_episode_factory
+):
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    episodes = [
+        rgb_episode_factory(episode_id=f"episode_{index:04d}", step_count=3)
+        for index in range(2)
+    ]
+    dataset_root = tmp_path / "dataset"
+    convert_episodes(episodes, dataset_root, "local/l1_gate")
+    split_manifest = tmp_path / "split.json"
+    prepare_training_split(
+        dataset_root=dataset_root,
+        repo_id="local/l1_gate",
+        output_path=split_manifest,
+    )
+    split = materialize_training_split(
+        manifest_path=split_manifest, output_root=tmp_path / "split"
+    )
+    train = LeRobotDataset(repo_id=split.train_repo_id, root=split.train_root)
+    checkpoint = tmp_path / "checkpoint"
+    _write_checkpoint(
+        checkpoint,
+        train,
+        train_root=split.train_root.resolve(),
+        train_repo_id=split.train_repo_id,
+    )
+    result = evaluate_act_checkpoints(
+        checkpoint_paths=[checkpoint], split_root=tmp_path / "split", batch_size=2
+    )
+    profile = tmp_path / "machine.json"
+    profile.write_text(
+        json.dumps({"action_order": ["boom", "stick", "bucket", "swing"]}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="L1 exceeds"):
+        write_act_deployment_manifest(
+            result=result,
+            split_root=tmp_path / "split",
+            machine_profile_path=profile,
+            output_path=tmp_path / "deployment.json",
+            max_deployment_prior_l1=-0.1,
+        )
 
 
 def test_evaluate_act_checkpoints_rejects_checkpoint_from_other_training_dataset(
@@ -310,4 +405,53 @@ def test_evaluate_act_checkpoints_rejects_dataset_change_during_evaluation(
             checkpoint_paths=[checkpoint],
             split_root=split_root,
             batch_size=2,
+        )
+
+
+def test_deployment_manifest_rejects_split_different_from_evaluated_split(
+    tmp_path, rgb_episode_factory
+):
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    episodes = [
+        rgb_episode_factory(episode_id=f"episode_{index:04d}", step_count=3)
+        for index in range(2)
+    ]
+    dataset_root = tmp_path / "dataset"
+    repo_id = "local/split_binding"
+    convert_episodes(episodes, dataset_root, repo_id)
+    manifest = tmp_path / "training_split.json"
+    prepare_training_split(
+        dataset_root=dataset_root, repo_id=repo_id, output_path=manifest
+    )
+    split_a = materialize_training_split(
+        manifest_path=manifest, output_root=tmp_path / "split_a"
+    )
+    split_b = materialize_training_split(
+        manifest_path=manifest, output_root=tmp_path / "split_b"
+    )
+    train = LeRobotDataset(repo_id=split_a.train_repo_id, root=split_a.train_root)
+    checkpoint = tmp_path / "checkpoint"
+    _write_checkpoint(
+        checkpoint,
+        train,
+        train_root=split_a.train_root.resolve(),
+        train_repo_id=split_a.train_repo_id,
+    )
+    result = evaluate_act_checkpoints(
+        checkpoint_paths=[checkpoint], split_root=tmp_path / "split_a", batch_size=2
+    )
+    machine_profile = tmp_path / "machine_profile.json"
+    machine_profile.write_text(
+        json.dumps({"action_order": ["boom", "stick", "bucket", "swing"]}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="different from checkpoint evaluation"):
+        write_act_deployment_manifest(
+            result=result,
+            split_root=tmp_path / "split_b",
+            machine_profile_path=machine_profile,
+            output_path=tmp_path / "deployment.json",
+            max_deployment_prior_l1=0.2,
         )

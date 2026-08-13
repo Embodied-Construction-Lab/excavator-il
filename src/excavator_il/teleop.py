@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .joystick_protocol import (
+    authenticate_json_message,
     ControllerIdentity,
     JoystickPacket,
     encode_joystick_packet,
@@ -53,6 +54,7 @@ class TeleopConfig:
     startup_axis_abs_max: float = 0.15
     startup_stable_samples: int = 10
     startup_timeout_s: float = 5.0
+    authentication_key_path: Path | None = None
 
     @classmethod
     def load(cls, path: str | Path) -> "TeleopConfig":
@@ -117,6 +119,11 @@ class TeleopConfig:
                 startup_gate.get("stable_samples", 10)
             ),
             startup_timeout_s=float(startup_gate.get("timeout_s", 5.0)),
+            authentication_key_path=(
+                None
+                if value.get("authentication_key_path") is None
+                else Path(str(value["authentication_key_path"])).expanduser()
+            ),
         )
         if not config.orin_host or not 1 <= config.orin_port <= 65535:
             raise ValueError("orin_host and orin_port must identify a valid UDP endpoint")
@@ -132,6 +139,11 @@ class TeleopConfig:
             raise ValueError("startup_gate.stable_samples must be positive")
         if not math.isfinite(config.startup_timeout_s) or config.startup_timeout_s <= 0:
             raise ValueError("startup_gate.timeout_s must be finite and positive")
+        if (
+            config.authentication_key_path is not None
+            and not config.authentication_key_path.is_absolute()
+        ):
+            raise ValueError("authentication_key_path must be absolute")
         return config
 
 
@@ -361,6 +373,16 @@ def run_teleop(config: TeleopConfig, *, print_every: int = 20) -> None:
     last_ack = -1
     accepted_ack_count = 0
     rejected_ack_count = 0
+    authentication_key: bytes | None = None
+    runtime_nonce: str | None = None
+    if config.authentication_key_path is not None:
+        try:
+            key_text = config.authentication_key_path.read_text(encoding="ascii").strip()
+            authentication_key = bytes.fromhex(key_text)
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise RuntimeError("cannot load ACT operator HMAC key") from exc
+        if len(authentication_key) < 32:
+            raise RuntimeError("ACT operator HMAC key must contain at least 32 bytes")
     try:
         devices = _open_configured_devices(pygame, config)
         _wait_for_safe_startup(pygame, devices, config)
@@ -385,7 +407,12 @@ def run_teleop(config: TeleopConfig, *, print_every: int = 20) -> None:
                 mapping_id=config.mapping_id,
                 calibration_id=config.calibration_id,
             )
-            sock.sendto(encode_joystick_packet(packet), destination)
+            payload = encode_joystick_packet(packet)
+            if authentication_key is not None and runtime_nonce is not None:
+                payload = authenticate_json_message(
+                    json.loads(payload), key=authentication_key, nonce=runtime_nonce
+                )
+            sock.sendto(payload, destination)
             try:
                 while True:
                     ack, source = sock.recvfrom(2048)
@@ -393,6 +420,9 @@ def run_teleop(config: TeleopConfig, *, print_every: int = 20) -> None:
                         continue
                     value = json.loads(ack.decode("utf-8"))
                     if value.get("schema_version") == "excavator_joystick_ack.v1":
+                        challenge = value.get("runtime_nonce")
+                        if authentication_key is not None and isinstance(challenge, str):
+                            runtime_nonce = challenge
                         if value.get("accepted") and value.get("sample_seq") is not None:
                             last_ack = max(last_ack, int(value["sample_seq"]))
                             accepted_ack_count += 1

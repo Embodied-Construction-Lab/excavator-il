@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import math
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -10,10 +12,59 @@ from typing import Any, Mapping
 
 JOYSTICK_SCHEMA_VERSION = "excavator_joystick.v1"
 AXIS_NAMES = ("X1", "Y1", "Z1", "X2", "Y2", "Z2")
+AUTHENTICATION_FIELD = "authentication"
 
 
 class JoystickProtocolError(ValueError):
     """Raised when a joystick datagram violates the public protocol."""
+
+
+def authenticate_json_message(
+    value: Mapping[str, Any], *, key: bytes, nonce: str
+) -> bytes:
+    """Bind a JSON message to one runtime nonce using HMAC-SHA256."""
+
+    if len(key) < 32 or len(nonce) < 32:
+        raise ValueError("HMAC key and runtime nonce are too short")
+    unsigned = dict(value)
+    unsigned.pop(AUTHENTICATION_FIELD, None)
+    canonical = json.dumps(
+        unsigned, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    signature = hmac.new(key, nonce.encode("ascii") + b"\0" + canonical, hashlib.sha256)
+    authenticated = {
+        **unsigned,
+        AUTHENTICATION_FIELD: {
+            "runtime_nonce": nonce,
+            "hmac_sha256": signature.hexdigest(),
+        },
+    }
+    return json.dumps(
+        authenticated, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+
+
+def verify_json_message(datagram: bytes, *, key: bytes, nonce: str) -> dict[str, Any]:
+    """Verify HMAC and return the unsigned JSON object."""
+
+    try:
+        value = json.loads(datagram.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise JoystickProtocolError(f"invalid authenticated JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise JoystickProtocolError("authenticated message must be an object")
+    authentication = value.pop(AUTHENTICATION_FIELD, None)
+    if not isinstance(authentication, dict) or authentication.get("runtime_nonce") != nonce:
+        raise JoystickProtocolError("runtime nonce mismatch")
+    signature = authentication.get("hmac_sha256")
+    if not isinstance(signature, str):
+        raise JoystickProtocolError("HMAC is missing")
+    expected = authenticate_json_message(value, key=key, nonce=nonce)
+    expected_value = json.loads(expected)
+    expected_signature = expected_value[AUTHENTICATION_FIELD]["hmac_sha256"]
+    if not hmac.compare_digest(signature, expected_signature):
+        raise JoystickProtocolError("HMAC verification failed")
+    return value
 
 
 @dataclass(frozen=True)

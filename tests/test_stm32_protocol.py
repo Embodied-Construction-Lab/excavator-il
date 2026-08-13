@@ -1,7 +1,42 @@
+import json
+
 from excavator_il.stm32_protocol import (
     STM32_TELEMETRY_FIELDS,
+    Stm32ManualCommandEncoder,
+    Stm32TelemetryFrame,
     Stm32TelemetryParser,
 )
+
+
+def test_manual_command_encoder_resumes_sequence_and_preserves_axis_contract():
+    values = {field: 0 for field in STM32_TELEMETRY_FIELDS}
+    values.update(
+        schema_version="stm32_control_telemetry.v2",
+        command_rx_seq=41,
+        command_timed_out=1,
+    )
+    encoder = Stm32ManualCommandEncoder()
+    encoder.synchronize(
+        Stm32TelemetryFrame(receive_monotonic_ns=1, values=values)
+    )
+
+    payload = encoder.encode(
+        axes=(-0.4, -0.2, 0.0, 0.3, 0.1, 0.0),
+        monotonic_ns=1_234_567_890,
+    )
+
+    command = json.loads(payload)
+    assert command["schema_version"] == "stm32_manual_command.v1"
+    assert command["command_seq"] == 42
+    assert command["command_source_stamp_ms"] == 1234
+    assert [command[name] for name in ("X1", "Y1", "Z1", "X2", "Y2", "Z2")] == [
+        -0.4,
+        -0.2,
+        0.0,
+        0.3,
+        0.1,
+        0.0,
+    ]
 
 
 def test_v2_telemetry_parser_preserves_command_action_and_receive_time():

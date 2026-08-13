@@ -174,5 +174,75 @@ sudo docker run --rm \
 
 首次 CUDA 前向包含惰性初始化/内核预热，不是可接受的控制周期。未来在线
 Runtime 必须在运动授权前完成 checkpoint 校验、模型加载、至少一次预热和有限值检查；任一步失败
-都保持零命令。本文没有实现在线相机/state 接入、action chunk 调度、deadman/运动授权或 STM32
-转发，这些仍是后续独立的安全验收阶段。
+都保持零命令。
+
+## 6. 生成正式部署清单
+
+在线 motion 不接受人工填写的 checkpoint 路径作为充分证明。必须在训练 PC 上重新运行 held-out
+Episode 评估，并由 evaluator 原子生成部署清单：
+
+```bash
+excavator-il evaluate-checkpoints \
+  outputs/<run>/checkpoints/*/pretrained_model \
+  --split-root data/lerobot/<materialized-split> \
+  --device cuda --batch-size 4 --num-workers 0 \
+  --deployment-manifest outputs/<run>/deployment_manifest.json \
+  --machine-profile ../shared/machine_profile.json \
+  --max-deployment-prior-l1 0.20
+```
+
+清单绑定 evaluator 实际选中的安全 checkpoint、全文件 SHA-256、训练/验证数据指纹、非合成资格、
+`[boom,stick,bucket,swing]` 动作顺序、11 维状态字段、640×480 RGB、chunk 参数与
+`shared/machine_profile.json`。任一不一致时 motion 入口拒绝启动。
+`0.20` 仅是当前 5 条 Pilot 的阶段门限（当前选中模型实测 `0.15808`），正式采集扩大后必须用
+新的 held-out Pilot 和真机任务成功率重新标定，不能把该数值视为永久性能标准。
+
+## 7. 在线 Shadow 验证
+
+先停止 Collector、`orin_state_sender.py`、RL Runtime 和任何占用 `/dev/ttyTHS1`/相机的进程。
+Shadow 使用真实相机与 STM32 遥测运行 ACT，但物理串口边界禁止全部写操作；PC 使用独立的
+`config/teleop.act.pc.json` 端口 18091 提供 deadman 身份和时序验证。
+
+Motion 还要求 PC/Orin 各自以 `0600` 权限保存同一份至少 32 byte 随机 HMAC 密钥；密钥永不
+提交 Git。每次 Orin runtime 启动产生新的随机 nonce，PC 必须先收到 challenge，再对后续数据包
+签名，因此旧会话包和未认证的局域网注入不能授权运动。首次创建：
+
+```bash
+install -d -m 700 /home/zhaoshuai/.config/excavator
+openssl rand -hex 32 > /home/zhaoshuai/.config/excavator/act_operator_hmac.key
+chmod 600 /home/zhaoshuai/.config/excavator/act_operator_hmac.key
+scp /home/zhaoshuai/.config/excavator/act_operator_hmac.key \
+  jetson16@192.168.31.10:/home/jetson16/workspace_excavator/act_inference/
+ssh jetson16@192.168.31.10 \
+  'chmod 600 /home/jetson16/workspace_excavator/act_inference/act_operator_hmac.key'
+```
+
+```bash
+sudo docker run --rm \
+  --runtime=nvidia --gpus all \
+  --network=host \
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges \
+  --ulimit memlock=-1 --ulimit stack=67108864 \
+  --device /dev/ttyTHS1 \
+  --device /dev/video1 \
+  -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
+  -v /home/jetson16/workspace_excavator/act_inference/checkpoint_parent_split_001054:/opt/act-checkpoint:ro \
+  -v /home/jetson16/workspace_excavator/act_inference/deployment:/opt/act-deployment:ro \
+  -v /home/jetson16/workspace_excavator/shared:/opt/excavator-config:ro \
+  -v /home/jetson16/workspace_excavator/act_inference/logs:/opt/act-runtime-logs \
+  -v /home/jetson16/workspace_excavator/act_inference/act_operator_hmac.key:/run/secrets/act_operator_hmac:ro \
+  -v "$PWD/config/act_runtime.orin.json:/opt/act-runtime.json:ro" \
+  excavator-act-inference:jp72-pytorch261 \
+  excavator-il act-runtime --config /opt/act-runtime.json
+```
+
+此命令省略 `--motion-authorization`，所以即使 deadman 按下也不得产生任何 STM32 串口写入。
+验收包括：CUDA 预热通过、相机与 10 Hz 状态持续、无未来图像、推理小于 100 ms、输出有限且在
+`[-1,1]`、序号断点会清空 LeRobot action queue，并且日志中 `serial_write_performed=false`。
+
+Motion 命令只在发动机关闭零命令验收和现场口头确认后使用；不要提前执行：
+
+```text
+excavator-il act-runtime ... --motion-authorization ALLOW_ACT_MACHINE_MOTION
+```

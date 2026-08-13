@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import math
+import os
 from pathlib import Path
+import tempfile
 
 import packaging.version  # noqa: F401 - safetensors accesses packaging.version lazily
 import torch
@@ -15,12 +18,15 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies import get_policy_class, make_pre_post_processors
 
 from .act_smoke import _validate_excavator_act_contract
+from .lerobot_conversion import STATE_FIELDS
+from .raw_episode import ACTION_FIELDS
 from .training_split import MATERIALIZED_SPLIT_SCHEMA_VERSION, _dataset_fingerprint
 
 
 @dataclass(frozen=True)
 class CheckpointValidationMetric:
     checkpoint_path: Path
+    checkpoint_files_sha256: tuple[tuple[str, str], ...]
     validation_frame_count: int
     deployment_prior_l1: float
     action_min: float
@@ -34,6 +40,163 @@ class CheckpointEvaluationResult:
     selected_checkpoint: Path | None
     selection_reason: str
     checkpoints: tuple[CheckpointValidationMetric, ...]
+    split_root: Path
+    split_provenance: tuple[tuple[str, str], ...]
+
+
+DEPLOYMENT_MANIFEST_SCHEMA_VERSION = "excavator_act_deployment.v1"
+ACT_ACTION_ORDER = ("boom", "stick", "bucket", "swing")
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _checkpoint_file_hashes(checkpoint: Path) -> dict[str, str]:
+    files = sorted(path for path in checkpoint.iterdir() if path.is_file())
+    if not files:
+        raise ValueError(f"checkpoint contains no files: {checkpoint}")
+    return {path.name: _sha256_file(path) for path in files}
+
+
+def write_act_deployment_manifest(
+    *,
+    result: CheckpointEvaluationResult,
+    split_root: str | Path,
+    machine_profile_path: str | Path,
+    output_path: str | Path,
+    max_deployment_prior_l1: float,
+) -> Path:
+    """Atomically bind one evaluator-selected checkpoint to its full ACT contract."""
+
+    selected = result.selected_checkpoint
+    if selected is None:
+        raise ValueError("cannot deploy when no checkpoint passed evaluation")
+    checkpoint = selected.resolve()
+    metric = next(
+        (item for item in result.checkpoints if item.checkpoint_path.resolve() == checkpoint),
+        None,
+    )
+    if (
+        metric is None
+        or not metric.all_finite
+        or metric.out_of_range_sample_count != 0
+        or not math.isfinite(metric.deployment_prior_l1)
+    ):
+        raise ValueError("selected checkpoint does not have a safe evaluation metric")
+    if (
+        not math.isfinite(max_deployment_prior_l1)
+        or max_deployment_prior_l1 < 0
+        or metric.deployment_prior_l1 > max_deployment_prior_l1
+    ):
+        raise ValueError("selected checkpoint deployment-prior L1 exceeds threshold")
+    root = Path(split_root).resolve()
+    provenance_path = root / "split_provenance.json"
+    try:
+        provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("materialized split provenance is unavailable") from exc
+    if provenance.get("schema_version") != MATERIALIZED_SPLIT_SCHEMA_VERSION:
+        raise ValueError("materialized split provenance schema is invalid")
+    evaluated_provenance = dict(result.split_provenance)
+    current_provenance = {
+        field: provenance.get(field)
+        for field in (
+            "source_dataset_sha256",
+            "train_repo_id",
+            "validation_repo_id",
+            "train_dataset_sha256",
+            "validation_dataset_sha256",
+        )
+    }
+    if root != result.split_root or current_provenance != evaluated_provenance:
+        raise ValueError("deployment split is different from checkpoint evaluation")
+    train_root = root / "train"
+    validation_root = root / "validation"
+    if any(
+        (candidate / "pipeline_validation.json").exists()
+        for candidate in (root, train_root, validation_root)
+    ):
+        raise ValueError("pipeline-validation data cannot produce a deployment manifest")
+    if (
+        _dataset_fingerprint(train_root) != provenance.get("train_dataset_sha256")
+        or _dataset_fingerprint(validation_root)
+        != provenance.get("validation_dataset_sha256")
+    ):
+        raise ValueError("materialized dataset fingerprint mismatch")
+    profile_path = Path(machine_profile_path).resolve()
+    try:
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("machine profile is unavailable or invalid") from exc
+    if tuple(profile.get("action_order", ())) != ACT_ACTION_ORDER:
+        raise ValueError("machine profile action order is not authoritative")
+    try:
+        policy_config = json.loads((checkpoint / "config.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("selected checkpoint config is unavailable or invalid") from exc
+    current_hashes = _checkpoint_file_hashes(checkpoint)
+    if current_hashes != dict(metric.checkpoint_files_sha256):
+        raise ValueError("checkpoint changed since checkpoint evaluation")
+    manifest = {
+        "schema_version": DEPLOYMENT_MANIFEST_SCHEMA_VERSION,
+        "checkpoint": {
+            "path_at_evaluation": str(checkpoint),
+            "selected": True,
+            "selection_reason": result.selection_reason,
+            "files_sha256": current_hashes,
+        },
+        "evaluation": {
+            "validation_frame_count": metric.validation_frame_count,
+            "deployment_prior_l1": metric.deployment_prior_l1,
+            "action_min": metric.action_min,
+            "action_max": metric.action_max,
+            "all_finite": metric.all_finite,
+            "out_of_range_sample_count": metric.out_of_range_sample_count,
+            "max_deployment_prior_l1": max_deployment_prior_l1,
+        },
+        "data": {
+            "pipeline_validation_present": False,
+            "train_repo_id": provenance.get("train_repo_id"),
+            "validation_repo_id": provenance.get("validation_repo_id"),
+            "train_dataset_sha256": provenance.get("train_dataset_sha256"),
+            "validation_dataset_sha256": provenance.get("validation_dataset_sha256"),
+            "source_dataset_sha256": provenance.get("source_dataset_sha256"),
+        },
+        "contract": {
+            "action_order": list(ACT_ACTION_ORDER),
+            "action_fields": list(ACTION_FIELDS),
+            "state_fields": list(STATE_FIELDS),
+            "state_dim": len(STATE_FIELDS),
+            "action_dim": len(ACTION_FIELDS),
+            "front_rgb_chw": policy_config["input_features"][
+                "observation.images.front"
+            ]["shape"],
+            "chunk_size": policy_config.get("chunk_size"),
+            "n_action_steps": policy_config.get("n_action_steps"),
+        },
+        "machine_profile_sha256": _sha256_file(profile_path),
+    }
+    destination = Path(output_path).resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(manifest, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, destination)
+    except BaseException:
+        Path(temporary_name).unlink(missing_ok=True)
+        raise
+    return destination
 
 
 def _evaluate_checkpoint(
@@ -45,6 +208,7 @@ def _evaluate_checkpoint(
     batch_size: int,
     num_workers: int,
 ) -> CheckpointValidationMetric:
+    initial_hashes = _checkpoint_file_hashes(checkpoint)
     policy_class = get_policy_class("act")
     policy = policy_class.from_pretrained(checkpoint)
     metadata = LeRobotDatasetMetadata(repo_id, root=dataset_root)
@@ -117,8 +281,11 @@ def _evaluate_checkpoint(
 
     if valid_value_count == 0:
         raise ValueError("validation dataset contains no valid ACT action labels")
+    if _checkpoint_file_hashes(checkpoint) != initial_hashes:
+        raise ValueError(f"checkpoint changed during evaluation: {checkpoint}")
     return CheckpointValidationMetric(
         checkpoint_path=checkpoint,
+        checkpoint_files_sha256=tuple(initial_hashes.items()),
         validation_frame_count=dataset.num_frames,
         deployment_prior_l1=absolute_error_sum / valid_value_count,
         action_min=action_min,
@@ -217,4 +384,15 @@ def evaluate_act_checkpoints(
             else "no checkpoint passed finite-action and normalized-range gates"
         ),
         checkpoints=metrics,
+        split_root=root,
+        split_provenance=tuple(
+            (field, str(provenance.get(field)))
+            for field in (
+                "source_dataset_sha256",
+                "train_repo_id",
+                "validation_repo_id",
+                "train_dataset_sha256",
+                "validation_dataset_sha256",
+            )
+        ),
     )

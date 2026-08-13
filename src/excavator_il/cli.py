@@ -55,6 +55,9 @@ def _parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--device", default="cpu")
     evaluate.add_argument("--batch-size", type=int, default=4)
     evaluate.add_argument("--num-workers", type=int, default=0)
+    evaluate.add_argument("--deployment-manifest")
+    evaluate.add_argument("--machine-profile")
+    evaluate.add_argument("--max-deployment-prior-l1", type=float)
 
     smoke = commands.add_parser("smoke-train", help="run one CPU ACT train and inference step")
     smoke.add_argument("--image-height", type=int, default=64)
@@ -96,6 +99,15 @@ def _parser() -> argparse.ArgumentParser:
 
     collect = commands.add_parser("collect", help="run the Orin hardware collector")
     collect.add_argument("--config", default="config/collection.orin.json")
+
+    act_runtime = commands.add_parser(
+        "act-runtime", help="run fail-closed online ACT inference on Orin"
+    )
+    act_runtime.add_argument("--config", default="config/act_runtime.orin.json")
+    act_runtime.add_argument(
+        "--motion-authorization",
+        help="exact explicit authorization; omitted means no-write shadow mode",
+    )
 
     build = commands.add_parser("build-steps", help="build causal 10 Hz ACT steps")
     build.add_argument("episode")
@@ -180,7 +192,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             _print_json(asdict(split))
         elif args.command == "evaluate-checkpoints":
-            from .checkpoint_evaluation import evaluate_act_checkpoints
+            from .checkpoint_evaluation import (
+                evaluate_act_checkpoints,
+                write_act_deployment_manifest,
+            )
 
             result = evaluate_act_checkpoints(
                 checkpoint_paths=args.checkpoints,
@@ -189,6 +204,25 @@ def main(argv: list[str] | None = None) -> int:
                 batch_size=args.batch_size,
                 num_workers=args.num_workers,
             )
+            manifest_inputs = (
+                args.deployment_manifest,
+                args.machine_profile,
+                args.max_deployment_prior_l1,
+            )
+            if any(value is not None for value in manifest_inputs) and not all(
+                value is not None for value in manifest_inputs
+            ):
+                raise ValueError(
+                    "deployment manifest, machine profile, and max L1 must be provided together"
+                )
+            if args.deployment_manifest:
+                write_act_deployment_manifest(
+                    result=result,
+                    split_root=args.split_root,
+                    machine_profile_path=args.machine_profile,
+                    output_path=args.deployment_manifest,
+                    max_deployment_prior_l1=args.max_deployment_prior_l1,
+                )
             _print_json(asdict(result))
             return 0 if result.selected_checkpoint is not None else 3
         elif args.command == "smoke-train":
@@ -250,6 +284,16 @@ def main(argv: list[str] | None = None) -> int:
                 format="%(asctime)s %(levelname)s %(name)s: %(message)s",
             )
             run_collector(args.config)
+        elif args.command == "act-runtime":
+            from .act_runtime_service import run_act_runtime
+
+            logging.basicConfig(
+                level=logging.INFO,
+                format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+            )
+            run_act_runtime(
+                args.config, motion_authorization=args.motion_authorization
+            )
         elif args.command == "build-steps":
             from .episode_builder import build_steps
 
