@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import tempfile
+from typing import Any, Mapping
 
 import packaging.version  # noqa: F401 - safetensors accesses packaging.version lazily
 import torch
@@ -44,7 +45,7 @@ class CheckpointEvaluationResult:
     split_provenance: tuple[tuple[str, str], ...]
 
 
-DEPLOYMENT_MANIFEST_SCHEMA_VERSION = "excavator_act_deployment.v1"
+DEPLOYMENT_MANIFEST_SCHEMA_VERSION = "excavator_act_deployment.v2"
 ACT_ACTION_ORDER = ("boom", "stick", "bucket", "swing")
 
 
@@ -61,6 +62,116 @@ def _checkpoint_file_hashes(checkpoint: Path) -> dict[str, str]:
     if not files:
         raise ValueError(f"checkpoint contains no files: {checkpoint}")
     return {path.name: _sha256_file(path) for path in files}
+
+
+def _policy_input_batch(
+    row: Mapping[str, Any], input_features: Mapping[str, Any]
+) -> dict[str, torch.Tensor]:
+    batch = {
+        key: (
+            value.float().div(255.0)
+            if key.startswith("observation.images.") and value.dtype == torch.uint8
+            else value
+        ).unsqueeze(0)
+        for key, value in row.items()
+        if key in input_features and isinstance(value, torch.Tensor)
+    }
+    missing = set(input_features) - set(batch)
+    if missing:
+        raise ValueError(
+            f"validation sample is missing ACT input features: {', '.join(sorted(missing))}"
+        )
+    return batch
+
+
+def _score_runtime_selected_actions(
+    *,
+    policy: Any,
+    dataset: Any,
+    preprocessor: Any,
+    postprocessor: Any,
+) -> dict[str, Any]:
+    """Replay validation frames with LeRobot's select_action queue semantics."""
+
+    episode_indices = dataset.hf_dataset["episode_index"]
+    if len(episode_indices) != dataset.num_frames:
+        raise ValueError("validation dataset episode indices are incomplete")
+    policy.eval()
+    previous_episode_index: int | None = None
+    reset_count = 0
+    absolute_error_sum = 0.0
+    valid_value_count = 0
+    action_min = float("inf")
+    action_max = float("-inf")
+    out_of_range_sample_count = 0
+    all_finite = True
+    with torch.no_grad():
+        for frame_index in range(dataset.num_frames):
+            episode_index = int(episode_indices[frame_index])
+            if previous_episode_index != episode_index:
+                policy.reset()
+                reset_count += 1
+                previous_episode_index = episode_index
+            row = dataset[frame_index]
+            batch = _policy_input_batch(row, policy.config.input_features)
+            processed = preprocessor(batch)
+            predicted = postprocessor(policy.select_action(processed))
+            target = _selected_runtime_target(row).to(predicted.device).reshape_as(
+                predicted
+            )
+            if not bool(torch.isfinite(target).all().item()):
+                raise ValueError("validation action labels contain non-finite values")
+            if bool(((target < -1.000001) | (target > 1.000001)).any().item()):
+                raise ValueError("validation action labels exceed [-1, 1]")
+            absolute_error_sum += float(torch.abs(predicted - target).sum().item())
+            valid_value_count += int(target.numel())
+            finite = bool(torch.isfinite(predicted).all().item())
+            in_range = bool(
+                ((predicted >= -1.000001) & (predicted <= 1.000001)).all().item()
+            )
+            if finite:
+                action_min = min(action_min, float(predicted.min().item()))
+                action_max = max(action_max, float(predicted.max().item()))
+            all_finite = all_finite and finite
+            if not finite or not in_range:
+                out_of_range_sample_count += 1
+    if valid_value_count == 0:
+        raise ValueError("validation dataset contains no valid ACT action labels")
+    return {
+        "validation_frame_count": dataset.num_frames,
+        "deployment_prior_l1": absolute_error_sum / valid_value_count,
+        "action_min": action_min,
+        "action_max": action_max,
+        "all_finite": all_finite,
+        "out_of_range_sample_count": out_of_range_sample_count,
+        "reset_count": reset_count,
+    }
+
+
+def _selected_runtime_target(row: Mapping[str, Any]) -> torch.Tensor:
+    """Extract the causal step-0 label that matches runtime select_action."""
+
+    action = row.get("action")
+    if not isinstance(action, torch.Tensor):
+        raise ValueError("validation action labels must be tensors")
+    if action.ndim == 1:
+        return action
+    if action.ndim != 2 or action.shape[0] <= 0 or action.shape[1] <= 0:
+        raise ValueError(
+            "validation action labels must be shaped [action_dim] or [chunk, action_dim]"
+        )
+    action_is_pad = row.get("action_is_pad")
+    if action_is_pad is not None:
+        if not isinstance(action_is_pad, torch.Tensor):
+            raise ValueError("validation action_is_pad must be a tensor")
+        flattened_pad = action_is_pad.reshape(-1)
+        if flattened_pad.shape[0] != action.shape[0]:
+            raise ValueError(
+                "validation action_is_pad does not align with action labels"
+            )
+        if bool(flattened_pad[0].item()):
+            raise ValueError("validation selected action is padded")
+    return action[0]
 
 
 def write_act_deployment_manifest(
@@ -178,6 +289,10 @@ def write_act_deployment_manifest(
             ]["shape"],
             "chunk_size": policy_config.get("chunk_size"),
             "n_action_steps": policy_config.get("n_action_steps"),
+            "input_feature_keys": sorted(policy_config.get("input_features", {})),
+            "temporal_ensemble_coeff": policy_config.get(
+                "temporal_ensemble_coeff"
+            ),
         },
         "machine_profile_sha256": _sha256_file(profile_path),
     }
@@ -229,69 +344,23 @@ def _evaluate_checkpoint(
         preprocessor_overrides={"device_processor": {"device": device}},
         postprocessor_overrides={"device_processor": {"device": device}},
     )
-    loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=device.startswith("cuda"),
-        persistent_workers=num_workers > 0,
+    replay_metrics = _score_runtime_selected_actions(
+        policy=policy,
+        dataset=dataset,
+        preprocessor=preprocessor,
+        postprocessor=postprocessor,
     )
-
-    absolute_error_sum = 0.0
-    valid_value_count = 0
-    action_min = float("inf")
-    action_max = float("-inf")
-    out_of_range_sample_count = 0
-    all_finite = True
-    policy.eval()
-    with torch.no_grad():
-        for batch in loader:
-            for camera_key in dataset.meta.camera_keys:
-                if camera_key in batch and batch[camera_key].dtype == torch.uint8:
-                    batch[camera_key] = batch[camera_key].float() / 255.0
-            raw_target = batch["action"].clone()
-            raw_is_pad = batch["action_is_pad"].clone()
-            processed = preprocessor(batch)
-            predicted = policy.predict_action_chunk(processed)
-            predicted_action = postprocessor(predicted)
-            target = raw_target.to(predicted_action.device)
-            valid_mask = ~raw_is_pad.to(predicted_action.device).unsqueeze(-1)
-            valid_targets = target[valid_mask.expand_as(target)]
-            if not bool(torch.isfinite(valid_targets).all().item()):
-                raise ValueError("validation action labels contain non-finite values")
-            if bool(((valid_targets < -1.000001) | (valid_targets > 1.000001)).any().item()):
-                raise ValueError("validation action labels exceed [-1, 1]")
-            absolute_error_sum += float(
-                (torch.abs(predicted_action - target) * valid_mask).sum().item()
-            )
-            valid_value_count += int(valid_mask.sum().item()) * predicted_action.shape[-1]
-
-            action_chunk = predicted_action
-            finite_by_sample = torch.isfinite(action_chunk).flatten(1).all(dim=1)
-            all_finite = all_finite and bool(finite_by_sample.all().item())
-            if bool(finite_by_sample.any().item()):
-                finite_values = action_chunk[finite_by_sample]
-                action_min = min(action_min, float(finite_values.min().item()))
-                action_max = max(action_max, float(finite_values.max().item()))
-            unsafe = (~finite_by_sample) | (
-                (action_chunk < -1.000001) | (action_chunk > 1.000001)
-            ).flatten(1).any(dim=1)
-            out_of_range_sample_count += int(unsafe.sum().item())
-
-    if valid_value_count == 0:
-        raise ValueError("validation dataset contains no valid ACT action labels")
     if _checkpoint_file_hashes(checkpoint) != initial_hashes:
         raise ValueError(f"checkpoint changed during evaluation: {checkpoint}")
     return CheckpointValidationMetric(
         checkpoint_path=checkpoint,
         checkpoint_files_sha256=tuple(initial_hashes.items()),
-        validation_frame_count=dataset.num_frames,
-        deployment_prior_l1=absolute_error_sum / valid_value_count,
-        action_min=action_min,
-        action_max=action_max,
-        all_finite=all_finite,
-        out_of_range_sample_count=out_of_range_sample_count,
+        validation_frame_count=int(replay_metrics["validation_frame_count"]),
+        deployment_prior_l1=float(replay_metrics["deployment_prior_l1"]),
+        action_min=float(replay_metrics["action_min"]),
+        action_max=float(replay_metrics["action_max"]),
+        all_finite=bool(replay_metrics["all_finite"]),
+        out_of_range_sample_count=int(replay_metrics["out_of_range_sample_count"]),
     )
 
 

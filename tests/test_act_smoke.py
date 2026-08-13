@@ -228,3 +228,41 @@ def test_act_contract_reports_missing_dataset_feature_as_value_error():
 
     with pytest.raises(ValueError, match="missing required feature"):
         _validate_excavator_act_contract(config, SimpleNamespace(features={}))
+
+
+def test_act_contract_rejects_temporal_ensemble_or_extra_camera():
+    from types import SimpleNamespace
+
+    from lerobot.configs.types import FeatureType, PolicyFeature
+    from excavator_il.act_smoke import _validate_excavator_act_contract
+    from excavator_il.lerobot_conversion import STATE_FIELDS
+    from excavator_il.raw_episode import ACTION_FIELDS
+
+    inputs = {
+        "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(11,)),
+        "observation.images.front": PolicyFeature(
+            type=FeatureType.VISUAL, shape=(3, 480, 640)
+        ),
+        "observation.images.wrist": PolicyFeature(
+            type=FeatureType.VISUAL, shape=(3, 480, 640)
+        ),
+    }
+    config = SimpleNamespace(
+        chunk_size=20,
+        n_action_steps=10,
+        temporal_ensemble_coeff=0.01,
+        input_features=inputs,
+        output_features={
+            "action": PolicyFeature(type=FeatureType.ACTION, shape=(4,))
+        },
+    )
+    dataset = SimpleNamespace(
+        features={
+            "observation.state": {"shape": (11,), "names": STATE_FIELDS},
+            "observation.images.front": {"shape": (480, 640, 3)},
+            "action": {"shape": (4,), "names": ACTION_FIELDS},
+        }
+    )
+
+    with pytest.raises(ValueError, match="temporal ensemble"):
+        _validate_excavator_act_contract(config, dataset)

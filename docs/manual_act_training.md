@@ -326,9 +326,11 @@ train 数据集。历史上用全量数据训练的 checkpoint 会被拒绝，�
 会再次检查两个数据集的指纹，评估期间发生修改时不会产生选择结果。
 
 验证指标 `deployment_prior_l1` 在死区后的归一化专家动作原始空间计算：checkpoint 自带的训练集
-归一化器只用于模型输入和模型输出反归一化，在所有留出帧上执行确定性的 ACT 部署先验
-（VAE latent 取零），再计算 padding-aware action L1。不同 checkpoint 的归一化统计不会改变 L1
-比较尺度。这不是在线 rollout 成功率，也不是 LeRobot 0.5.2 的 VAE posterior loss。
+归一化器只用于模型输入和模型输出反归一化。评估器按验证集时间顺序逐帧调用 LeRobot
+`select_action()`，在每个 LeRobot Episode 边界清空 action queue，并只比较该时刻线上真正会执行的
+单步动作与当前专家标签。不同 checkpoint 的归一化统计不会改变 L1 比较尺度。这不是在线 rollout
+成功率，也不是 LeRobot 0.5.2 的 VAE posterior loss。`--batch-size`、`--num-workers` 当前仅保留为
+兼容参数；严格 replay 不会并行重排时间序列。
 
 选择顺序是 fail-closed：checkpoint 必须先满足所有预测有限、所有反归一化动作保持在 `[-1,1]`，
 然后才在安全候选中选择最低 L1。若没有候选，命令退出码为 3。选中的 checkpoint 后续仍必须通过

@@ -78,6 +78,34 @@ def test_policy_session_converts_live_observation_and_uses_lerobot_select_action
     assert float(batch["observation.images.front"].max()) == pytest.approx(17 / 255)
 
 
+def test_policy_session_rejects_temporal_ensemble_checkpoint():
+    policy = _Policy()
+    policy.config.temporal_ensemble_coeff = 0.01
+
+    with pytest.raises(ValueError, match="temporal ensemble"):
+        ActPolicySession(
+            policy=policy,
+            preprocessor=lambda batch: batch,
+            postprocessor=lambda action: action,
+            device="cpu",
+        )
+
+
+def test_policy_session_rejects_extra_image_feature():
+    policy = _Policy()
+    policy.config.input_features["observation.images.wrist"] = SimpleNamespace(
+        shape=(3, 2, 3)
+    )
+
+    with pytest.raises(ValueError, match="single front RGB"):
+        ActPolicySession(
+            policy=policy,
+            preprocessor=lambda batch: batch,
+            postprocessor=lambda action: action,
+            device="cpu",
+        )
+
+
 def test_live_state_uses_the_exact_training_units_and_order():
     telemetry = {
         "boom_pos_mm": 1500.0,
@@ -149,6 +177,40 @@ def test_policy_warmup_checks_output_and_resets_action_queue():
     action = warmup_act_policy_session(session)
 
     assert action == (0.1, -0.2, 0.3, -0.4)
+    assert session.reset_count == 1
+
+
+def test_live_warmup_uses_real_observation_budget_and_resets_action_queue():
+    class _Session:
+        def __init__(self):
+            self.reset_count = 0
+            self.seen = []
+
+        def select_action(self, observation):
+            self.seen.append(observation)
+            return (0.1, -0.2, 0.3, -0.4)
+
+        def reset(self):
+            self.reset_count += 1
+
+    ticks = iter((1_000, 1_001))
+    session = _Session()
+    engine = ActRuntimeEngine(
+        session=session,
+        controller=ActRuntimeController(mode=RuntimeMode.SHADOW),
+        monotonic_ns=lambda: next(ticks),
+    )
+    observation = ActObservation(
+        state=(0.0,) * 11,
+        front_rgb=np.zeros((2, 3, 3), dtype=np.uint8),
+        state_monotonic_ns=900,
+        camera_monotonic_ns=800,
+    )
+
+    action = engine.warmup_live_observation(observation)
+
+    assert action == (0.1, -0.2, 0.3, -0.4)
+    assert session.seen == [observation]
     assert session.reset_count == 1
 
 
@@ -643,6 +705,44 @@ def test_motion_operator_gate_requires_runtime_nonce_hmac_and_rejects_replay():
             receive_monotonic_ns=3_000,
         )
     )["accepted"] is False
+
+
+def test_motion_operator_gate_revokes_enabled_state_on_authentication_failure():
+    from excavator_il.joystick_protocol import authenticate_json_message
+
+    key = b"k" * 32
+    nonce = "n" * 64
+    gate = OperatorDeadmanGate(
+        allowed_pc_host="192.168.31.219",
+        expected_device_ids=("left", "right"),
+        mapping_id="dual_stick.v1",
+        calibration_id="raw.v1",
+        authentication_key=key,
+        runtime_nonce=nonce,
+    )
+    release = json.loads(_operator_packet(session="session-a", sequence=0, deadman=False))
+    press = json.loads(_operator_packet(session="session-a", sequence=1, deadman=True))
+    for stamp, packet in (
+        (1_000, release),
+        (2_000, press),
+    ):
+        gate.accept(
+            authenticate_json_message(packet, key=key, nonce=nonce),
+            source=("192.168.31.219", 40000),
+            receive_monotonic_ns=stamp,
+        )
+    assert gate.snapshot() == (True, 2_000)
+
+    rejected = json.loads(
+        gate.accept(
+            _operator_packet(session="session-a", sequence=2, deadman=True),
+            source=("192.168.31.219", 40000),
+            receive_monotonic_ns=3_000,
+        )
+    )
+
+    assert rejected["reason"] == "authentication_required"
+    assert gate.snapshot() == (False, 3_000)
 
 
 def test_operator_gate_requires_release_before_first_deadman_press():

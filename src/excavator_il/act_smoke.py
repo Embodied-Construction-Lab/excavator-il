@@ -42,10 +42,14 @@ class ActCheckpointInferenceResult:
 def _validate_excavator_act_contract(config: object, dataset: LeRobotDataset) -> None:
     if config.chunk_size != 20 or config.n_action_steps != 10:
         raise ValueError("ACT checkpoint must use chunk_size=20 and n_action_steps=10")
+    if getattr(config, "temporal_ensemble_coeff", None) is not None:
+        raise ValueError("ACT checkpoint must disable temporal ensemble")
     required_inputs = {
         "observation.state": (len(STATE_FIELDS),),
         "observation.images.front": None,
     }
+    if set(config.input_features) != set(required_inputs):
+        raise ValueError("ACT checkpoint must use exactly one front RGB camera")
     for key, expected_shape in required_inputs.items():
         if key not in config.input_features:
             raise ValueError(f"ACT checkpoint is missing required input feature: {key}")

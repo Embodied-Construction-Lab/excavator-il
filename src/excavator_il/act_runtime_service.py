@@ -122,6 +122,7 @@ class Stm32CommandChannel:
         mode: RuntimeMode,
         max_operator_age_ms: float = 150.0,
         max_state_age_ms: float = 100.0,
+        record_command: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         if max_operator_age_ms <= 0 or max_state_age_ms <= 0:
             raise ValueError("runtime timeouts must be positive")
@@ -140,6 +141,7 @@ class Stm32CommandChannel:
         self._state_generation = 0
         self._state_safe = False
         self._motion_epoch = 0
+        self._record_command = record_command
         self._lock = threading.Lock()
 
     @property
@@ -164,7 +166,7 @@ class Stm32CommandChannel:
         self._motion_epoch += 1
 
     def _write_locked(
-        self, axes: tuple[float, ...], monotonic_ns: int
+        self, axes: tuple[float, ...], monotonic_ns: int, *, reason: str
     ) -> int | None:
         if self._mode is RuntimeMode.SHADOW:
             return None
@@ -176,6 +178,17 @@ class Stm32CommandChannel:
         if written != len(payload):
             raise OSError(f"short serial write: {written}/{len(payload)} bytes")
         self._serial.flush()
+        if self._record_command is not None:
+            self._record_command(
+                {
+                    "schema_version": "excavator_act_runtime_command.v1",
+                    "command_monotonic_ns": monotonic_ns,
+                    "command_seq": command_sequence,
+                    "serial_axes": list(axes),
+                    "reason": reason,
+                    "serial_write_performed": True,
+                }
+            )
         return command_sequence
 
     def write_axes(
@@ -227,7 +240,7 @@ class Stm32CommandChannel:
             ):
                 axes = (0.0,) * 6
                 gate_reason = "state_not_fresh_or_current"
-            sequence = self._write_locked(axes, monotonic_ns)
+            sequence = self._write_locked(axes, monotonic_ns, reason=gate_reason)
             return CommandWriteResult(
                 requested_axes=requested,
                 effective_axes=axes,
@@ -244,7 +257,7 @@ class Stm32CommandChannel:
         if not reason:
             raise ValueError("safe-zero reason must be non-empty")
         with self._lock:
-            return self._write_locked((0.0,) * 6, monotonic_ns)
+            return self._write_locked((0.0,) * 6, monotonic_ns, reason=reason)
 
     def update_operator(self, enabled: bool, *, receive_monotonic_ns: int) -> None:
         with self._lock:
@@ -254,7 +267,9 @@ class Stm32CommandChannel:
             self._operator_timeout_zero_sent = False
             if was_enabled and not enabled and not self._terminally_disarmed:
                 self._interrupt_motion_locked()
-                self._write_locked((0.0,) * 6, receive_monotonic_ns)
+                self._write_locked(
+                    (0.0,) * 6, receive_monotonic_ns, reason="operator_released"
+                )
 
     def enforce_operator_timeout(self, *, monotonic_ns: int) -> bool:
         with self._lock:
@@ -269,7 +284,7 @@ class Stm32CommandChannel:
             self._operator_enabled = False
             self._operator_timeout_zero_sent = True
             self._interrupt_motion_locked()
-            self._write_locked((0.0,) * 6, monotonic_ns)
+            self._write_locked((0.0,) * 6, monotonic_ns, reason="operator_timeout")
             return True
 
     def update_state(self, frame: Stm32TelemetryFrame) -> int:
@@ -291,7 +306,11 @@ class Stm32CommandChannel:
             self._state_timeout_zero_sent = False
             if was_safe and not self._state_safe and not self._terminally_disarmed:
                 self._interrupt_motion_locked()
-                self._write_locked((0.0,) * 6, frame.receive_monotonic_ns)
+                self._write_locked(
+                    (0.0,) * 6,
+                    frame.receive_monotonic_ns,
+                    reason="unsafe_telemetry",
+                )
             return self._state_generation
 
     def enforce_state_timeout(self, *, monotonic_ns: int) -> bool:
@@ -304,7 +323,7 @@ class Stm32CommandChannel:
                 return False
             self._state_timeout_zero_sent = True
             self._interrupt_motion_locked()
-            self._write_locked((0.0,) * 6, monotonic_ns)
+            self._write_locked((0.0,) * 6, monotonic_ns, reason="state_timeout")
             return True
 
     def terminal_disarm(self, *, monotonic_ns: int, reason: str) -> None:
@@ -317,7 +336,7 @@ class Stm32CommandChannel:
             self._operator_enabled = False
             self._interrupt_motion_locked()
             if self._synchronized:
-                self._write_locked((0.0,) * 6, monotonic_ns)
+                self._write_locked((0.0,) * 6, monotonic_ns, reason=reason)
 
 
 class ActRuntimeStepProcessor:
@@ -352,12 +371,15 @@ class ActRuntimeStepProcessor:
         state_generation: int | None = None,
         dropped_state_count: int = 0,
     ) -> ActRuntimeDecision:
-        observation = self._observations.build(telemetry)
+        state_monotonic_ns = telemetry.receive_monotonic_ns
+        camera_monotonic_ns: int | None = None
         epoch_before = self._command_channel.motion_epoch
         if self._last_motion_epoch != epoch_before:
             self._engine.reset()
         self._last_motion_epoch = epoch_before
-        if dropped_state_count > 0:
+        try:
+            observation = self._observations.build(telemetry)
+        except ValueError:
             self._engine.reset()
             decision = ActRuntimeDecision(
                 predicted_action=(0.0,) * 4,
@@ -365,16 +387,30 @@ class ActRuntimeStepProcessor:
                 serial_axes=(0.0,) * 6
                 if self._command_channel.mode is RuntimeMode.MOTION
                 else None,
-                reason="state_gap",
+                reason="observation_unavailable",
             )
             now_ns = self._clock()
         else:
-            decision = self._engine.step(
-                observation=observation,
-                telemetry=telemetry.values,
-                operator_snapshot=self._operator_snapshot,
-            )
-            now_ns = self._clock()
+            state_monotonic_ns = observation.state_monotonic_ns
+            camera_monotonic_ns = observation.camera_monotonic_ns
+            if dropped_state_count > 0:
+                self._engine.reset()
+                decision = ActRuntimeDecision(
+                    predicted_action=(0.0,) * 4,
+                    commanded_action=(0.0,) * 4,
+                    serial_axes=(0.0,) * 6
+                    if self._command_channel.mode is RuntimeMode.MOTION
+                    else None,
+                    reason="state_gap",
+                )
+                now_ns = self._clock()
+            else:
+                decision = self._engine.step(
+                    observation=observation,
+                    telemetry=telemetry.values,
+                    operator_snapshot=self._operator_snapshot,
+                )
+                now_ns = self._clock()
         write_attempted = decision.serial_axes is not None
         write_result: CommandWriteResult | None = None
         if write_attempted:
@@ -390,8 +426,8 @@ class ActRuntimeStepProcessor:
         self._record(
             {
                 "schema_version": "excavator_act_runtime_step.v1",
-                "state_monotonic_ns": observation.state_monotonic_ns,
-                "camera_monotonic_ns": observation.camera_monotonic_ns,
+                "state_monotonic_ns": state_monotonic_ns,
+                "camera_monotonic_ns": camera_monotonic_ns,
                 "decision_monotonic_ns": now_ns,
                 "predicted_action": list(decision.predicted_action),
                 "commanded_action": list(decision.commanded_action),
@@ -416,6 +452,17 @@ class ActRuntimeStepProcessor:
             }
         )
         return decision
+
+    def warmup_live(
+        self,
+        telemetry: Stm32TelemetryFrame,
+        *,
+        dropped_state_count: int = 0,
+    ) -> tuple[float, ...]:
+        if dropped_state_count < 0:
+            raise ValueError("dropped_state_count must be non-negative")
+        observation = self._observations.build(telemetry)
+        return self._engine.warmup_live_observation(observation)
 
 
 def _verify_checkpoint(config: ActRuntimeConfig) -> None:
@@ -493,18 +540,48 @@ def _startup_stm32(
     return next_sequence
 
 
+def _perform_live_warmup(
+    *,
+    states: LatestStateQueue,
+    processor: ActRuntimeStepProcessor,
+    timeout_s: float = 2.0,
+) -> tuple[float, ...]:
+    """Require one causal live observation before reporting runtime readiness."""
+
+    if timeout_s <= 0:
+        raise ValueError("live ACT warmup timeout must be positive")
+    deadline = time.monotonic() + timeout_s
+    last_error: ValueError | None = None
+    while time.monotonic() < deadline:
+        remaining_s = deadline - time.monotonic()
+        try:
+            item, dropped = states.get(timeout_s=min(0.05, remaining_s))
+        except queue.Empty:
+            continue
+        frame, _generation = item
+        try:
+            return processor.warmup_live(frame, dropped_state_count=dropped)
+        except ValueError as exc:
+            last_error = exc
+    raise RuntimeError("ACT runtime did not complete live observation warmup") from last_error
+
+
 class _JsonlLog:
     def __init__(self, root: Path, mode: RuntimeMode) -> None:
         root.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d_%H%M%S")
         self.path = root / f"act_runtime_{mode.value}_{stamp}.jsonl"
         self._file = self.path.open("x", encoding="utf-8", buffering=1)
+        self._lock = threading.Lock()
 
     def write(self, value: dict[str, Any]) -> None:
-        self._file.write(json.dumps(value, separators=(",", ":")) + "\n")
+        encoded = json.dumps(value, separators=(",", ":")) + "\n"
+        with self._lock:
+            self._file.write(encoded)
 
     def close(self) -> None:
-        self._file.close()
+        with self._lock:
+            self._file.close()
 
 
 def _load_operator_authentication_key(path: Path) -> bytes:
@@ -651,12 +728,20 @@ class ActRuntimeService:
                 command_channel=self._command_channel,
                 mode=self._command_channel.mode,
             )
-            for target in (self._serial_loop, self._inference_loop):
-                worker = threading.Thread(
-                    target=self._worker, args=(target,), daemon=True
-                )
-                worker.start()
-                workers.append(worker)
+            serial_worker = threading.Thread(
+                target=self._worker, args=(self._serial_loop,), daemon=True
+            )
+            serial_worker.start()
+            workers.append(serial_worker)
+            live_warmup_action = _perform_live_warmup(
+                states=self._states, processor=self._processor
+            )
+            LOGGER.info("ACT live warmup passed: action=%s", live_warmup_action)
+            inference_worker = threading.Thread(
+                target=self._worker, args=(self._inference_loop,), daemon=True
+            )
+            inference_worker.start()
+            workers.append(inference_worker)
             LOGGER.info(
                 "ACT hardware ready: mode=%s initial_command_seq=%d",
                 self._command_channel.mode.value,
@@ -726,8 +811,8 @@ def run_act_runtime(
         postprocessor=postprocessor,
         device=config.device,
     )
-    warmup_action = warmup_act_policy_session(session)
-    LOGGER.info("ACT CUDA warmup passed: action=%s", warmup_action)
+    synthetic_warmup_action = warmup_act_policy_session(session)
+    LOGGER.info("ACT synthetic CUDA warmup passed: action=%s", synthetic_warmup_action)
     _verify_checkpoint(config)
     if mode is RuntimeMode.MOTION:
         verify_deployment_manifest(
@@ -784,6 +869,7 @@ def run_act_runtime(
         mode=mode,
         max_operator_age_ms=config.max_operator_age_ms,
         max_state_age_ms=config.state_silence_timeout_ms,
+        record_command=log.write,
     )
     processor = ActRuntimeStepProcessor(
         observation_buffer=observations,

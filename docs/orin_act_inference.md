@@ -194,7 +194,14 @@ excavator-il evaluate-checkpoints \
 清单绑定 evaluator 实际选中的安全 checkpoint、全文件 SHA-256、训练/验证数据指纹、非合成资格、
 `[boom,stick,bucket,swing]` 动作顺序、11 维状态字段、640×480 RGB、chunk 参数与
 `shared/machine_profile.json`。任一不一致时 motion 入口拒绝启动。
-`0.20` 仅是当前 5 条 Pilot 的阶段门限（当前选中模型实测 `0.15808`），正式采集扩大后必须用
+这里的 `deployment-prior L1` 不是整块 `predict_action_chunk()` 的逐元素误差，而是按验证集时间顺序
+逐帧 replay LeRobot `select_action()`、并在每个 LeRobot Episode 边界 `reset()` 后，对实际将要执行的
+单步动作计算的 L1。这样 checkpoint 选择与线上 Runtime 的动作消费语义保持一致。
+部署清单 schema v2 还锁定 `input_feature_keys` 只能是 11 维状态和单前视 RGB，并要求
+`temporal_ensemble_coeff=null`；因此不会在换 checkpoint 后静默切换成 LeRobot temporal ensemble
+或多相机语义。当前采用固定 action queue：10 Hz 状态丢失时清空队列并写零，不使用 RTC leftover
+merge 或延迟重锚定。后者会改变动作时序，只有新模型和专项真机验证后才能引入。
+`0.20` 仅是当前 5 条 Pilot 的阶段门限（当前选中模型 runtime replay 实测 `0.12668`），正式采集扩大后必须用
 新的 held-out Pilot 和真机任务成功率重新标定，不能把该数值视为永久性能标准。
 
 ## 7. 在线 Shadow 验证
@@ -240,6 +247,12 @@ sudo docker run --rm \
 此命令省略 `--motion-authorization`，所以即使 deadman 按下也不得产生任何 STM32 串口写入。
 验收包括：CUDA 预热通过、相机与 10 Hz 状态持续、无未来图像、推理小于 100 ms、输出有限且在
 `[-1,1]`、序号断点会清空 LeRobot action queue，并且日志中 `serial_write_performed=false`。
+Motion 日志同时记录推理 step 和异步安全命令事件；deadman 松开、operator/state timeout、unsafe
+telemetry、startup 与 shutdown 的实际零命令均使用 `excavator_act_runtime_command.v1` 记录。
+运行时会先完成一次 synthetic CUDA warmup，再在真实相机 + STM32 新状态上完成一次 live warmup；
+只有 live warmup 通过且其内部 action queue 已清空后，runtime 才会打印 `ACT hardware ready`。
+若某个 10 Hz state 找不到因果相机帧，runtime 该 step 只记录 `observation_unavailable` 并保持零命令，
+不得用未来图像补齐，也不应沿用上一非零动作。
 
 Motion 命令只在发动机关闭零命令验收和现场口头确认后使用；不要提前执行：
 

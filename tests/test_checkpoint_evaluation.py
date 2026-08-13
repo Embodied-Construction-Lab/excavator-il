@@ -7,6 +7,7 @@ import pytest
 pytest.importorskip("lerobot", reason="install excavator-il[training] for ACT tests")
 
 from excavator_il.checkpoint_evaluation import (
+    _score_runtime_selected_actions,
     evaluate_act_checkpoints,
     write_act_deployment_manifest,
 )
@@ -94,6 +95,123 @@ def _write_checkpoint(
         save_file(state, state_path)
 
 
+def test_runtime_replay_scores_single_selected_actions_and_resets_at_episode_boundaries():
+    import torch
+
+    class _FakeDataset:
+        def __init__(self):
+            self.num_frames = 4
+            self.hf_dataset = {"episode_index": [0, 0, 1, 1]}
+            zeros = torch.zeros(11, dtype=torch.float32)
+            image = torch.zeros(3, 24, 32, dtype=torch.float32)
+            self._rows = [
+                {
+                    "observation.state": zeros,
+                    "observation.images.front": image,
+                    "action": torch.stack(
+                        [
+                            torch.full((4,), value, dtype=torch.float32),
+                            torch.full((4,), value + 0.01, dtype=torch.float32),
+                        ],
+                        dim=0,
+                    ),
+                }
+                for value in (0.10, 0.11, 0.20, 0.21)
+            ]
+
+        def __getitem__(self, index):
+            return self._rows[index]
+
+    class _FakePolicy:
+        class _Config:
+            input_features = {
+                "observation.state": object(),
+                "observation.images.front": object(),
+            }
+
+        def __init__(self):
+            self.config = self._Config()
+            self._pending = []
+            self._chunk_count = 0
+            self.reset_count = 0
+
+        def eval(self):
+            return self
+
+        def reset(self):
+            self._pending = []
+            self.reset_count += 1
+
+        def select_action(self, _batch):
+            if not self._pending:
+                self._chunk_count += 1
+                start = 0.10 if self._chunk_count == 1 else 0.20
+                self._pending = [
+                    torch.full((1, 4), start + offset, dtype=torch.float32)
+                    for offset in (0.0, 0.01, 0.02)
+                ]
+            return self._pending.pop(0)
+
+    metrics = _score_runtime_selected_actions(
+        policy=_FakePolicy(),
+        dataset=_FakeDataset(),
+        preprocessor=lambda batch: batch,
+        postprocessor=lambda action: action,
+    )
+
+    assert metrics["deployment_prior_l1"] == pytest.approx(0.0)
+    assert metrics["out_of_range_sample_count"] == 0
+    assert metrics["all_finite"] is True
+    assert metrics["validation_frame_count"] == 4
+    assert metrics["action_min"] == pytest.approx(0.10)
+    assert metrics["action_max"] == pytest.approx(0.21)
+    assert metrics["reset_count"] == 2
+
+
+def test_runtime_replay_normalizes_uint8_camera_like_live_runtime():
+    import torch
+
+    class _Dataset:
+        num_frames = 1
+        hf_dataset = {"episode_index": [0]}
+
+        def __getitem__(self, _index):
+            return {
+                "observation.state": torch.zeros(11),
+                "observation.images.front": torch.full(
+                    (3, 2, 2), 255, dtype=torch.uint8
+                ),
+                "action": torch.zeros(1, 4),
+            }
+
+    class _Policy:
+        class _Config:
+            input_features = {
+                "observation.state": object(),
+                "observation.images.front": object(),
+            }
+
+        config = _Config()
+
+        def eval(self):
+            return self
+
+        def reset(self):
+            pass
+
+        def select_action(self, batch):
+            assert batch["observation.images.front"].dtype == torch.float32
+            assert float(batch["observation.images.front"].max()) == pytest.approx(1.0)
+            return torch.zeros(1, 4)
+
+    _score_runtime_selected_actions(
+        policy=_Policy(),
+        dataset=_Dataset(),
+        preprocessor=lambda batch: batch,
+        postprocessor=lambda action: action,
+    )
+
+
 def test_evaluate_act_checkpoints_selects_safe_lowest_validation_loss(
     tmp_path, rgb_episode_factory
 ):
@@ -161,7 +279,7 @@ def test_evaluate_act_checkpoints_selects_safe_lowest_validation_loss(
     )
 
     manifest = json.loads(deployment.read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == "excavator_act_deployment.v1"
+    assert manifest["schema_version"] == "excavator_act_deployment.v2"
     assert manifest["checkpoint"]["files_sha256"]["model.safetensors"]
     assert manifest["data"]["pipeline_validation_present"] is False
     assert manifest["contract"]["action_order"] == [
@@ -174,6 +292,11 @@ def test_evaluate_act_checkpoints_selects_safe_lowest_validation_loss(
     assert manifest["contract"]["action_dim"] == 4
     assert manifest["contract"]["chunk_size"] == 20
     assert manifest["contract"]["n_action_steps"] == 10
+    assert manifest["contract"]["input_feature_keys"] == [
+        "observation.images.front",
+        "observation.state",
+    ]
+    assert manifest["contract"]["temporal_ensemble_coeff"] is None
 
     (checkpoint / "model.safetensors").write_bytes(b"replaced-after-evaluation")
     with pytest.raises(ValueError, match="changed since checkpoint evaluation"):

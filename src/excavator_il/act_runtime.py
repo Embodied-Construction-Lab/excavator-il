@@ -164,6 +164,10 @@ class OperatorDeadmanGate:
                     )
                     datagram = json.dumps(unsigned, separators=(",", ":")).encode("utf-8")
                 except JoystickProtocolError:
+                    with self._lock:
+                        self._enabled = False
+                        self._release_observed = False
+                        self._receive_monotonic_ns = receive_monotonic_ns
                     return self._ack(
                         sample_seq=None,
                         accepted=False,
@@ -328,6 +332,21 @@ class ActRuntimeEngine:
     def reset(self) -> None:
         self._session.reset()
 
+    def warmup_live_observation(
+        self, observation: ActObservation
+    ) -> tuple[float, ...]:
+        """Run one live observation through ACT, then clear any queued chunk state."""
+
+        started_ns = self._clock()
+        try:
+            action = self._session.select_action(observation)
+        finally:
+            self._session.reset()
+        completed_ns = self._clock()
+        if completed_ns - started_ns > self._max_inference_ns:
+            raise ValueError("live ACT warmup exceeded the inference budget")
+        return action
+
     def step(
         self,
         *,
@@ -416,6 +435,13 @@ class ActPolicySession:
     ) -> None:
         if policy.config.chunk_size != 20 or policy.config.n_action_steps != 10:
             raise ValueError("ACT runtime requires chunk_size=20 and n_action_steps=10")
+        if getattr(policy.config, "temporal_ensemble_coeff", None) is not None:
+            raise ValueError("ACT runtime does not support temporal ensemble checkpoints")
+        if set(policy.config.input_features) != {
+            "observation.state",
+            "observation.images.front",
+        }:
+            raise ValueError("ACT runtime requires exactly one single front RGB input")
         if tuple(policy.config.input_features["observation.state"].shape) != (
             len(STATE_FIELDS),
         ):

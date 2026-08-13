@@ -209,8 +209,12 @@ ACT 接口固定为一台前视 RGB、11 维状态、4 维动作
 ACT 训练命令见 [docs/collection_training_runbook.md](docs/collection_training_runbook.md)。
 逐条人工训练、监控、checkpoint 校验和断点续训命令见
 [docs/manual_act_training.md](docs/manual_act_training.md)。
-Orin NVIDIA PyTorch 镜像构建、GPU 自检、checkpoint 传输和只读离线推理见
+Orin NVIDIA PyTorch 镜像构建、GPU 自检、checkpoint 传输、只读离线推理和在线 Runtime 见
 [docs/orin_act_inference.md](docs/orin_act_inference.md)。
+在线 `act-runtime` 固定复用 LeRobot `ACTPolicy.select_action()`：motion 仅接受 v2 deployment
+manifest、单前视因果 RGB、11 维状态和 `[boom, stick, bucket, swing]` 四维动作。启动时必须先通过
+synthetic CUDA warmup 与真实相机/STM32 live warmup；状态丢帧、安全中断或无因果图像时清空
+action queue 并保持零命令。完整 shadow/motion 门禁与验收命令以该 Orin 手册为准。
 每个连续 Training Segment 写成独立 LeRobot Episode，并使用 LeRobot 原生 `action_is_pad` 防止
 ACT 动作块跨越故障边界；转换帧保留 parent Episode、segment 和原始 frame index。
 

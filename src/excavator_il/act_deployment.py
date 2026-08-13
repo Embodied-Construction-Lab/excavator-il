@@ -86,6 +86,11 @@ def verify_deployment_manifest(
         "front_rgb_chw": [3, 480, 640],
         "chunk_size": 20,
         "n_action_steps": 10,
+        "input_feature_keys": [
+            "observation.images.front",
+            "observation.state",
+        ],
+        "temporal_ensemble_coeff": None,
     }
     for field, expected in expected_contract.items():
         if contract.get(field) != expected:

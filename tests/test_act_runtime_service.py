@@ -15,6 +15,7 @@ from excavator_il.act_runtime_service import (
     LatestStateQueue,
     SensorSequenceTracker,
     Stm32CommandChannel,
+    _perform_live_warmup,
     _apply_operator_datagram,
     _route_telemetry_frame,
     _startup_stm32,
@@ -122,6 +123,34 @@ def test_motion_startup_drains_backlog_and_waits_for_exact_zero_ack():
     assert json.loads(serial.writes[0])["command_seq"] == 42
 
 
+def test_command_channel_audits_async_operator_timeout_zero_write():
+    serial = _Serial()
+    events = []
+    channel = Stm32CommandChannel(
+        serial_port=serial,
+        encoder=Stm32ManualCommandEncoder(),
+        mode=RuntimeMode.MOTION,
+        max_operator_age_ms=1.0,
+        record_command=events.append,
+    )
+    channel.synchronize(_telemetry())
+    channel.update_operator(True, receive_monotonic_ns=1_000_000)
+
+    assert channel.enforce_operator_timeout(monotonic_ns=3_000_001) is True
+
+    assert len(serial.writes) == 1
+    assert events == [
+        {
+            "schema_version": "excavator_act_runtime_command.v1",
+            "command_monotonic_ns": 3_000_001,
+            "command_seq": 0,
+            "serial_axes": [0.0] * 6,
+            "reason": "operator_timeout",
+            "serial_write_performed": True,
+        }
+    ]
+
+
 def test_motion_startup_refuses_ready_without_zero_ack():
     serial = _StartupSerial(
         [_telemetry_line(command_rx_seq=41, command_valid=1)]
@@ -192,7 +221,7 @@ def test_motion_manifest_rejects_wrong_action_order(tmp_path):
     manifest.write_text(
         json.dumps(
             {
-                "schema_version": "excavator_act_deployment.v1",
+                "schema_version": "excavator_act_deployment.v2",
                 "checkpoint": {
                     "files_sha256": {
                         "model.safetensors": sha256(b"model").hexdigest()
@@ -262,7 +291,7 @@ def test_motion_manifest_rejects_unsafe_evaluation(tmp_path):
     manifest.write_text(
         json.dumps(
             {
-                "schema_version": "excavator_act_deployment.v1",
+                "schema_version": "excavator_act_deployment.v2",
                 "checkpoint": {
                     "selected": True,
                     "selection_reason": "lowest safe validation deployment-prior L1",
@@ -345,6 +374,80 @@ def test_shadow_step_never_calls_serial_write_and_logs_prediction():
     assert serial.writes == []
     assert records[0]["predicted_action"] == [0.1, -0.2, 0.3, -0.4]
     assert records[0]["serial_write_attempted"] is False
+
+
+def test_missing_causal_observation_fails_closed_without_crashing_worker():
+    serial = _Serial()
+    records = []
+    buffer = CausalObservationBuffer()
+    buffer.add_camera(
+        RgbCameraFrame(
+            capture_monotonic_ns=1_010_000_000,
+            rgb=np.zeros((480, 640, 3), dtype=np.uint8),
+        )
+    )
+    processor = ActRuntimeStepProcessor(
+        observation_buffer=buffer,
+        engine=_Engine(
+            ActRuntimeDecision(
+                predicted_action=(0.1, -0.2, 0.3, -0.4),
+                commanded_action=(0.0,) * 4,
+                serial_axes=None,
+                reason="shadow_mode",
+            )
+        ),
+        command_channel=Stm32CommandChannel(
+            serial_port=serial,
+            encoder=Stm32ManualCommandEncoder(),
+            mode=RuntimeMode.SHADOW,
+        ),
+        operator_snapshot=lambda: (False, None),
+        record=records.append,
+        monotonic_ns=lambda: 1_020_000_000,
+    )
+
+    decision = processor.process(_telemetry(stamp=1_000_000_000))
+
+    assert decision.reason == "observation_unavailable"
+    assert serial.writes == []
+    assert records[0]["serial_write_attempted"] is False
+    assert records[0]["reason"] == "observation_unavailable"
+
+
+def test_live_warmup_waits_for_a_causal_frame_before_declaring_ready():
+    class _States:
+        def __init__(self):
+            self._items = iter(
+                (
+                    ((_telemetry(stamp=1_000_000_000), 1), 0),
+                    ((_telemetry(stamp=1_100_000_000), 2), 1),
+                )
+            )
+
+        def get(self, *, timeout_s):
+            assert timeout_s > 0
+            return next(self._items)
+
+    class _Processor:
+        def __init__(self):
+            self.calls = []
+
+        def warmup_live(self, frame, *, dropped_state_count=0):
+            self.calls.append((frame.receive_monotonic_ns, dropped_state_count))
+            if len(self.calls) == 1:
+                raise ValueError("no causal camera")
+            return (0.1, -0.2, 0.3, -0.4)
+
+    processor = _Processor()
+    action = _perform_live_warmup(
+        states=_States(), processor=processor, timeout_s=0.1
+    )
+
+    assert action == (0.1, -0.2, 0.3, -0.4)
+    assert processor.calls == [
+        (1_000_000_000, 0),
+        (1_100_000_000, 1),
+    ]
 
 
 def test_motion_fail_closed_step_writes_explicit_zero_command():
