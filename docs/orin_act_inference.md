@@ -210,6 +210,16 @@ merge 或延迟重锚定。后者会改变动作时序，只有新模型和专�
 Shadow 使用真实相机与 STM32 遥测运行 ACT，但物理串口边界禁止全部写操作；PC 使用独立的
 `config/teleop.act.pc.json` 端口 18091 提供 deadman 身份和时序验证。
 
+先在 PC 执行只读 USART2 验收；该命令不启动 Collector、不写串口，也不发送零命令：
+
+```bash
+python scripts/diagnose_stm32_link.py
+```
+
+只有输出同时满足 `passed=true`、`parse_failure_count=0`、`control_sequence_gap_count=0` 和
+`estimated_rate_hz` 位于 18～22 Hz 才能继续。失败时复位 STM32 并检查 TX→RX/共地，不得修改 parser
+去接受乱码或错误字段数。
+
 Motion 还要求 PC/Orin 各自以 `0600` 权限保存同一份至少 32 byte 随机 HMAC 密钥；密钥永不
 提交 Git。每次 Orin runtime 启动产生新的随机 nonce，PC 必须先收到 challenge，再对后续数据包
 签名，因此旧会话包和未认证的局域网注入不能授权运动。首次创建：
@@ -225,26 +235,12 @@ ssh jetson16@192.168.31.10 \
 ```
 
 ```bash
-sudo docker run --rm \
-  --runtime=nvidia --gpus all \
-  --network=host \
-  --cap-drop=ALL \
-  --security-opt=no-new-privileges \
-  --ulimit memlock=-1 --ulimit stack=67108864 \
-  --device /dev/ttyTHS1 \
-  --device /dev/video1 \
-  -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
-  -v /home/jetson16/workspace_excavator/act_inference/checkpoint_parent_split_001054:/opt/act-checkpoint:ro \
-  -v /home/jetson16/workspace_excavator/act_inference/deployment:/opt/act-deployment:ro \
-  -v /home/jetson16/workspace_excavator/shared:/opt/excavator-config:ro \
-  -v /home/jetson16/workspace_excavator/act_inference/logs:/opt/act-runtime-logs \
-  -v /home/jetson16/workspace_excavator/act_inference/act_operator_hmac.key:/run/secrets/act_operator_hmac:ro \
-  -v "$PWD/config/act_runtime.orin.json:/opt/act-runtime.json:ro" \
-  excavator-act-inference:jp72-pytorch261 \
-  excavator-il act-runtime --config /opt/act-runtime.json
+# 在 Orin 仓库执行
+bash scripts/run_act_shadow.sh
 ```
 
 此命令省略 `--motion-authorization`，所以即使 deadman 按下也不得产生任何 STM32 串口写入。
+Shadow 不读取 HMAC 密钥，密钥初始化只在后续 motion commission 前执行。
 验收包括：CUDA 预热通过、相机与 10 Hz 状态持续、无未来图像、推理小于 100 ms、输出有限且在
 `[-1,1]`、序号断点会清空 LeRobot action queue，并且日志中 `serial_write_performed=false`。
 Motion 日志同时记录推理 step 和异步安全命令事件；deadman 松开、operator/state timeout、unsafe

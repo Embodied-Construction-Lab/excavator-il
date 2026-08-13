@@ -100,6 +100,13 @@ def _parser() -> argparse.ArgumentParser:
     collect = commands.add_parser("collect", help="run the Orin hardware collector")
     collect.add_argument("--config", default="config/collection.orin.json")
 
+    diagnose_stm32 = commands.add_parser(
+        "diagnose-stm32-link",
+        help="read-only check of the Orin USART2 telemetry link",
+    )
+    diagnose_stm32.add_argument("--config", default="config/collection.orin.json")
+    diagnose_stm32.add_argument("--duration-s", type=float, default=10.0)
+
     act_runtime = commands.add_parser(
         "act-runtime", help="run fail-closed online ACT inference on Orin"
     )
@@ -284,6 +291,14 @@ def main(argv: list[str] | None = None) -> int:
                 format="%(asctime)s %(levelname)s %(name)s: %(message)s",
             )
             run_collector(args.config)
+        elif args.command == "diagnose-stm32-link":
+            from .stm32_link_diagnostic import run_stm32_link_diagnostic
+
+            report = run_stm32_link_diagnostic(
+                args.config, duration_s=args.duration_s
+            )
+            _print_json(asdict(report))
+            return 0 if report.passed else 3
         elif args.command == "act-runtime":
             from .act_runtime_service import run_act_runtime
 
