@@ -253,8 +253,20 @@ telemetry、startup 与 shutdown 的实际零命令均使用 `excavator_act_runt
 若某个 10 Hz state 找不到因果相机帧，runtime 该 step 只记录 `observation_unavailable` 并保持零命令，
 不得用未来图像补齐，也不应沿用上一非零动作。
 
-Motion 命令只在发动机关闭零命令验收和现场口头确认后使用；不要提前执行：
+Motion 入口只在现场确认后使用。首次验收必须保持发动机关闭、双杆居中和 deadman 全程释放；
+先在 Orin 启动 Runtime：
 
-```text
-excavator-il act-runtime ... --motion-authorization ALLOW_ACT_MACHINE_MOTION
+```bash
+bash scripts/run_act_motion.sh
 ```
+
+脚本拒绝竞争的 Collector/RL/ACT Runtime、被占用的串口/相机、缺失或权限错误的 HMAC 密钥，
+并要求人工输入精确授权。看到 `ACT hardware ready: mode=motion` 后，在 PC 启动认证手柄流：
+
+```bash
+excavator-il teleop --config config/teleop.act.pc.json --print-every 20
+```
+
+零命令验收中不得按 deadman；保持 30 秒后先停止 PC teleop，再停止 Orin Runtime。只有 Runtime 日志
+证明 startup、认证 release、watchdog/停止均为零命令，且 STM32 telemetry 确认收到零动作后，才能
+另行安排最小非零动作验收。

@@ -21,3 +21,20 @@ def test_act_runtime_uses_the_verified_uvc_capture_node():
     ).read_text(encoding="utf-8")
 
     assert '"device": "/dev/video0"' in config
+
+
+def test_act_motion_requires_local_authorization_and_mounts_the_hmac_key():
+    script_path = (
+        Path(__file__).resolve().parents[1] / "scripts" / "run_act_motion.sh"
+    )
+    script = script_path.read_text(encoding="utf-8")
+
+    assert script_path.stat().st_mode & 0o111
+    assert 'test "$(stat -c \'%a\' "${authentication_key}")" = "600"' in script
+    assert '-v "${authentication_key}:/run/secrets/act_operator_hmac:ro"' in script
+    assert '[[ "${confirmation}" != "ALLOW_ACT_MACHINE_MOTION" ]]' in script
+    assert "--motion-authorization ALLOW_ACT_MACHINE_MOTION" in script
+    assert "pgrep -f" in script
+    assert "fuser /dev/ttyTHS1 /dev/video0" in script
+    assert "--cap-drop=ALL" in script
+    assert "--privileged" not in script
