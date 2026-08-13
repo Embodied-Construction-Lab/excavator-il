@@ -214,7 +214,9 @@ Orin NVIDIA PyTorch 镜像构建、GPU 自检、checkpoint 传输、只读离线
 在线 `act-runtime` 固定复用 LeRobot `ACTPolicy.select_action()`：motion 仅接受 v2 deployment
 manifest、单前视因果 RGB、11 维状态和 `[boom, stick, bucket, swing]` 四维动作。启动时必须先通过
 synthetic CUDA warmup 与真实相机/STM32 live warmup；状态丢帧、安全中断或无因果图像时清空
-action queue 并保持零命令。完整 shadow/motion 门禁与验收命令以该 Orin 手册为准。
+action queue 并保持零命令。motion 由 Orin 终端的一次性显式授权启动，运行期不依赖 PC teleop、
+deadman、UDP 或 HMAC；PC 手柄链路仅用于人工示教采集和手动诊断。完整 shadow/motion 门禁与
+验收命令以该 Orin 手册为准。
 现场先运行 `python scripts/diagnose_stm32_link.py` 做 10 秒只读 USART2 验收；诊断分别检查遥测
 接收频率、控制循环平均频率和最大接收间隔，不把两个独立 20 Hz 周期的合法相位交换误报为丢包。
 通过后在 Orin 运行 `bash scripts/run_act_shadow.sh`，该脚本固定不传 motion authorization。

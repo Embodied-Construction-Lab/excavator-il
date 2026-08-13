@@ -1,8 +1,8 @@
-# Orin ACT 离线推理操作手册
+# Orin ACT 推理操作手册
 
-本文只验证 Orin 上的 NVIDIA PyTorch、LeRobotDataset、ACT checkpoint 回载和 GPU 前向。所有
-命令都不得映射 `/dev/ttyTHS1`、相机或其他控制设备，不启动 Collector、RL Runtime 或 STM32
-通信，也不产生真机动作。通过本文不等于在线 Runtime 获得运动授权。
+第 1～6 节只验证 Orin 上的 NVIDIA PyTorch、LeRobotDataset、ACT checkpoint 回载和 GPU 前向；
+这些离线命令不得映射 `/dev/ttyTHS1`、相机或其他控制设备。第 7 节单独说明需要现场确认的在线
+Shadow 与 motion 验收。通过离线验证不等于在线 Runtime 获得运动授权。
 
 ## 1. 已验证基线
 
@@ -207,8 +207,9 @@ merge 或延迟重锚定。后者会改变动作时序，只有新模型和专�
 ## 7. 在线 Shadow 验证
 
 先停止 Collector、`orin_state_sender.py`、RL Runtime 和任何占用 `/dev/ttyTHS1`/相机的进程。
-Shadow 使用真实相机与 STM32 遥测运行 ACT，但物理串口边界禁止全部写操作；PC 使用独立的
-`config/teleop.act.pc.json` 端口 18091 提供 deadman 身份和时序验证。
+Shadow 使用真实相机与 STM32 遥测运行 ACT，但物理串口边界禁止全部写操作。ACT Runtime 的
+正式结构是 Orin 本地独立推理，运行时不接收 PC 手柄、deadman、UDP 或 HMAC 数据；PC teleop
+只属于人工示教采集与单独的手动控制诊断链路。
 
 先在 PC 执行只读 USART2 验收；该命令不启动 Collector、不写串口，也不发送零命令：
 
@@ -223,50 +224,32 @@ python scripts/diagnose_stm32_link.py
 交换，但仍拒绝增量大于 2、控制循环平均频率异常或真正的遥测长间断。解析失败时复位 STM32 并
 检查 TX→RX/共地，不得修改 parser 去接受乱码或错误字段数。
 
-Motion 还要求 PC/Orin 各自以 `0600` 权限保存同一份至少 32 byte 随机 HMAC 密钥；密钥永不
-提交 Git。每次 Orin runtime 启动产生新的随机 nonce，PC 必须先收到 challenge，再对后续数据包
-签名，因此旧会话包和未认证的局域网注入不能授权运动。首次创建：
-
-```bash
-install -d -m 700 /home/zhaoshuai/.config/excavator
-openssl rand -hex 32 > /home/zhaoshuai/.config/excavator/act_operator_hmac.key
-chmod 600 /home/zhaoshuai/.config/excavator/act_operator_hmac.key
-scp /home/zhaoshuai/.config/excavator/act_operator_hmac.key \
-  jetson16@192.168.31.10:/home/jetson16/workspace_excavator/act_inference/
-ssh jetson16@192.168.31.10 \
-  'chmod 600 /home/jetson16/workspace_excavator/act_inference/act_operator_hmac.key'
-```
-
 ```bash
 # 在 Orin 仓库执行
 bash scripts/run_act_shadow.sh
 ```
 
-此命令省略 `--motion-authorization`，所以即使 deadman 按下也不得产生任何 STM32 串口写入。
-Shadow 不读取 HMAC 密钥，密钥初始化只在后续 motion commission 前执行。
+此命令省略 `--motion-authorization`，因此不得产生任何 STM32 串口写入。
 验收包括：CUDA 预热通过、相机与 10 Hz 状态持续、无未来图像、推理小于 100 ms、输出有限且在
 `[-1,1]`、序号断点会清空 LeRobot action queue，并且日志中 `serial_write_performed=false`。
-Motion 日志同时记录推理 step 和异步安全命令事件；deadman 松开、operator/state timeout、unsafe
-telemetry、startup 与 shutdown 的实际零命令均使用 `excavator_act_runtime_command.v1` 记录。
+Motion 日志同时记录推理 step 和异步安全命令事件；state timeout、unsafe telemetry、startup 与
+shutdown 的实际零命令均使用 `excavator_act_runtime_command.v1` 记录。
 运行时会先完成一次 synthetic CUDA warmup，再在真实相机 + STM32 新状态上完成一次 live warmup；
 只有 live warmup 通过且其内部 action queue 已清空后，runtime 才会打印 `ACT hardware ready`。
 若某个 10 Hz state 找不到因果相机帧，runtime 该 step 只记录 `observation_unavailable` 并保持零命令，
 不得用未来图像补齐，也不应沿用上一非零动作。
 
-Motion 入口只在现场确认后使用。首次验收必须保持发动机关闭、双杆居中和 deadman 全程释放；
-先在 Orin 启动 Runtime：
+Motion 入口只在现场确认后使用。首次验收必须保持发动机关闭，并确认 Collector、RL Runtime、
+历史串口脚本和相机进程全部停止；直接在 Orin 启动 Runtime：
 
 ```bash
 bash scripts/run_act_motion.sh
 ```
 
-脚本拒绝竞争的 Collector/RL/ACT Runtime、被占用的串口/相机、缺失或权限错误的 HMAC 密钥，
-并要求人工输入精确授权。看到 `ACT hardware ready: mode=motion` 后，在 PC 启动认证手柄流：
-
-```bash
-excavator-il teleop --config config/teleop.act.pc.json --print-every 20
-```
-
-零命令验收中不得按 deadman；保持 30 秒后先停止 PC teleop，再停止 Orin Runtime。只有 Runtime 日志
-证明 startup、认证 release、watchdog/停止均为零命令，且 STM32 telemetry 确认收到零动作后，才能
-另行安排最小非零动作验收。
+脚本拒绝竞争的 Collector/RL/ACT Runtime 和被占用的串口/相机，并要求操作者在 Orin 终端输入
+精确的一次性启动授权 `ALLOW_ACT_MACHINE_MOTION`。容器使用 `--network=none`，启动后不依赖 PC
+或现场 Wi-Fi。该授权会让 ACT 在硬件 ready 后直接向 STM32 写入模型杆量，不能再把 motion 模式当作
+“全程零命令”测试；首次必须保持发动机关闭。运行 30 秒后按 `Ctrl+C` 停止 Orin Runtime，检查日志中
+动作有限且位于 `[-1,1]`、四轴到六轴映射正确、无 stale/future 输入、startup 与 shutdown 为零、
+state timeout/unsafe telemetry 会归零，且终态零之后没有非零写入。以上发动机关闭验收通过后，才能在
+新的现场确认下启动发动机安排最小非零动作验收。

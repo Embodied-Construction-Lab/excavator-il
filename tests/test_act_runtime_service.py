@@ -3,6 +3,8 @@ import json
 import numpy as np
 import pytest
 
+import excavator_il.act_runtime_service as runtime_service_module
+
 from excavator_il.act_runtime import (
     ActRuntimeController,
     ActRuntimeDecision,
@@ -11,12 +13,12 @@ from excavator_il.act_runtime import (
     RuntimeMode,
 )
 from excavator_il.act_runtime_service import (
+    ActRuntimeService,
     ActRuntimeStepProcessor,
     LatestStateQueue,
     SensorSequenceTracker,
     Stm32CommandChannel,
     _perform_live_warmup,
-    _apply_operator_datagram,
     _route_telemetry_frame,
     _startup_stm32,
 )
@@ -123,32 +125,72 @@ def test_motion_startup_drains_backlog_and_waits_for_exact_zero_ack():
     assert json.loads(serial.writes[0])["command_seq"] == 42
 
 
-def test_command_channel_audits_async_operator_timeout_zero_write():
+def test_motion_channel_accepts_current_safe_state_without_pc_operator_updates():
     serial = _Serial()
-    events = []
+    frame = _telemetry()
     channel = Stm32CommandChannel(
         serial_port=serial,
         encoder=Stm32ManualCommandEncoder(),
         mode=RuntimeMode.MOTION,
-        max_operator_age_ms=1.0,
-        record_command=events.append,
     )
-    channel.synchronize(_telemetry())
-    channel.update_operator(True, receive_monotonic_ns=1_000_000)
+    channel.synchronize(frame)
+    generation = channel.update_state(frame)
 
-    assert channel.enforce_operator_timeout(monotonic_ns=3_000_001) is True
+    result = channel.write_axes(
+        (-0.4, -0.2, 0.0, 0.3, 0.1, 0.0),
+        monotonic_ns=1_010_000_000,
+        state_generation=generation,
+        motion_epoch=channel.motion_epoch,
+    )
 
-    assert len(serial.writes) == 1
-    assert events == [
-        {
-            "schema_version": "excavator_act_runtime_command.v1",
-            "command_monotonic_ns": 3_000_001,
-            "command_seq": 0,
-            "serial_axes": [0.0] * 6,
-            "reason": "operator_timeout",
-            "serial_write_performed": True,
-        }
-    ]
+    assert result.final_gate_reason == "accepted"
+    assert result.effective_axes == pytest.approx((-0.4, -0.2, 0.0, 0.3, 0.1, 0.0))
+
+
+def test_runtime_service_construction_has_no_pc_operator_dependency():
+    class _Processor:
+        _observations = object()
+
+    service = ActRuntimeService(
+        serial_port=object(),
+        camera=object(),
+        processor=_Processor(),
+        command_channel=object(),
+    )
+
+    assert service is not None
+
+
+def test_runtime_service_run_does_not_open_a_pc_udp_socket(monkeypatch):
+    class _Observations:
+        def wait_ready(self, _timeout_s):
+            return True
+
+    class _Processor:
+        _observations = _Observations()
+
+    class _Channel:
+        mode = RuntimeMode.MOTION
+
+        def terminal_disarm(self, **_kwargs):
+            pass
+
+    assert not hasattr(runtime_service_module, "socket")
+    monkeypatch.setattr(runtime_service_module, "_startup_stm32", lambda **_kwargs: 1)
+    monkeypatch.setattr(
+        runtime_service_module,
+        "_perform_live_warmup",
+        lambda **_kwargs: (0.0, 0.0, 0.0, 0.0),
+    )
+    service = ActRuntimeService(
+        serial_port=object(),
+        camera=object(),
+        processor=_Processor(),
+        command_channel=_Channel(),
+    )
+    service.request_stop()
+
+    service.run()
 
 
 def test_motion_startup_refuses_ready_without_zero_ack():
@@ -363,7 +405,6 @@ def test_shadow_step_never_calls_serial_write_and_logs_prediction():
             encoder=Stm32ManualCommandEncoder(),
             mode=RuntimeMode.SHADOW,
         ),
-        operator_snapshot=lambda: (False, None),
         record=records.append,
         monotonic_ns=lambda: 1_010_000_000,
     )
@@ -401,7 +442,6 @@ def test_missing_causal_observation_fails_closed_without_crashing_worker():
             encoder=Stm32ManualCommandEncoder(),
             mode=RuntimeMode.SHADOW,
         ),
-        operator_snapshot=lambda: (False, None),
         record=records.append,
         monotonic_ns=lambda: 1_020_000_000,
     )
@@ -476,7 +516,6 @@ def test_motion_fail_closed_step_writes_explicit_zero_command():
                 mode=RuntimeMode.MOTION,
             )
         ),
-        operator_snapshot=lambda: (False, None),
         record=lambda _value: None,
         monotonic_ns=lambda: 1_010_000_000,
     )
@@ -525,111 +564,16 @@ def test_step_log_records_final_boundary_zero_instead_of_requested_motion():
             )
         ),
         command_channel=channel,
-        operator_snapshot=lambda: (True, 1_000_000_000),
         record=records.append,
         monotonic_ns=lambda: 1_010_000_000,
     )
 
-    processor.process(frame, state_generation=generation)
+    processor.process(frame, state_generation=generation - 1)
 
     assert records[0]["requested_serial_axes"] == [-0.4, -0.2, 0.0, 0.3, 0.1, 0.0]
     assert records[0]["effective_serial_axes"] == [0.0] * 6
-    assert records[0]["final_gate_reason"] == "operator_not_fresh"
+    assert records[0]["final_gate_reason"] == "state_not_fresh_or_current"
     assert records[0]["command_seq"] == 0
-
-
-def test_release_and_repress_between_steps_resets_old_act_chunk():
-    class _ResetEngine(_Engine):
-        def __init__(self, decision):
-            super().__init__(decision)
-            self.reset_count = 0
-
-        def reset(self):
-            self.reset_count += 1
-
-    serial = _Serial()
-    frame = _telemetry()
-    buffer = CausalObservationBuffer()
-    buffer.add_camera(RgbCameraFrame(990_000_000, np.zeros((480, 640, 3), np.uint8)))
-    channel = Stm32CommandChannel(
-        serial_port=serial,
-        encoder=Stm32ManualCommandEncoder(),
-        mode=RuntimeMode.MOTION,
-    )
-    channel.synchronize(frame)
-    generation = channel.update_state(frame)
-    channel.update_operator(True, receive_monotonic_ns=1_000_000_000)
-    engine = _ResetEngine(
-        ActRuntimeDecision(
-            predicted_action=(0.1,) * 4,
-            commanded_action=(0.1,) * 4,
-            serial_axes=(0.1, 0.1, 0.0, 0.1, 0.1, 0.0),
-            reason="motion_allowed",
-        )
-    )
-    processor = ActRuntimeStepProcessor(
-        observation_buffer=buffer,
-        engine=engine,
-        command_channel=channel,
-        operator_snapshot=lambda: (True, 1_020_000_000),
-        record=lambda _value: None,
-        monotonic_ns=lambda: 1_030_000_000,
-    )
-    channel.update_operator(False, receive_monotonic_ns=1_010_000_000)
-    channel.update_operator(True, receive_monotonic_ns=1_020_000_000)
-
-    processor.process(frame, state_generation=generation)
-
-    assert engine.reset_count == 1
-
-
-def test_release_during_inference_downgrades_final_write_and_resets_chunk():
-    serial = _Serial()
-    frame = _telemetry()
-    buffer = CausalObservationBuffer()
-    buffer.add_camera(RgbCameraFrame(990_000_000, np.zeros((480, 640, 3), np.uint8)))
-    channel = Stm32CommandChannel(
-        serial_port=serial,
-        encoder=Stm32ManualCommandEncoder(),
-        mode=RuntimeMode.MOTION,
-    )
-    channel.synchronize(frame)
-    generation = channel.update_state(frame)
-    channel.update_operator(True, receive_monotonic_ns=1_000_000_000)
-
-    class _ReleaseEngine:
-        def __init__(self):
-            self.reset_count = 0
-
-        def step(self, **_kwargs):
-            channel.update_operator(False, receive_monotonic_ns=1_005_000_000)
-            channel.update_operator(True, receive_monotonic_ns=1_006_000_000)
-            return ActRuntimeDecision(
-                predicted_action=(0.1,) * 4,
-                commanded_action=(0.1,) * 4,
-                serial_axes=(0.1, 0.1, 0.0, 0.1, 0.1, 0.0),
-                reason="motion_allowed",
-            )
-
-        def reset(self):
-            self.reset_count += 1
-
-    engine = _ReleaseEngine()
-    records = []
-    processor = ActRuntimeStepProcessor(
-        observation_buffer=buffer,
-        engine=engine,
-        command_channel=channel,
-        operator_snapshot=lambda: (True, 1_006_000_000),
-        record=records.append,
-        monotonic_ns=lambda: 1_010_000_000,
-    )
-
-    processor.process(frame, state_generation=generation)
-
-    assert engine.reset_count == 1
-    assert records[0]["final_gate_reason"] == "motion_interrupted"
-    assert records[0]["effective_serial_axes"] == [0.0] * 6
 
 
 def test_shadow_command_channel_never_writes_during_full_lifecycle():
@@ -674,7 +618,6 @@ def test_nonzero_command_without_state_generation_fails_closed():
         mode=RuntimeMode.MOTION,
     )
     channel.synchronize(_telemetry())
-    channel.update_operator(True, receive_monotonic_ns=1_000_000)
 
     channel.write_axes(
         (0.1, 0.2, 0.0, 0.3, 0.4, 0.0), monotonic_ns=1_010_000
@@ -699,7 +642,6 @@ def test_motion_command_channel_resumes_sequence_and_zeros_start_and_shutdown():
     channel.synchronize(
         Stm32TelemetryFrame(frame.receive_monotonic_ns, values)
     )
-    channel.update_operator(True, receive_monotonic_ns=900_000)
     channel.safe_zero(monotonic_ns=1_000_000, reason="startup")
     channel.write_axes((0.1, 0.2, 0.0, 0.3, 0.4, 0.0), monotonic_ns=2_000_000)
     channel.safe_zero(monotonic_ns=3_000_000, reason="shutdown")
@@ -724,41 +666,14 @@ def test_motion_command_channel_resumes_sequence_and_zeros_start_and_shutdown():
     ]
 
 
-def test_motion_channel_deadman_release_immediately_writes_zero():
-    serial = _Serial()
-    channel = Stm32CommandChannel(
-        serial_port=serial,
-        encoder=Stm32ManualCommandEncoder(),
-        mode=RuntimeMode.MOTION,
-        max_operator_age_ms=150,
-    )
-    channel.synchronize(_telemetry())
-    channel.update_operator(True, receive_monotonic_ns=1_000_000_000)
-    generation = channel.update_state(_telemetry())
-    channel.write_axes(
-        (0.1, 0.2, 0.0, 0.3, 0.4, 0.0),
-        monotonic_ns=1_010_000_000,
-        state_generation=generation,
-    )
-
-    channel.update_operator(False, receive_monotonic_ns=1_020_000_000)
-
-    commands = [json.loads(payload) for payload in serial.writes]
-    assert len(commands) == 2
-    assert any(commands[0][name] != 0.0 for name in ("X1", "Y1", "X2", "Y2"))
-    assert all(commands[1][name] == 0.0 for name in ("X1", "Y1", "Z1", "X2", "Y2", "Z2"))
-
-
 def test_terminal_disarm_zero_cannot_be_overwritten_by_late_inference():
     serial = _Serial()
     channel = Stm32CommandChannel(
         serial_port=serial,
         encoder=Stm32ManualCommandEncoder(),
         mode=RuntimeMode.MOTION,
-        max_operator_age_ms=150,
     )
     channel.synchronize(_telemetry())
-    channel.update_operator(True, receive_monotonic_ns=1_000_000_000)
 
     channel.terminal_disarm(monotonic_ns=1_010_000_000, reason="shutdown")
     channel.write_axes(
@@ -768,28 +683,6 @@ def test_terminal_disarm_zero_cannot_be_overwritten_by_late_inference():
     commands = [json.loads(payload) for payload in serial.writes]
     assert len(commands) == 1
     assert all(commands[0][name] == 0.0 for name in ("X1", "Y1", "Z1", "X2", "Y2", "Z2"))
-
-
-def test_operator_timeout_immediately_zeros_once_without_waiting_for_new_state():
-    serial = _Serial()
-    channel = Stm32CommandChannel(
-        serial_port=serial,
-        encoder=Stm32ManualCommandEncoder(),
-        mode=RuntimeMode.MOTION,
-        max_operator_age_ms=150,
-    )
-    channel.synchronize(_telemetry())
-    channel.update_operator(True, receive_monotonic_ns=1_000_000_000)
-    channel.write_axes(
-        (0.1, 0.2, 0.0, 0.3, 0.4, 0.0), monotonic_ns=1_010_000_000
-    )
-
-    assert channel.enforce_operator_timeout(monotonic_ns=1_151_000_000) is True
-    assert channel.enforce_operator_timeout(monotonic_ns=1_200_000_000) is False
-
-    commands = [json.loads(payload) for payload in serial.writes]
-    assert len(commands) == 2
-    assert all(commands[-1][name] == 0.0 for name in ("X1", "Y1", "Z1", "X2", "Y2", "Z2"))
 
 
 def test_latest_state_queue_drops_backlog_instead_of_bursting_old_states():
@@ -842,7 +735,6 @@ def test_step_processor_resets_policy_queue_and_zeros_on_state_gap():
         observation_buffer=buffer,
         engine=engine,
         command_channel=channel,
-        operator_snapshot=lambda: (True, 1_000_000_000),
         record=lambda _value: None,
         monotonic_ns=lambda: 1_010_000_000,
     )
@@ -861,11 +753,9 @@ def test_state_silence_immediately_zeros_without_waiting_for_next_frame():
         serial_port=serial,
         encoder=Stm32ManualCommandEncoder(),
         mode=RuntimeMode.MOTION,
-        max_operator_age_ms=150,
         max_state_age_ms=100,
     )
     channel.synchronize(_telemetry())
-    channel.update_operator(True, receive_monotonic_ns=1_000_000_000)
     channel.update_state(_telemetry(1_000_000_000))
     channel.write_axes(
         (0.1, 0.2, 0.0, 0.3, 0.4, 0.0), monotonic_ns=1_010_000_000
@@ -885,12 +775,10 @@ def test_late_inference_cannot_overwrite_state_watchdog_zero():
         serial_port=serial,
         encoder=Stm32ManualCommandEncoder(),
         mode=RuntimeMode.MOTION,
-        max_operator_age_ms=150,
         max_state_age_ms=200,
     )
     frame = _telemetry()
     channel.synchronize(frame)
-    channel.update_operator(True, receive_monotonic_ns=1_000_000_000)
     generation = channel.update_state(frame)
 
     channel.enforce_state_timeout(monotonic_ns=1_201_000_000)
@@ -915,12 +803,10 @@ def test_new_unsafe_state_invalidates_inflight_inference_at_write_boundary():
         serial_port=serial,
         encoder=Stm32ManualCommandEncoder(),
         mode=RuntimeMode.MOTION,
-        max_operator_age_ms=150,
         max_state_age_ms=200,
     )
     frame = _telemetry()
     channel.synchronize(frame)
-    channel.update_operator(True, receive_monotonic_ns=1_000_000_000)
     generation = channel.update_state(frame)
     unsafe_values = dict(frame.values)
     unsafe_values["estop"] = 1
@@ -947,7 +833,6 @@ def test_unsafe_state_immediately_zeros_without_waiting_for_inference():
     )
     frame = _telemetry()
     channel.synchronize(frame)
-    channel.update_operator(True, receive_monotonic_ns=1_000_000_000)
     generation = channel.update_state(frame)
     channel.write_axes(
         (0.1, 0.2, 0.0, 0.3, 0.4, 0.0),
@@ -977,7 +862,6 @@ def test_nonnew_telemetry_fault_immediately_zeros_without_enqueuing_inference():
     )
     frame = _telemetry()
     channel.synchronize(frame)
-    channel.update_operator(True, receive_monotonic_ns=1_000_000_000)
     generation = channel.update_state(frame)
     channel.write_axes(
         (0.1, 0.2, 0.0, 0.3, 0.4, 0.0),
@@ -1007,12 +891,10 @@ def test_safe_nonnew_telemetry_heartbeat_does_not_invalidate_inflight_inference(
         serial_port=serial,
         encoder=Stm32ManualCommandEncoder(),
         mode=RuntimeMode.MOTION,
-        max_operator_age_ms=150,
         max_state_age_ms=250,
     )
     frame = _telemetry(1_000_000_000)
     channel.synchronize(frame)
-    channel.update_operator(True, receive_monotonic_ns=1_000_000_000)
     generation = channel.update_state(frame)
     heartbeat_values = dict(frame.values)
     heartbeat_values["sensor_is_new"] = 0
@@ -1030,127 +912,3 @@ def test_safe_nonnew_telemetry_heartbeat_does_not_invalidate_inflight_inference(
     assert result.final_gate_reason == "accepted"
     command = json.loads(serial.writes[-1])
     assert any(command[name] != 0.0 for name in ("X1", "Y1", "X2", "Y2"))
-
-
-def test_rejected_new_operator_session_immediately_disarms_existing_motion():
-    from excavator_il.act_runtime import OperatorDeadmanGate
-
-    gate = OperatorDeadmanGate(
-        allowed_pc_host="192.168.31.219",
-        expected_device_ids=("left", "right"),
-        mapping_id="dual_stick.v1",
-        calibration_id="raw.v1",
-    )
-    serial = _Serial()
-    channel = Stm32CommandChannel(
-        serial_port=serial,
-        encoder=Stm32ManualCommandEncoder(),
-        mode=RuntimeMode.MOTION,
-    )
-    frame = _telemetry()
-    channel.synchronize(frame)
-    generation = channel.update_state(frame)
-    source = ("192.168.31.219", 40000)
-    for session, sequence, deadman, stamp in (
-        ("session-a", 0, False, 1_000_000_000),
-        ("session-a", 1, True, 1_010_000_000),
-    ):
-        result = _apply_operator_datagram(
-            operator_gate=gate,
-            command_channel=channel,
-            datagram=_operator_datagram(session, sequence, deadman),
-            source=source,
-            receive_monotonic_ns=stamp,
-        )
-        assert json.loads(result)["accepted"] is True
-    channel.write_axes(
-        (0.1, 0.2, 0.0, 0.3, 0.4, 0.0),
-        monotonic_ns=1_020_000_000,
-        state_generation=generation,
-    )
-
-    rejected = _apply_operator_datagram(
-        operator_gate=gate,
-        command_channel=channel,
-        datagram=_operator_datagram("session-b", 0, True),
-        source=source,
-        receive_monotonic_ns=1_030_000_000,
-    )
-
-    assert json.loads(rejected)["accepted"] is False
-    commands = [json.loads(payload) for payload in serial.writes]
-    assert all(commands[-1][name] == 0.0 for name in ("X1", "Y1", "Z1", "X2", "Y2", "Z2"))
-
-
-def test_malformed_packet_from_allowed_pc_immediately_disarms_motion():
-    from excavator_il.act_runtime import OperatorDeadmanGate
-
-    gate = OperatorDeadmanGate(
-        allowed_pc_host="192.168.31.219",
-        expected_device_ids=("left", "right"),
-        mapping_id="dual_stick.v1",
-        calibration_id="raw.v1",
-    )
-    serial = _Serial()
-    channel = Stm32CommandChannel(
-        serial_port=serial,
-        encoder=Stm32ManualCommandEncoder(),
-        mode=RuntimeMode.MOTION,
-    )
-    frame = _telemetry()
-    channel.synchronize(frame)
-    generation = channel.update_state(frame)
-    source = ("192.168.31.219", 40000)
-    for sequence, deadman, stamp in (
-        (0, False, 1_000_000_000),
-        (1, True, 1_010_000_000),
-    ):
-        _apply_operator_datagram(
-            operator_gate=gate,
-            command_channel=channel,
-            datagram=_operator_datagram("session-a", sequence, deadman),
-            source=source,
-            receive_monotonic_ns=stamp,
-        )
-    channel.write_axes(
-        (0.1, 0.2, 0.0, 0.3, 0.4, 0.0),
-        monotonic_ns=1_020_000_000,
-        state_generation=generation,
-    )
-
-    ack = _apply_operator_datagram(
-        operator_gate=gate,
-        command_channel=channel,
-        datagram=b"not-json",
-        source=source,
-        receive_monotonic_ns=1_030_000_000,
-    )
-
-    assert json.loads(ack)["accepted"] is False
-    commands = [json.loads(payload) for payload in serial.writes]
-    assert all(commands[-1][name] == 0.0 for name in ("X1", "Y1", "Z1", "X2", "Y2", "Z2"))
-
-
-def _operator_datagram(session, sequence, deadman):
-    from excavator_il.joystick_protocol import (
-        ControllerIdentity,
-        JoystickPacket,
-        encode_joystick_packet,
-    )
-
-    return encode_joystick_packet(
-        JoystickPacket(
-            session_id=session,
-            sample_seq=sequence,
-            pc_sample_monotonic_ns=1,
-            pc_sample_wall_ns=2,
-            axes=(0.0,) * 6,
-            controllers=(
-                ControllerIdentity(1, "left", "left", (deadman,)),
-                ControllerIdentity(2, "right", "right", (False,)),
-            ),
-            deadman_pressed=deadman,
-            mapping_id="dual_stick.v1",
-            calibration_id="raw.v1",
-        )
-    )

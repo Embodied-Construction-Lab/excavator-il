@@ -1,26 +1,10 @@
 import json
-import pytest
 
 from excavator_il.joystick_protocol import (
-    authenticate_json_message,
     decode_joystick_packet,
     encode_joystick_packet,
     map_expert_action,
-    verify_json_message,
 )
-
-
-def test_authenticated_message_binds_runtime_nonce_and_rejects_tampering():
-    message = {"schema_version": "test.v1", "sample_seq": 7}
-    key = b"k" * 32
-
-    authenticated = authenticate_json_message(message, key=key, nonce="n" * 64)
-
-    assert verify_json_message(authenticated, key=key, nonce="n" * 64)["sample_seq"] == 7
-    tampered = json.loads(authenticated)
-    tampered["sample_seq"] = 8
-    with pytest.raises(ValueError, match="HMAC"):
-        verify_json_message(json.dumps(tampered).encode(), key=key, nonce="n" * 64)
 
 
 def test_numeric_packet_maps_to_canonical_expert_action_without_sign_change():

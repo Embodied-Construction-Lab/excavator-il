@@ -268,7 +268,13 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "teleop":
             from .teleop import TeleopConfig, run_teleop
 
-            run_teleop(TeleopConfig.load(args.config), print_every=args.print_every)
+            try:
+                run_teleop(
+                    TeleopConfig.load(args.config), print_every=args.print_every
+                )
+            except KeyboardInterrupt:
+                print("teleop interrupted by operator", file=sys.stderr)
+                return 130
         elif args.command == "list-joysticks":
             from .teleop import list_pygame_devices
 

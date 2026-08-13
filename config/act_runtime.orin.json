@@ -1,9 +1,8 @@
 {
-  "schema_version": "excavator_act_runtime_config.v1",
+  "schema_version": "excavator_act_runtime_config.v2",
   "checkpoint_path": "/opt/act-checkpoint",
   "deployment_manifest_path": "/opt/act-deployment/deployment_manifest.json",
   "machine_profile_path": "/opt/excavator-config/machine_profile.json",
-  "operator_auth_key_path": "/run/secrets/act_operator_hmac",
   "checkpoint_model_sha256": "4a1a9647cb80c5b703ce0ca75c965a69e2f9507d3f288ab67212f77d5c8a6743",
   "checkpoint_files_sha256": {
     "config.json": "508a4895fef37f4d073977b0c80764b69b8825bb68a0133edeaf2f186afc190f",
@@ -16,19 +15,6 @@
   },
   "log_root": "/opt/act-runtime-logs",
   "device": "cuda",
-  "joystick_udp": {
-    "bind_host": "0.0.0.0",
-    "port": 18091,
-    "allowed_pc_host": "192.168.31.219"
-  },
-  "controllers": {
-    "device_ids": [
-      "03008bc34f0400001604000011010000",
-      "03008bc34f0400001604000011010000"
-    ],
-    "mapping_id": "dual_stick.v1",
-    "calibration_id": "raw.v1"
-  },
   "stm32_serial": {
     "port": "/dev/ttyTHS1",
     "baudrate": 460800
@@ -43,7 +29,6 @@
     "max_inference_state_age_ms": 100,
     "state_silence_timeout_ms": 250,
     "max_camera_age_ms": 120,
-    "max_operator_age_ms": 150,
     "max_inference_ms": 100
   }
 }

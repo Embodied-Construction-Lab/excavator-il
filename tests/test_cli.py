@@ -192,6 +192,20 @@ def test_diagnose_joysticks_handles_operator_interrupt_without_traceback(
     assert "diagnostic interrupted" in capsys.readouterr().err
 
 
+def test_teleop_handles_operator_interrupt_without_traceback(monkeypatch, capsys):
+    from excavator_il import teleop
+
+    monkeypatch.setattr(teleop.TeleopConfig, "load", lambda path: f"teleop:{path}")
+
+    def interrupt(unused_config, *, print_every):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(teleop, "run_teleop", interrupt)
+
+    assert main(["teleop"]) == 130
+    assert "teleop interrupted" in capsys.readouterr().err
+
+
 def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
     pytest.importorskip("lerobot")
     from excavator_il import (

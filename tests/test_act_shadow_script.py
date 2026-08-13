@@ -23,15 +23,18 @@ def test_act_runtime_uses_the_verified_uvc_capture_node():
     assert '"device": "/dev/video0"' in config
 
 
-def test_act_motion_requires_local_authorization_and_mounts_the_hmac_key():
+def test_act_motion_requires_local_authorization_without_pc_runtime_input():
     script_path = (
         Path(__file__).resolve().parents[1] / "scripts" / "run_act_motion.sh"
     )
     script = script_path.read_text(encoding="utf-8")
 
     assert script_path.stat().st_mode & 0o111
-    assert 'test "$(stat -c \'%a\' "${authentication_key}")" = "600"' in script
-    assert '-v "${authentication_key}:/run/secrets/act_operator_hmac:ro"' in script
+    assert "act_operator_hmac" not in script
+    assert "authentication_key" not in script
+    assert "--network=none" in script
+    assert "PC teleop" in script
+    assert "模型可能立即发送非零杆量" in script
     assert '[[ "${confirmation}" != "ALLOW_ACT_MACHINE_MOTION" ]]' in script
     assert "--motion-authorization ALLOW_ACT_MACHINE_MOTION" in script
     assert "pgrep -f" in script

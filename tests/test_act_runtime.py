@@ -1,4 +1,3 @@
-import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -13,15 +12,9 @@ from excavator_il.act_runtime import (
     ActObservation,
     ActPolicySession,
     CausalObservationBuffer,
-    OperatorDeadmanGate,
     RuntimeMode,
     state_from_stm32_telemetry,
     warmup_act_policy_session,
-)
-from excavator_il.joystick_protocol import (
-    ControllerIdentity,
-    JoystickPacket,
-    encode_joystick_packet,
 )
 from excavator_il.collector.camera import RgbCameraFrame
 from excavator_il.stm32_protocol import Stm32TelemetryFrame
@@ -230,8 +223,6 @@ def test_shadow_mode_logs_prediction_but_never_permits_serial_write():
             "dwj_ok": 1,
             "imu_ok": 1,
         },
-        operator_enabled=True,
-        operator_monotonic_ns=1_005_000_000,
     )
 
     assert decision.predicted_action == pytest.approx((0.1, -0.2, 0.3, -0.4))
@@ -267,7 +258,6 @@ def test_shadow_engine_retains_lerobot_action_queue_between_steps():
             camera_monotonic_ns=800,
         ),
         telemetry={},
-        operator_snapshot=lambda: (False, None),
     )
 
     assert decision.reason == "shadow_mode"
@@ -293,8 +283,6 @@ def test_motion_mode_requires_all_live_safety_gates_and_maps_action_to_stm32_axe
             "dwj_ok": 1,
             "imu_ok": 1,
         },
-        operator_enabled=True,
-        operator_monotonic_ns=1_005_000_000,
     )
 
     assert decision.commanded_action == pytest.approx((0.1, -0.2, 0.3, -0.4))
@@ -302,12 +290,73 @@ def test_motion_mode_requires_all_live_safety_gates_and_maps_action_to_stm32_axe
     assert decision.reason == "motion_allowed"
 
 
+def test_motion_mode_runs_from_local_authorization_without_pc_operator_input():
+    controller = ActRuntimeController(
+        mode=RuntimeMode.MOTION,
+        motion_authorization="ALLOW_ACT_MACHINE_MOTION",
+    )
+
+    decision = controller.decide(
+        predicted_action=(0.1, -0.2, 0.3, -0.4),
+        state_monotonic_ns=1_000_000_000,
+        camera_monotonic_ns=990_000_000,
+        now_monotonic_ns=1_010_000_000,
+        telemetry={
+            "control_enabled": 1,
+            "estop": 0,
+            "fault_flags": 0,
+            "rs485_ok": 1,
+            "dwj_ok": 1,
+            "imu_ok": 1,
+        },
+    )
+
+    assert decision.reason == "motion_allowed"
+    assert decision.commanded_action == pytest.approx((0.1, -0.2, 0.3, -0.4))
+
+
+def test_runtime_engine_selects_motion_without_pc_operator_callback():
+    class _Session:
+        def select_action(self, _observation):
+            return (0.1, -0.2, 0.3, -0.4)
+
+        def reset(self):
+            pass
+
+    ticks = iter((1_005_000_000, 1_010_000_000))
+    engine = ActRuntimeEngine(
+        session=_Session(),
+        controller=ActRuntimeController(
+            mode=RuntimeMode.MOTION,
+            motion_authorization="ALLOW_ACT_MACHINE_MOTION",
+        ),
+        monotonic_ns=lambda: next(ticks),
+    )
+
+    decision = engine.step(
+        observation=ActObservation(
+            state=(0.0,) * 11,
+            front_rgb=np.zeros((2, 3, 3), dtype=np.uint8),
+            state_monotonic_ns=1_000_000_000,
+            camera_monotonic_ns=990_000_000,
+        ),
+        telemetry={
+            "control_enabled": 1,
+            "estop": 0,
+            "fault_flags": 0,
+            "rs485_ok": 1,
+            "dwj_ok": 1,
+            "imu_ok": 1,
+        },
+    )
+
+    assert decision.reason == "motion_allowed"
+
+
 @pytest.mark.parametrize(
     ("overrides", "reason"),
     [
         ({"motion_authorization": "wrong"}, "motion_unauthorized"),
-        ({"operator_enabled": False}, "operator_disabled"),
-        ({"operator_monotonic_ns": 800_000_000}, "operator_stale"),
         ({"state_monotonic_ns": 800_000_000}, "state_stale"),
         ({"camera_monotonic_ns": 800_000_000}, "camera_stale"),
         ({"telemetry": {"control_enabled": 0}}, "safety_state_invalid"),
@@ -336,8 +385,6 @@ def test_motion_mode_fails_closed_for_every_runtime_gate(overrides, reason):
         "camera_monotonic_ns": 990_000_000,
         "now_monotonic_ns": 1_010_000_000,
         "telemetry": telemetry,
-        "operator_enabled": True,
-        "operator_monotonic_ns": 1_005_000_000,
     }
     inputs.update(overrides)
     controller = ActRuntimeController(
@@ -345,7 +392,6 @@ def test_motion_mode_fails_closed_for_every_runtime_gate(overrides, reason):
         motion_authorization=authorization,
         max_state_age_ms=100,
         max_camera_age_ms=120,
-        max_operator_age_ms=150,
     )
 
     decision = controller.decide(**inputs)
@@ -373,6 +419,7 @@ def test_runtime_engine_resets_lerobot_queue_when_motion_gate_closes():
             mode=RuntimeMode.MOTION,
             motion_authorization="ALLOW_ACT_MACHINE_MOTION",
         ),
+        monotonic_ns=iter((1_005_000_000, 1_010_000_000)).__next__,
     )
     observation = ActObservation(
         state=(0.0,) * 11,
@@ -385,16 +432,15 @@ def test_runtime_engine_resets_lerobot_queue_when_motion_gate_closes():
         observation=observation,
         telemetry={
             "control_enabled": 1,
-            "estop": 0,
+            "estop": 1,
             "fault_flags": 0,
             "rs485_ok": 1,
             "dwj_ok": 1,
             "imu_ok": 1,
         },
-        operator_snapshot=lambda: (False, None),
     )
 
-    assert decision.reason == "operator_disabled"
+    assert decision.reason == "safety_state_invalid"
     assert decision.commanded_action == (0.0,) * 4
     assert session.reset_count == 1
 
@@ -424,7 +470,6 @@ def test_runtime_engine_converts_policy_failure_to_fail_closed_decision():
             camera_monotonic_ns=900,
         ),
         telemetry={},
-        operator_snapshot=lambda: (False, None),
     )
 
     assert decision.reason == "policy_error"
@@ -464,60 +509,11 @@ def test_runtime_engine_fails_closed_when_end_to_end_inference_exceeds_budget():
             camera_monotonic_ns=980_000_000,
         ),
         telemetry={},
-        operator_snapshot=lambda: (True, 1_100_000_000),
     )
 
     assert decision.reason == "inference_budget_exceeded"
     assert decision.commanded_action == (0.0,) * 4
     assert decision.serial_axes == (0.0,) * 6
-    assert session.reset_count == 1
-
-
-def test_runtime_engine_rechecks_deadman_after_inference_before_authorizing_motion():
-    operator = [True, 1_000_000_000]
-
-    class _Session:
-        def __init__(self):
-            self.reset_count = 0
-
-        def select_action(self, _observation):
-            operator[:] = [False, 1_020_000_000]
-            return (0.1, -0.2, 0.3, -0.4)
-
-        def reset(self):
-            self.reset_count += 1
-
-    ticks = iter((1_010_000_000, 1_030_000_000))
-    session = _Session()
-    engine = ActRuntimeEngine(
-        session=session,
-        controller=ActRuntimeController(
-            mode=RuntimeMode.MOTION,
-            motion_authorization="ALLOW_ACT_MACHINE_MOTION",
-        ),
-        monotonic_ns=lambda: next(ticks),
-    )
-
-    decision = engine.step(
-        observation=ActObservation(
-            state=(0.0,) * 11,
-            front_rgb=np.zeros((2, 3, 3), dtype=np.uint8),
-            state_monotonic_ns=1_000_000_000,
-            camera_monotonic_ns=990_000_000,
-        ),
-        telemetry={
-            "control_enabled": 1,
-            "estop": 0,
-            "fault_flags": 0,
-            "rs485_ok": 1,
-            "dwj_ok": 1,
-            "imu_ok": 1,
-        },
-        operator_snapshot=lambda: (bool(operator[0]), int(operator[1])),
-    )
-
-    assert decision.reason == "operator_disabled"
-    assert decision.commanded_action == (0.0,) * 4
     assert session.reset_count == 1
 
 
@@ -559,261 +555,7 @@ def test_runtime_engine_uses_inference_completion_time_for_freshness_gate():
             "dwj_ok": 1,
             "imu_ok": 1,
         },
-        operator_snapshot=lambda: (True, 1_100_000_000),
     )
 
     assert decision.reason == "state_stale"
     assert decision.commanded_action == (0.0,) * 4
-
-
-def test_operator_gate_accepts_only_configured_fresh_deadman_packets():
-    gate = OperatorDeadmanGate(
-        allowed_pc_host="192.168.31.219",
-        expected_device_ids=("left", "right"),
-        mapping_id="dual_stick.v1",
-        calibration_id="raw.v1",
-    )
-    release = JoystickPacket(
-        session_id="session-a",
-        sample_seq=6,
-        pc_sample_monotonic_ns=100,
-        pc_sample_wall_ns=200,
-        axes=(0.8, -0.7, 0.0, 0.6, -0.5, 0.0),
-        controllers=(
-            ControllerIdentity(1, "left", "left stick", (True,)),
-            ControllerIdentity(2, "right", "right stick", (False,)),
-        ),
-        deadman_pressed=False,
-        mapping_id="dual_stick.v1",
-        calibration_id="raw.v1",
-    )
-
-    gate.accept(
-        encode_joystick_packet(release),
-        source=("192.168.31.219", 40000),
-        receive_monotonic_ns=900,
-    )
-    packet = JoystickPacket(
-        **{
-            **release.__dict__,
-            "sample_seq": 7,
-            "deadman_pressed": True,
-        }
-    )
-    ack = json.loads(
-        gate.accept(
-            encode_joystick_packet(packet),
-            source=("192.168.31.219", 40000),
-            receive_monotonic_ns=1_000,
-        )
-    )
-    enabled, stamp = gate.snapshot()
-
-    assert ack["accepted"] is True
-    assert ack["sample_seq"] == 7
-    assert enabled is True
-    assert stamp == 1_000
-
-
-def test_operator_gate_ignores_axes_and_fails_closed_on_invalid_identity():
-    gate = OperatorDeadmanGate(
-        allowed_pc_host="192.168.31.219",
-        expected_device_ids=("left", "right"),
-        mapping_id="dual_stick.v1",
-        calibration_id="raw.v1",
-    )
-    packet = JoystickPacket(
-        session_id="session-a",
-        sample_seq=0,
-        pc_sample_monotonic_ns=100,
-        pc_sample_wall_ns=200,
-        axes=(1.0, 1.0, 0.0, 1.0, 1.0, 0.0),
-        controllers=(
-            ControllerIdentity(1, "wrong", "left stick", (True,)),
-            ControllerIdentity(2, "right", "right stick", (False,)),
-        ),
-        deadman_pressed=True,
-        mapping_id="dual_stick.v1",
-        calibration_id="raw.v1",
-    )
-
-    ack = json.loads(
-        gate.accept(
-            encode_joystick_packet(packet),
-            source=("192.168.31.219", 40000),
-            receive_monotonic_ns=1_000,
-        )
-    )
-
-    assert ack["accepted"] is False
-    assert gate.snapshot() == (False, 1_000)
-
-
-def test_motion_operator_gate_requires_runtime_nonce_hmac_and_rejects_replay():
-    from excavator_il.joystick_protocol import authenticate_json_message
-
-    key = b"k" * 32
-    nonce = "n" * 64
-    gate = OperatorDeadmanGate(
-        allowed_pc_host="192.168.31.219",
-        expected_device_ids=("left", "right"),
-        mapping_id="dual_stick.v1",
-        calibration_id="raw.v1",
-        authentication_key=key,
-        runtime_nonce=nonce,
-    )
-    packet = JoystickPacket(
-        session_id="session-a",
-        sample_seq=0,
-        pc_sample_monotonic_ns=100,
-        pc_sample_wall_ns=200,
-        axes=(0.0,) * 6,
-        controllers=(
-            ControllerIdentity(1, "left", "left", (False,)),
-            ControllerIdentity(2, "right", "right", (False,)),
-        ),
-        deadman_pressed=False,
-        mapping_id="dual_stick.v1",
-        calibration_id="raw.v1",
-    )
-    unsigned = encode_joystick_packet(packet)
-
-    challenge = json.loads(
-        gate.accept(
-            unsigned,
-            source=("192.168.31.219", 40000),
-            receive_monotonic_ns=1_000,
-        )
-    )
-    signed = authenticate_json_message(json.loads(unsigned), key=key, nonce=nonce)
-    accepted = json.loads(
-        gate.accept(
-            signed,
-            source=("192.168.31.219", 40000),
-            receive_monotonic_ns=2_000,
-        )
-    )
-
-    assert challenge["accepted"] is False
-    assert challenge["reason"] == "authentication_required"
-    assert challenge["runtime_nonce"] == nonce
-    assert accepted["accepted"] is True
-    assert json.loads(
-        gate.accept(
-            signed,
-            source=("192.168.31.219", 40000),
-            receive_monotonic_ns=3_000,
-        )
-    )["accepted"] is False
-
-
-def test_motion_operator_gate_revokes_enabled_state_on_authentication_failure():
-    from excavator_il.joystick_protocol import authenticate_json_message
-
-    key = b"k" * 32
-    nonce = "n" * 64
-    gate = OperatorDeadmanGate(
-        allowed_pc_host="192.168.31.219",
-        expected_device_ids=("left", "right"),
-        mapping_id="dual_stick.v1",
-        calibration_id="raw.v1",
-        authentication_key=key,
-        runtime_nonce=nonce,
-    )
-    release = json.loads(_operator_packet(session="session-a", sequence=0, deadman=False))
-    press = json.loads(_operator_packet(session="session-a", sequence=1, deadman=True))
-    for stamp, packet in (
-        (1_000, release),
-        (2_000, press),
-    ):
-        gate.accept(
-            authenticate_json_message(packet, key=key, nonce=nonce),
-            source=("192.168.31.219", 40000),
-            receive_monotonic_ns=stamp,
-        )
-    assert gate.snapshot() == (True, 2_000)
-
-    rejected = json.loads(
-        gate.accept(
-            _operator_packet(session="session-a", sequence=2, deadman=True),
-            source=("192.168.31.219", 40000),
-            receive_monotonic_ns=3_000,
-        )
-    )
-
-    assert rejected["reason"] == "authentication_required"
-    assert gate.snapshot() == (False, 3_000)
-
-
-def test_operator_gate_requires_release_before_first_deadman_press():
-    gate = OperatorDeadmanGate(
-        allowed_pc_host="192.168.31.219",
-        expected_device_ids=("left", "right"),
-        mapping_id="dual_stick.v1",
-        calibration_id="raw.v1",
-    )
-
-    first_true = _operator_packet(session="session-a", sequence=0, deadman=True)
-    release = _operator_packet(session="session-a", sequence=1, deadman=False)
-    enabled = _operator_packet(session="session-a", sequence=2, deadman=True)
-
-    rejected = json.loads(
-        gate.accept(first_true, source=("192.168.31.219", 40000), receive_monotonic_ns=10)
-    )
-    gate.accept(release, source=("192.168.31.219", 40000), receive_monotonic_ns=20)
-    accepted = json.loads(
-        gate.accept(enabled, source=("192.168.31.219", 40000), receive_monotonic_ns=30)
-    )
-
-    assert rejected["accepted"] is False
-    assert rejected["reason"] == "release_required"
-    assert accepted["accepted"] is True
-    assert gate.snapshot() == (True, 30)
-
-
-def test_operator_gate_requires_release_before_switching_session():
-    gate = OperatorDeadmanGate(
-        allowed_pc_host="192.168.31.219",
-        expected_device_ids=("left", "right"),
-        mapping_id="dual_stick.v1",
-        calibration_id="raw.v1",
-    )
-    for sequence, deadman in ((0, False), (1, True)):
-        gate.accept(
-            _operator_packet(
-                session="session-a", sequence=sequence, deadman=deadman
-            ),
-            source=("192.168.31.219", 40000),
-            receive_monotonic_ns=sequence + 10,
-        )
-
-    rejected = json.loads(
-        gate.accept(
-            _operator_packet(session="session-b", sequence=0, deadman=True),
-            source=("192.168.31.219", 40000),
-            receive_monotonic_ns=20,
-        )
-    )
-
-    assert rejected["accepted"] is False
-    assert rejected["reason"] == "release_required"
-    assert gate.snapshot()[0] is False
-
-
-def _operator_packet(*, session: str, sequence: int, deadman: bool) -> bytes:
-    return encode_joystick_packet(
-        JoystickPacket(
-            session_id=session,
-            sample_seq=sequence,
-            pc_sample_monotonic_ns=100,
-            pc_sample_wall_ns=200,
-            axes=(0.0,) * 6,
-            controllers=(
-                ControllerIdentity(1, "left", "left stick", (deadman,)),
-                ControllerIdentity(2, "right", "right stick", (False,)),
-            ),
-            deadman_pressed=deadman,
-            mapping_id="dual_stick.v1",
-            calibration_id="raw.v1",
-        )
-    )

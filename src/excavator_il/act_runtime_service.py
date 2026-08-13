@@ -9,8 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 import queue
 import signal
-import socket
-import secrets
 import threading
 import time
 from typing import Any, Callable
@@ -24,7 +22,6 @@ from .act_runtime import (
     ActRuntimeDecision,
     ActRuntimeEngine,
     CausalObservationBuffer,
-    OperatorDeadmanGate,
     REQUIRED_MOTION_AUTHORIZATION,
     RuntimeMode,
     warmup_act_policy_session,
@@ -120,22 +117,17 @@ class Stm32CommandChannel:
         serial_port: Any,
         encoder: Stm32ManualCommandEncoder,
         mode: RuntimeMode,
-        max_operator_age_ms: float = 150.0,
         max_state_age_ms: float = 100.0,
         record_command: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
-        if max_operator_age_ms <= 0 or max_state_age_ms <= 0:
-            raise ValueError("runtime timeouts must be positive")
+        if max_state_age_ms <= 0:
+            raise ValueError("runtime state timeout must be positive")
         self._serial = serial_port
         self._encoder = encoder
         self._mode = RuntimeMode(mode)
-        self._max_operator_age_ns = int(max_operator_age_ms * 1_000_000)
         self._max_state_age_ns = int(max_state_age_ms * 1_000_000)
         self._synchronized = False
         self._terminally_disarmed = False
-        self._operator_enabled = False
-        self._operator_monotonic_ns: int | None = None
-        self._operator_timeout_zero_sent = False
         self._state_monotonic_ns: int | None = None
         self._state_timeout_zero_sent = False
         self._state_generation = 0
@@ -209,17 +201,7 @@ class Stm32CommandChannel:
             expected_motion_epoch = (
                 self._motion_epoch if motion_epoch is None else motion_epoch
             )
-            operator_fresh = (
-                self._operator_enabled
-                and self._operator_monotonic_ns is not None
-                and monotonic_ns >= self._operator_monotonic_ns
-                and monotonic_ns - self._operator_monotonic_ns
-                <= self._max_operator_age_ns
-            )
             gate_reason = "accepted"
-            if nonzero and not operator_fresh:
-                axes = (0.0,) * 6
-                gate_reason = "operator_not_fresh"
             if nonzero and expected_motion_epoch != self._motion_epoch:
                 axes = (0.0,) * 6
                 gate_reason = "motion_interrupted"
@@ -258,34 +240,6 @@ class Stm32CommandChannel:
             raise ValueError("safe-zero reason must be non-empty")
         with self._lock:
             return self._write_locked((0.0,) * 6, monotonic_ns, reason=reason)
-
-    def update_operator(self, enabled: bool, *, receive_monotonic_ns: int) -> None:
-        with self._lock:
-            was_enabled = self._operator_enabled
-            self._operator_enabled = enabled
-            self._operator_monotonic_ns = receive_monotonic_ns
-            self._operator_timeout_zero_sent = False
-            if was_enabled and not enabled and not self._terminally_disarmed:
-                self._interrupt_motion_locked()
-                self._write_locked(
-                    (0.0,) * 6, receive_monotonic_ns, reason="operator_released"
-                )
-
-    def enforce_operator_timeout(self, *, monotonic_ns: int) -> bool:
-        with self._lock:
-            expired = (
-                self._operator_enabled
-                and self._operator_monotonic_ns is not None
-                and monotonic_ns - self._operator_monotonic_ns
-                > self._max_operator_age_ns
-            )
-            if not expired or self._operator_timeout_zero_sent:
-                return False
-            self._operator_enabled = False
-            self._operator_timeout_zero_sent = True
-            self._interrupt_motion_locked()
-            self._write_locked((0.0,) * 6, monotonic_ns, reason="operator_timeout")
-            return True
 
     def update_state(self, frame: Stm32TelemetryFrame) -> int:
         with self._lock:
@@ -333,7 +287,6 @@ class Stm32CommandChannel:
             if self._terminally_disarmed:
                 return
             self._terminally_disarmed = True
-            self._operator_enabled = False
             self._interrupt_motion_locked()
             if self._synchronized:
                 self._write_locked((0.0,) * 6, monotonic_ns, reason=reason)
@@ -348,21 +301,15 @@ class ActRuntimeStepProcessor:
         observation_buffer: CausalObservationBuffer,
         engine: Any,
         command_channel: Stm32CommandChannel,
-        operator_snapshot: Callable[[], tuple[bool, int | None]],
         record: Callable[[dict[str, Any]], None],
         monotonic_ns: Callable[[], int] = time.monotonic_ns,
     ) -> None:
         self._observations = observation_buffer
         self._engine = engine
         self._command_channel = command_channel
-        self._operator_snapshot = operator_snapshot
         self._record = record
         self._clock = monotonic_ns
         self._last_motion_epoch = command_channel.motion_epoch
-
-    @property
-    def operator_snapshot(self) -> Callable[[], tuple[bool, int | None]]:
-        return self._operator_snapshot
 
     def process(
         self,
@@ -408,7 +355,6 @@ class ActRuntimeStepProcessor:
                 decision = self._engine.step(
                     observation=observation,
                     telemetry=telemetry.values,
-                    operator_snapshot=self._operator_snapshot,
                 )
                 now_ns = self._clock()
         write_attempted = decision.serial_axes is not None
@@ -584,37 +530,6 @@ class _JsonlLog:
             self._file.close()
 
 
-def _load_operator_authentication_key(path: Path) -> bytes:
-    try:
-        value = bytes.fromhex(path.read_text(encoding="ascii").strip())
-    except (OSError, UnicodeError, ValueError) as exc:
-        raise ValueError("ACT operator HMAC key is unavailable or invalid") from exc
-    if len(value) < 32:
-        raise ValueError("ACT operator HMAC key must contain at least 32 bytes")
-    return value
-
-
-def _apply_operator_datagram(
-    *,
-    operator_gate: OperatorDeadmanGate,
-    command_channel: Stm32CommandChannel,
-    datagram: bytes,
-    source: tuple[str, int],
-    receive_monotonic_ns: int,
-) -> bytes:
-    """Apply one UDP packet and mirror every gate transition to the serial guard."""
-
-    before_enabled, _ = operator_gate.snapshot()
-    ack = operator_gate.accept(
-        datagram, source=source, receive_monotonic_ns=receive_monotonic_ns
-    )
-    enabled, stamp = operator_gate.snapshot()
-    accepted = json.loads(ack).get("accepted") is True
-    if stamp is not None and (accepted or enabled != before_enabled):
-        command_channel.update_operator(enabled, receive_monotonic_ns=stamp)
-    return ack
-
-
 def _route_telemetry_frame(
     *,
     frame: Stm32TelemetryFrame,
@@ -636,19 +551,15 @@ def _route_telemetry_frame(
 class ActRuntimeService:
     def __init__(
         self,
-        config: ActRuntimeConfig,
         *,
         serial_port: Any,
         camera: UvcCamera,
         processor: ActRuntimeStepProcessor,
-        operator_gate: OperatorDeadmanGate,
         command_channel: Stm32CommandChannel,
     ) -> None:
-        self._config = config
         self._serial = serial_port
         self._camera = camera
         self._processor = processor
-        self._operator_gate = operator_gate
         self._command_channel = command_channel
         self._parser = Stm32TelemetryParser()
         self._observations = processor._observations
@@ -700,21 +611,7 @@ class ActRuntimeService:
                 dropped_state_count=dropped,
             )
 
-    def _handle_operator_datagram(
-        self, datagram: bytes, source: tuple[str, int], receive_ns: int
-    ) -> bytes:
-        return _apply_operator_datagram(
-            operator_gate=self._operator_gate,
-            command_channel=self._command_channel,
-            datagram=datagram,
-            source=source,
-            receive_monotonic_ns=receive_ns,
-        )
-
     def run(self) -> None:
-        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        udp.bind((self._config.joystick.bind_host, self._config.joystick.port))
-        udp.settimeout(0.05)
         camera_worker = threading.Thread(
             target=self._worker, args=(self._camera_loop,), daemon=True
         )
@@ -747,19 +644,8 @@ class ActRuntimeService:
                 self._command_channel.mode.value,
                 next_sequence,
             )
-            while not self._stop.is_set():
-                try:
-                    datagram, source = udp.recvfrom(16_384)
-                except TimeoutError:
-                    pass
-                else:
-                    receive_ns = time.monotonic_ns()
-                    ack = self._handle_operator_datagram(datagram, source, receive_ns)
-                    udp.sendto(ack, source)
+            while not self._stop.wait(0.05):
                 watchdog_ns = time.monotonic_ns()
-                self._command_channel.enforce_operator_timeout(
-                    monotonic_ns=watchdog_ns
-                )
                 self._command_channel.enforce_state_timeout(
                     monotonic_ns=watchdog_ns
                 )
@@ -770,7 +656,6 @@ class ActRuntimeService:
             self._command_channel.terminal_disarm(
                 monotonic_ns=time.monotonic_ns(), reason="act_runtime_shutdown"
             )
-            udp.close()
             for thread in workers:
                 thread.join(timeout=1.0)
 
@@ -825,7 +710,6 @@ def run_act_runtime(
         motion_authorization=motion_authorization,
         max_state_age_ms=config.max_inference_state_age_ms,
         max_camera_age_ms=config.max_camera_age_ms,
-        max_operator_age_ms=config.max_operator_age_ms,
     )
     engine = ActRuntimeEngine(
         session=session,
@@ -833,18 +717,6 @@ def run_act_runtime(
         max_inference_ms=config.max_inference_ms,
     )
     observations = CausalObservationBuffer()
-    operator_gate = OperatorDeadmanGate(
-        allowed_pc_host=config.joystick.allowed_pc_host,
-        expected_device_ids=config.controllers.device_ids,
-        mapping_id=config.controllers.mapping_id,
-        calibration_id=config.controllers.calibration_id,
-        authentication_key=(
-            _load_operator_authentication_key(config.operator_auth_key_path)
-            if mode is RuntimeMode.MOTION
-            else None
-        ),
-        runtime_nonce=(secrets.token_hex(32) if mode is RuntimeMode.MOTION else None),
-    )
     log = _JsonlLog(config.log_root, mode)
     serial_port = serial.Serial(
         config.serial.port,
@@ -867,7 +739,6 @@ def run_act_runtime(
         serial_port=serial_port,
         encoder=encoder,
         mode=mode,
-        max_operator_age_ms=config.max_operator_age_ms,
         max_state_age_ms=config.state_silence_timeout_ms,
         record_command=log.write,
     )
@@ -875,15 +746,12 @@ def run_act_runtime(
         observation_buffer=observations,
         engine=engine,
         command_channel=command_channel,
-        operator_snapshot=operator_gate.snapshot,
         record=log.write,
     )
     service = ActRuntimeService(
-        config,
         serial_port=serial_port,
         camera=camera,
         processor=processor,
-        operator_gate=operator_gate,
         command_channel=command_channel,
     )
     previous: dict[int, Any] = {}

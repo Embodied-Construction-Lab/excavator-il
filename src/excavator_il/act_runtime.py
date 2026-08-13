@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from collections import deque
 from enum import Enum
 import math
-import json
 import time
 import threading
 from typing import Any, Callable, Mapping
@@ -17,11 +16,6 @@ import torch
 from .lerobot_conversion import STATE_FIELDS
 from .raw_episode import ACTION_FIELDS
 from .collector.camera import RgbCameraFrame
-from .joystick_protocol import (
-    JoystickProtocolError,
-    decode_joystick_packet,
-    verify_json_message,
-)
 from .stm32_protocol import Stm32TelemetryFrame
 
 REQUIRED_MOTION_AUTHORIZATION = "ALLOW_ACT_MACHINE_MOTION"
@@ -92,151 +86,6 @@ class CausalObservationBuffer:
         )
 
 
-class OperatorDeadmanGate:
-    """Accept joystick identity and deadman state while intentionally ignoring axes."""
-
-    def __init__(
-        self,
-        *,
-        allowed_pc_host: str,
-        expected_device_ids: tuple[str, str],
-        mapping_id: str,
-        calibration_id: str,
-        authentication_key: bytes | None = None,
-        runtime_nonce: str | None = None,
-    ) -> None:
-        self._allowed_pc_host = allowed_pc_host
-        self._expected_device_ids = expected_device_ids
-        self._mapping_id = mapping_id
-        self._calibration_id = calibration_id
-        if (authentication_key is None) != (runtime_nonce is None):
-            raise ValueError("operator authentication key and runtime nonce must be paired")
-        self._authentication_key = authentication_key
-        self._runtime_nonce = runtime_nonce
-        self._last_sequences: dict[tuple[str, str], int] = {}
-        self._active_session: tuple[str, str] | None = None
-        self._release_observed = False
-        self._enabled = False
-        self._receive_monotonic_ns: int | None = None
-        self._lock = threading.Lock()
-
-    @staticmethod
-    def _ack(
-        *,
-        sample_seq: int | None,
-        accepted: bool,
-        reason: str,
-        receive_monotonic_ns: int,
-        runtime_nonce: str | None = None,
-    ) -> bytes:
-        value = {
-                "schema_version": "excavator_joystick_ack.v1",
-                "sample_seq": sample_seq,
-                "accepted": accepted,
-                "reason": reason,
-                "orin_receive_monotonic_ns": receive_monotonic_ns,
-            }
-        if runtime_nonce is not None:
-            value["runtime_nonce"] = runtime_nonce
-        return json.dumps(value, separators=(",", ":")).encode("utf-8")
-
-    def accept(
-        self,
-        datagram: bytes,
-        *,
-        source: tuple[str, int],
-        receive_monotonic_ns: int,
-    ) -> bytes:
-        if source[0] != self._allowed_pc_host:
-            return self._ack(
-                sample_seq=None,
-                accepted=False,
-                reason="source_not_allowed",
-                receive_monotonic_ns=receive_monotonic_ns,
-            )
-        try:
-            if self._authentication_key is not None and self._runtime_nonce is not None:
-                try:
-                    unsigned = verify_json_message(
-                        datagram,
-                        key=self._authentication_key,
-                        nonce=self._runtime_nonce,
-                    )
-                    datagram = json.dumps(unsigned, separators=(",", ":")).encode("utf-8")
-                except JoystickProtocolError:
-                    with self._lock:
-                        self._enabled = False
-                        self._release_observed = False
-                        self._receive_monotonic_ns = receive_monotonic_ns
-                    return self._ack(
-                        sample_seq=None,
-                        accepted=False,
-                        reason="authentication_required",
-                        receive_monotonic_ns=receive_monotonic_ns,
-                        runtime_nonce=self._runtime_nonce,
-                    )
-            packet = decode_joystick_packet(datagram)
-            identities = tuple(item.device_id for item in packet.controllers)
-            if identities != self._expected_device_ids:
-                raise JoystickProtocolError("controller identity mismatch")
-            if packet.mapping_id != self._mapping_id:
-                raise JoystickProtocolError("mapping identity mismatch")
-            if packet.calibration_id != self._calibration_id:
-                raise JoystickProtocolError("calibration identity mismatch")
-            key = (source[0], packet.session_id)
-        except JoystickProtocolError as exc:
-            with self._lock:
-                self._enabled = False
-                self._release_observed = False
-                self._receive_monotonic_ns = receive_monotonic_ns
-            return self._ack(
-                sample_seq=None,
-                accepted=False,
-                reason=str(exc),
-                receive_monotonic_ns=receive_monotonic_ns,
-            )
-        with self._lock:
-            if self._active_session != key:
-                self._active_session = key
-                self._release_observed = False
-                self._enabled = False
-                self._receive_monotonic_ns = receive_monotonic_ns
-            previous = self._last_sequences.get(key)
-            if previous is not None and packet.sample_seq <= previous:
-                self._enabled = False
-                self._release_observed = False
-                self._receive_monotonic_ns = receive_monotonic_ns
-                return self._ack(
-                    sample_seq=packet.sample_seq,
-                    accepted=False,
-                    reason="duplicate_or_out_of_order",
-                    receive_monotonic_ns=receive_monotonic_ns,
-                )
-            if packet.deadman_pressed and not self._release_observed:
-                self._last_sequences[key] = packet.sample_seq
-                return self._ack(
-                    sample_seq=packet.sample_seq,
-                    accepted=False,
-                    reason="release_required",
-                    receive_monotonic_ns=receive_monotonic_ns,
-                )
-            self._last_sequences[key] = packet.sample_seq
-            if not packet.deadman_pressed:
-                self._release_observed = True
-            self._enabled = packet.deadman_pressed
-            self._receive_monotonic_ns = receive_monotonic_ns
-        return self._ack(
-            sample_seq=packet.sample_seq,
-            accepted=True,
-            reason="accepted",
-            receive_monotonic_ns=receive_monotonic_ns,
-        )
-
-    def snapshot(self) -> tuple[bool, int | None]:
-        with self._lock:
-            return self._enabled, self._receive_monotonic_ns
-
-
 class ActRuntimeController:
     """Decide whether one ACT result may reach the serial command boundary."""
 
@@ -247,9 +96,8 @@ class ActRuntimeController:
         motion_authorization: str | None = None,
         max_state_age_ms: float = 100.0,
         max_camera_age_ms: float = 120.0,
-        max_operator_age_ms: float = 150.0,
     ) -> None:
-        ages_ms = (max_state_age_ms, max_camera_age_ms, max_operator_age_ms)
+        ages_ms = (max_state_age_ms, max_camera_age_ms)
         if not all(math.isfinite(value) and value > 0 for value in ages_ms):
             raise ValueError("ACT runtime age limits must be finite and positive")
         self._mode = RuntimeMode(mode)
@@ -258,7 +106,6 @@ class ActRuntimeController:
         )
         self._max_state_age_ns = int(max_state_age_ms * 1_000_000)
         self._max_camera_age_ns = int(max_camera_age_ms * 1_000_000)
-        self._max_operator_age_ns = int(max_operator_age_ms * 1_000_000)
 
     @property
     def mode(self) -> RuntimeMode:
@@ -272,8 +119,6 @@ class ActRuntimeController:
         camera_monotonic_ns: int,
         now_monotonic_ns: int,
         telemetry: Mapping[str, int | float | str],
-        operator_enabled: bool,
-        operator_monotonic_ns: int | None,
     ) -> ActRuntimeDecision:
         predicted = tuple(float(value) for value in predicted_action)
         if len(predicted) != len(ACTION_FIELDS) or not all(
@@ -290,18 +135,12 @@ class ActRuntimeController:
             )
         if not self._motion_authorized:
             return ActRuntimeDecision(predicted, _ZERO_ACTION, (0.0,) * 6, "motion_unauthorized")
-        if not operator_enabled or operator_monotonic_ns is None:
-            return ActRuntimeDecision(predicted, _ZERO_ACTION, (0.0,) * 6, "operator_disabled")
-        if now_monotonic_ns < max(
-            state_monotonic_ns, camera_monotonic_ns, operator_monotonic_ns
-        ):
+        if now_monotonic_ns < max(state_monotonic_ns, camera_monotonic_ns):
             return ActRuntimeDecision(predicted, _ZERO_ACTION, (0.0,) * 6, "future_timestamp")
         if now_monotonic_ns - state_monotonic_ns > self._max_state_age_ns:
             return ActRuntimeDecision(predicted, _ZERO_ACTION, (0.0,) * 6, "state_stale")
         if now_monotonic_ns - camera_monotonic_ns > self._max_camera_age_ns:
             return ActRuntimeDecision(predicted, _ZERO_ACTION, (0.0,) * 6, "camera_stale")
-        if now_monotonic_ns - operator_monotonic_ns > self._max_operator_age_ns:
-            return ActRuntimeDecision(predicted, _ZERO_ACTION, (0.0,) * 6, "operator_stale")
         required_one = ("control_enabled", "rs485_ok", "dwj_ok", "imu_ok")
         if not all(int(telemetry.get(field, 0)) == 1 for field in required_one):
             return ActRuntimeDecision(predicted, _ZERO_ACTION, (0.0,) * 6, "safety_state_invalid")
@@ -352,7 +191,6 @@ class ActRuntimeEngine:
         *,
         observation: ActObservation,
         telemetry: Mapping[str, int | float | str],
-        operator_snapshot: Callable[[], tuple[bool, int | None]],
     ) -> ActRuntimeDecision:
         started_ns = self._clock()
         try:
@@ -378,15 +216,12 @@ class ActRuntimeEngine:
                 else None,
                 reason="inference_budget_exceeded",
             )
-        operator_enabled, operator_monotonic_ns = operator_snapshot()
         decision = self._controller.decide(
             predicted_action=predicted,
             state_monotonic_ns=observation.state_monotonic_ns,
             camera_monotonic_ns=observation.camera_monotonic_ns,
             now_monotonic_ns=completed_ns,
             telemetry=telemetry,
-            operator_enabled=operator_enabled,
-            operator_monotonic_ns=operator_monotonic_ns,
         )
         if decision.reason not in ("motion_allowed", "shadow_mode"):
             self._session.reset()

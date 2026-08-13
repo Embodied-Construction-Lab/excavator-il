@@ -4,7 +4,6 @@ set -euo pipefail
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="${ACT_RUNTIME_IMAGE:-excavator-act-inference:jp72-pytorch261}"
 deployment_root="/home/jetson16/workspace_excavator/act_inference"
-authentication_key="${deployment_root}/act_operator_hmac.key"
 runtime_uid="$(id -u)"
 runtime_gid="$(id -g)"
 serial_gid="$(stat -c '%g' /dev/ttyTHS1)"
@@ -15,9 +14,6 @@ test -c /dev/video0
 test -d "${deployment_root}/checkpoint_parent_split_001054"
 test -f "${deployment_root}/deployment/deployment_manifest.json"
 test -f /home/jetson16/workspace_excavator/shared/machine_profile.json
-test -f "${authentication_key}"
-test "$(stat -c '%a' "${authentication_key}")" = "600"
-test "$(stat -c '%u' "${authentication_key}")" = "${runtime_uid}"
 mkdir -p "${deployment_root}/logs"
 test -w "${deployment_root}/logs"
 
@@ -32,7 +28,9 @@ if fuser /dev/ttyTHS1 /dev/video0 >/dev/null 2>&1; then
 fi
 
 echo "即将启动 ACT motion Runtime；该模式具备 STM32 写权限。"
-echo "首次验收必须：发动机关闭、双杆居中、deadman 全程释放。"
+echo "Runtime 在 Orin 本地独立推理，不需要启动 PC teleop。"
+echo "授权后模型可能立即发送非零杆量；首次验收必须保持发动机关闭。"
+echo "继续前确认串口、相机和传感器独占，作业区无人且急停可用。"
 read -r -p "请输入 ALLOW_ACT_MACHINE_MOTION 继续：" confirmation
 if [[ "${confirmation}" != "ALLOW_ACT_MACHINE_MOTION" ]]; then
   echo "授权不匹配，未启动 Runtime。" >&2
@@ -41,7 +39,7 @@ fi
 
 exec sudo docker run --rm \
   --runtime=nvidia --gpus all \
-  --network=host \
+  --network=none \
   --read-only \
   --user "${runtime_uid}:${runtime_gid}" \
   --group-add "${serial_gid}" \
@@ -59,7 +57,6 @@ exec sudo docker run --rm \
   -v "${deployment_root}/deployment:/opt/act-deployment:ro" \
   -v /home/jetson16/workspace_excavator/shared:/opt/excavator-config:ro \
   -v "${deployment_root}/logs:/opt/act-runtime-logs" \
-  -v "${authentication_key}:/run/secrets/act_operator_hmac:ro" \
   -v "${repo_dir}/config/act_runtime.orin.json:/opt/act-runtime.json:ro" \
   "${image}" \
   excavator-il act-runtime --config /opt/act-runtime.json \
