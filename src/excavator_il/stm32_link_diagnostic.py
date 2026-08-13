@@ -17,6 +17,8 @@ class Stm32LinkDiagnosticReport:
     parse_failure_count: int
     control_sequence_gap_count: int
     estimated_rate_hz: float
+    estimated_control_rate_hz: float
+    max_receive_period_ms: float
     failure_reasons: tuple[str, ...]
 
 
@@ -27,6 +29,7 @@ def inspect_stm32_telemetry_samples(
 
     parser = Stm32TelemetryParser()
     receive_times_ns: list[int] = []
+    control_sequences: list[int] = []
     previous_sequence: int | None = None
     parse_failures: list[str] = []
     sequence_gap_count = 0
@@ -39,31 +42,55 @@ def inspect_stm32_telemetry_samples(
         if frame is None:
             continue
         if previous_sequence is not None:
-            expected = (previous_sequence + 1) & 0xFFFFFFFF
-            if frame.control_seq != expected:
+            sequence_delta = (frame.control_seq - previous_sequence) & 0xFFFFFFFF
+            # Control and telemetry are independent 20 Hz firmware tasks. Their
+            # phase can legitimately expose the same control snapshot twice and
+            # then advance by two on the next wire frame.
+            if sequence_delta > 2:
                 sequence_gap_count += 1
         previous_sequence = frame.control_seq
+        control_sequences.append(frame.control_seq)
         receive_times_ns.append(receive_ns)
 
     rate_hz = 0.0
+    control_rate_hz = 0.0
+    max_receive_period_ms = 0.0
     if len(receive_times_ns) >= 2:
         span_ns = receive_times_ns[-1] - receive_times_ns[0]
         if span_ns > 0:
             rate_hz = (len(receive_times_ns) - 1) * 1_000_000_000 / span_ns
+            control_delta = (control_sequences[-1] - control_sequences[0]) & 0xFFFFFFFF
+            control_rate_hz = control_delta * 1_000_000_000 / span_ns
+        max_receive_period_ms = max(
+            (current - previous) / 1_000_000
+            for previous, current in zip(receive_times_ns, receive_times_ns[1:])
+        )
 
     reasons = list(dict.fromkeys(parse_failures))
     if not receive_times_ns:
         reasons.append("no valid STM32 telemetry frames were received")
     if sequence_gap_count:
-        reasons.append(f"control sequence gap count is {sequence_gap_count}")
+        reasons.append(
+            f"control sequence discontinuity count is {sequence_gap_count}"
+        )
     if not 18.0 <= rate_hz <= 22.0:
         reasons.append(f"STM32 telemetry rate {rate_hz:.3f} Hz is outside [18, 22]")
+    if not 18.0 <= control_rate_hz <= 22.0:
+        reasons.append(
+            f"STM32 control rate {control_rate_hz:.3f} Hz is outside [18, 22]"
+        )
+    if max_receive_period_ms > 80.0:
+        reasons.append(
+            f"STM32 maximum receive period {max_receive_period_ms:.3f} ms exceeds 80 ms"
+        )
     return Stm32LinkDiagnosticReport(
         passed=not reasons,
         telemetry_frame_count=len(receive_times_ns),
         parse_failure_count=len(parse_failures),
         control_sequence_gap_count=sequence_gap_count,
         estimated_rate_hz=rate_hz,
+        estimated_control_rate_hz=control_rate_hz,
+        max_receive_period_ms=max_receive_period_ms,
         failure_reasons=tuple(reasons),
     )
 

@@ -216,9 +216,12 @@ Shadow 使用真实相机与 STM32 遥测运行 ACT，但物理串口边界禁�
 python scripts/diagnose_stm32_link.py
 ```
 
-只有输出同时满足 `passed=true`、`parse_failure_count=0`、`control_sequence_gap_count=0` 和
-`estimated_rate_hz` 位于 18～22 Hz 才能继续。失败时复位 STM32 并检查 TX→RX/共地，不得修改 parser
-去接受乱码或错误字段数。
+只有输出同时满足 `passed=true`、`parse_failure_count=0`、`control_sequence_gap_count=0`、
+`estimated_rate_hz` 与 `estimated_control_rate_hz` 均位于 18～22 Hz，并且
+`max_receive_period_ms <= 80` 才能继续。固件的控制循环与遥测发送是两个独立 20 Hz 周期，遥测中
+相邻 `control_seq` 合法出现一次重复（增量 0）并在下一帧前进两次（增量 2）；诊断器接受这种相位
+交换，但仍拒绝增量大于 2、控制循环平均频率异常或真正的遥测长间断。解析失败时复位 STM32 并
+检查 TX→RX/共地，不得修改 parser 去接受乱码或错误字段数。
 
 Motion 还要求 PC/Orin 各自以 `0600` 权限保存同一份至少 32 byte 随机 HMAC 密钥；密钥永不
 提交 Git。每次 Orin runtime 启动产生新的随机 nonce，PC 必须先收到 challenge，再对后续数据包

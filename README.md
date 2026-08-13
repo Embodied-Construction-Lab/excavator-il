@@ -215,8 +215,9 @@ Orin NVIDIA PyTorch 镜像构建、GPU 自检、checkpoint 传输、只读离线
 manifest、单前视因果 RGB、11 维状态和 `[boom, stick, bucket, swing]` 四维动作。启动时必须先通过
 synthetic CUDA warmup 与真实相机/STM32 live warmup；状态丢帧、安全中断或无因果图像时清空
 action queue 并保持零命令。完整 shadow/motion 门禁与验收命令以该 Orin 手册为准。
-现场先运行 `python scripts/diagnose_stm32_link.py` 做 10 秒只读 USART2 验收；通过后在 Orin 运行
-`bash scripts/run_act_shadow.sh`，该脚本固定不传 motion authorization。
+现场先运行 `python scripts/diagnose_stm32_link.py` 做 10 秒只读 USART2 验收；诊断分别检查遥测
+接收频率、控制循环平均频率和最大接收间隔，不把两个独立 20 Hz 周期的合法相位交换误报为丢包。
+通过后在 Orin 运行 `bash scripts/run_act_shadow.sh`，该脚本固定不传 motion authorization。
 每个连续 Training Segment 写成独立 LeRobot Episode，并使用 LeRobot 原生 `action_is_pad` 防止
 ACT 动作块跨越故障边界；转换帧保留 parent Episode、segment 和原始 frame index。
 
