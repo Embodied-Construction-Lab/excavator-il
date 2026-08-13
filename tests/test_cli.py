@@ -128,9 +128,16 @@ def test_diagnose_joysticks_returns_nonzero_when_mapping_does_not_match(monkeypa
 def test_act_runtime_cli_defaults_to_shadow_and_passes_exact_motion_authorization(
     monkeypatch,
 ):
+    from excavator_il import cli
     from excavator_il import act_runtime_service
 
     calls = []
+    logging_calls = []
+    monkeypatch.setattr(
+        cli.logging,
+        "basicConfig",
+        lambda **kwargs: logging_calls.append(kwargs),
+    )
     monkeypatch.setattr(
         act_runtime_service,
         "run_act_runtime",
@@ -153,6 +160,7 @@ def test_act_runtime_cli_defaults_to_shadow_and_passes_exact_motion_authorizatio
         ("runtime.json", None),
         ("runtime.json", "ALLOW_ACT_MACHINE_MOTION"),
     ]
+    assert all(call["force"] is True for call in logging_calls)
 
 
 def test_inspect_zero_soak_returns_nonzero_for_unsafe_episode(monkeypatch, capsys):

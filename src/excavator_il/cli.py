@@ -305,6 +305,7 @@ def main(argv: list[str] | None = None) -> int:
             logging.basicConfig(
                 level=logging.INFO,
                 format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+                force=True,
             )
             run_act_runtime(
                 args.config, motion_authorization=args.motion_authorization
