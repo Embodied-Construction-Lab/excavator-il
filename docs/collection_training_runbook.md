@@ -235,11 +235,22 @@ cd /home/zhaoshuai/workspace_uinty/RL_prj/excavator-il
 python scripts/collect_guided_episode.py
 ```
 
-脚本读取 `config/guided_episode.pc.json`，并完成：
+脚本读取 `config/guided_episode.pc.json`。启动后先选择 `预定位/y` 或 `直接采集/n`：
+
+- `预定位/y`：Collector 先运行一个不创建 Episode 的 teleop。按住 deadman 用双杆调整到 RL
+  Follow 的交接位姿附近；调整完成后双杆回中、松开 deadman，再输入 `完成/c`。脚本确认释放后
+  停止该 teleop，预定位过程不落盘、不占 Episode 编号；
+- `直接采集/n` 或直接按 Enter：跳过预定位。
+
+预定位只负责人工调整机构，不会自动运行 AiryLidar/RL Follow，也不会从 AiryLidar 读取目标。
+`config/guided_episode.pc.json` 的 `episode.dig_target_m` 目前是溯源元数据，不参与 ACT 输入；正式
+采集前仍必须把它与本轮 AiryLidar Mission 的 Dig 目标核对一致。
+
+之后脚本完成：
 
 1. 检查 PC 配置与 Orin SSH；
 2. 启动本次专属 Collector，并记录其精确 PID；
-3. 先创建 Episode，使 Recorder 进入待命，再启动 teleop；teleop 先通过 0.5 秒本地手柄中位
+3. 创建正式 Episode，使 Recorder 进入待命，再启动新的 teleop；teleop 先通过 0.5 秒本地手柄中位
    稳定门，然后确认 ACK 已接受、无拒绝且 deadman 初始释放；稳定门通过前不创建 UDP socket；
 4. Recorder、teleop 和 ACK 门禁全部就绪后才提示等待 deadman；按下后终端显示“记录已开始”，
    此时再操纵双杆 XY；

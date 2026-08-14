@@ -12,6 +12,7 @@ from excavator_il.guided_episode import (
     GuidedEpisodeConfig,
     SystemGuidedEpisodeOperations,
     _LineProcess,
+    _read_preposition_choice,
     run_guided_episode,
 )
 
@@ -201,6 +202,56 @@ def test_guided_episode_stands_by_before_deadman_and_seals_immediately_on_releas
         "stop_collector",
         ("build_and_validate", "/data/raw/episode_0001"),
     ]
+
+
+def test_guided_episode_optional_preposition_happens_before_episode_is_created(
+    tmp_path,
+):
+    config = _guided_config(tmp_path)
+    operations = _FakeOperations()
+    answers = iter(("完成", "成功"))
+
+    episode_path = run_guided_episode(
+        config,
+        operations,
+        preposition=True,
+        input_fn=lambda prompt: next(answers),
+        output=lambda message: None,
+    )
+
+    assert episode_path == "/data/raw/episode_0001"
+    assert operations.events == [
+        "preflight",
+        "start_collector",
+        "start_teleop",
+        ("wait_for_ack", 8),
+        "wait_for_deadman_released",
+        "stop_teleop",
+        "start_episode",
+        "start_teleop",
+        ("wait_for_ack", 8),
+        "wait_for_deadman_pressed",
+        "wait_for_deadman_released",
+        "seal_episode",
+        (
+            "finalize_episode",
+            "/data/raw/episode_0001",
+            "success",
+            "",
+        ),
+        "stop_teleop",
+        "stop_collector",
+        ("build_and_validate", "/data/raw/episode_0001"),
+    ]
+
+
+def test_preposition_choice_is_explicit_and_defaults_to_no():
+    messages = []
+    answers = iter(("unknown", "y"))
+
+    assert _read_preposition_choice(lambda prompt: "", messages.append) is False
+    assert _read_preposition_choice(lambda prompt: next(answers), messages.append) is True
+    assert messages == ["无法识别选择，请输入：预定位/y 或直接采集/n。"]
 
 
 def test_guided_episode_interrupt_aborts_before_stopping_motion_io(tmp_path):

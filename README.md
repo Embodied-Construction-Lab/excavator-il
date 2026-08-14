@@ -91,8 +91,8 @@ Collector、诊断 Episode 和 teleop，全程监视 deadman，结束后以
 20/10/20/30 Hz。任一非零串口命令、非零 STM32 动作回显、有效专家动作、手柄超时、解析/写入
 失败、传感器无效或序号异常都会让脚本非零退出。该 Episode 永不进入训练集。
 
-首次真机短 Episode 建议从 PC 使用引导脚本。它自行启动并清理 Orin Collector 和 PC teleop，
-先创建处于记录待命状态的 Episode，再启动 teleop 并通过 ACK 门禁；正常完成后自动运行
+首次真机短 Episode 建议从 PC 使用引导脚本。它自行启动并清理 Orin Collector 和 PC teleop。
+启动时可选择是否先进入不记录数据的人工预定位阶段；正常完成后自动运行
 `build-steps`、`validate` 并保存
 `quality_report.json` 输出：
 
@@ -108,7 +108,13 @@ teleop 在创建 UDP socket 前先要求四个 XY 居中且 deadman 释放，连
 
 现场参数集中在 `config/guided_episode.pc.json`。当前机器开机后液压即具备动作条件，没有独立的
 软件“锁定/解锁”阶段；运行脚本前必须清空作业区、保证急停可立即操作，异常时立即释放 deadman、
-手柄回中并按 `Ctrl+C`。Recorder、teleop 和 ACK 门禁都就绪后，脚本才提示等待 deadman；按下后
+手柄回中并按 `Ctrl+C`。选择 `预定位/y` 时，Collector 先启动一次不创建 Episode 的 teleop；可
+按住 deadman 手动移动到 RL Follow 的交接位姿附近。完成后双杆回中、松开 deadman 并输入
+`完成/c`，脚本会停止预定位 teleop，随后才创建正式 Episode，并重新启动 teleop 以再次执行
+中位稳定和 ACK 门禁。预定位数据不落盘、不占 Episode 编号，也不进入训练集。选择
+`直接采集/n` 或直接按 Enter 时保持原流程。
+
+正式 Recorder、teleop 和 ACK 门禁都就绪后，脚本才提示等待 deadman；按下后
 看到“记录已开始”再操纵双杆 XY。回中并松开 deadman 时，脚本先立即关闭所有原始流并将
 Episode 标为 `pending_review`，随后才提示输入 `成功/s`、`失败/f` 或 `重录/r`，因此人工输入
 耗时不会继续写进该 Episode。脚本不设置固定采集时长。

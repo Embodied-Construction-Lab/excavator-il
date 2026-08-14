@@ -670,6 +670,7 @@ def run_guided_episode(
     config: GuidedEpisodeConfig,
     operations: GuidedEpisodeOperations,
     *,
+    preposition: bool = False,
     input_fn: Callable[[str], str] = input,
     output: Callable[[str], None] = print,
 ) -> str:
@@ -687,6 +688,22 @@ def run_guided_episode(
         operations.preflight()
         operations.start_collector()
         collector_started = True
+        if preposition:
+            operations.start_teleop()
+            teleop_started = True
+            operations.wait_for_ack(config.ack_timeout_s)
+            output(
+                "预定位阶段（不记录 Episode）：按住 deadman，用双杆把挖掘机移动到 "
+                "RL Follow 的交接位姿附近。"
+            )
+            _wait_for_preposition_complete(input_fn, output)
+            operations.wait_for_deadman_released()
+            operations.stop_teleop()
+            teleop_started = False
+            output(
+                "预定位结束：已确认 deadman 释放并停止预定位 teleop。"
+                "请保持双杆居中，开始正式 Recorder 门禁。"
+            )
         operations.start_episode()
         episode_active = True
         operations.start_teleop()
@@ -813,6 +830,40 @@ def _read_outcome(
         output("无法识别结果，请输入：成功、失败或重录。")
 
 
+def _read_preposition_choice(
+    input_fn: Callable[[str], str], output: Callable[[str], None]
+) -> bool:
+    choices = {
+        "": False,
+        "预定位": True,
+        "y": True,
+        "yes": True,
+        "直接采集": False,
+        "n": False,
+        "no": False,
+    }
+    while True:
+        value = input_fn(
+            "是否先手动预定位挖掘机？（预定位/y、直接采集/n，默认 n）："
+        ).strip().lower()
+        choice = choices.get(value)
+        if choice is not None:
+            return choice
+        output("无法识别选择，请输入：预定位/y 或直接采集/n。")
+
+
+def _wait_for_preposition_complete(
+    input_fn: Callable[[str], str], output: Callable[[str], None]
+) -> None:
+    while True:
+        value = input_fn(
+            "预定位完成后，将双杆回中并松开 deadman，再输入 完成/c："
+        ).strip().lower()
+        if value in {"完成", "c", "complete"}:
+            return
+        output("预定位仍在进行；完成后请输入：完成/c。")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="collect and validate one guided diagnostic Episode"
@@ -826,7 +877,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = GuidedEpisodeConfig.load(args.config)
         operations = SystemGuidedEpisodeOperations(config)
-        path = run_guided_episode(config, operations)
+        preposition = _read_preposition_choice(input, print)
+        path = run_guided_episode(config, operations, preposition=preposition)
     except KeyboardInterrupt:
         print("guided Episode aborted by operator", file=sys.stderr)
         return 130
