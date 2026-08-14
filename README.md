@@ -220,6 +220,10 @@ deadman、UDP 或 HMAC；PC 手柄链路仅用于人工示教采集和手动诊�
 现场先运行 `python scripts/diagnose_stm32_link.py` 做 10 秒只读 USART2 验收；诊断分别检查遥测
 接收频率、控制循环平均频率和最大接收间隔，不把两个独立 20 Hz 周期的合法相位交换误报为丢包。
 通过后在 Orin 运行 `bash scripts/run_act_shadow.sh`，该脚本固定不传 motion authorization。
+Shadow 或发动机关闭的 motion Runtime 正常退出后，分别运行
+`bash scripts/inspect_latest_act_runtime_log.sh shadow` 或
+`bash scripts/inspect_latest_act_runtime_log.sh motion`，对最新 JSONL 证据自动检查 10 Hz 时序、
+因果图像、动作范围、串口写入、轴映射、命令序号以及启动/终止零命令。
 每个连续 Training Segment 写成独立 LeRobot Episode，并使用 LeRobot 原生 `action_is_pad` 防止
 ACT 动作块跨越故障边界；转换帧保留 parent Episode、segment 和原始 frame index。
 

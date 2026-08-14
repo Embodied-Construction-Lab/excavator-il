@@ -116,6 +116,14 @@ def _parser() -> argparse.ArgumentParser:
         help="exact explicit authorization; omitted means no-write shadow mode",
     )
 
+    inspect_runtime = commands.add_parser(
+        "inspect-act-runtime-log",
+        help="offline acceptance check for a completed ACT Runtime JSONL log",
+    )
+    inspect_runtime.add_argument("log")
+    inspect_runtime.add_argument("--mode", choices=("shadow", "motion"), required=True)
+    inspect_runtime.add_argument("--config", default="config/act_runtime.orin.json")
+
     build = commands.add_parser("build-steps", help="build causal 10 Hz ACT steps")
     build.add_argument("episode")
     build.add_argument("--max-action-age-ms", type=float, default=100.0)
@@ -316,6 +324,19 @@ def main(argv: list[str] | None = None) -> int:
             run_act_runtime(
                 args.config, motion_authorization=args.motion_authorization
             )
+        elif args.command == "inspect-act-runtime-log":
+            from .act_runtime_config import load_act_runtime_config
+            from .act_runtime_log import inspect_act_runtime_log
+
+            config = load_act_runtime_config(args.config)
+            report = inspect_act_runtime_log(
+                args.log,
+                mode=args.mode,
+                max_state_to_decision_ms=config.max_inference_state_age_ms,
+                max_camera_age_ms=config.max_camera_age_ms,
+            )
+            _print_json(asdict(report))
+            return 0 if report.passed else 3
         elif args.command == "build-steps":
             from .episode_builder import build_steps
 

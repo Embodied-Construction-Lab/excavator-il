@@ -239,6 +239,16 @@ shutdown 的实际零命令均使用 `excavator_act_runtime_command.v1` 记录�
 若某个 10 Hz state 找不到因果相机帧，runtime 该 step 只记录 `observation_unavailable` 并保持零命令，
 不得用未来图像补齐，也不应沿用上一非零动作。
 
+运行至少 30 秒并按 `Ctrl+C` 正常退出后，在 Orin 仓库执行离线日志验收：
+
+```bash
+bash scripts/inspect_latest_act_runtime_log.sh shadow
+```
+
+脚本自动选择日志目录中最新的 `act_runtime_shadow_*.jsonl`，无需激活 Conda 环境，也不访问串口、
+相机或 GPU。只有输出 `passed=true`、`serial_write_count=0`、`command_event_count=0`、step 频率位于
+8～12 Hz，且时间因果和配置中的 state/camera age 门限全部通过，Shadow 才算验收成功。
+
 Motion 入口只在现场确认后使用。首次验收必须保持发动机关闭，并确认 Collector、RL Runtime、
 历史串口脚本和相机进程全部停止；直接在 Orin 启动 Runtime：
 
@@ -253,3 +263,15 @@ bash scripts/run_act_motion.sh
 动作有限且位于 `[-1,1]`、四轴到六轴映射正确、无 stale/future 输入、startup 与 shutdown 为零、
 state timeout/unsafe telemetry 会归零，且终态零之后没有非零写入。以上发动机关闭验收通过后，才能在
 新的现场确认下启动发动机安排最小非零动作验收。
+
+正常退出后执行：
+
+```bash
+bash scripts/inspect_latest_act_runtime_log.sh motion
+```
+
+Motion 检查器要求首条实际写入为 `act_runtime_startup` 零命令、末条为
+`act_runtime_shutdown` 零命令，命令序号连续，并逐步核对 ACT 动作
+`[boom,stick,bucket,swing]` 到 STM32 `[X1,Y1,Z1,X2,Y2,Z2]` 的映射
+`[swing,stick,0,bucket,boom,0]`。推理完成前安全门发生变化而把请求降为零属于正确的 fail-closed
+行为；检查器会接受有效的零写入，但仍会在报告中保留实际非零写入数和丢弃状态数供人工复核。
