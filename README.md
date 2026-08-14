@@ -235,13 +235,18 @@ ACT 动作块跨越故障边界；转换帧保留 parent Episode、segment 和�
 
 ## 6. STM32 固件配套
 
-配套源码位于 `../F407/data_celect`。Collector 要求：
+配套源码位于 `../F407/data_celect`，它也是 RL/ACT 共用的统一 STM32 固件。Collector 只使用其
+manual 模式，要求：
 
 - USART2：460800 baud；
 - 串口命令：`stm32_manual_command.v1`；
 - 遥测：`stm32_control_telemetry.v2`；
 - 控制/遥测 20 Hz，新状态 10 Hz；
 - 未知 schema、重复/乱序或超过 300 ms 的命令归零。
+
+统一固件另接受 RL 的 `stm32_velocity_command.v1`，但两种模式互斥且必须先用目标 schema 的零命令
+切换。RL Runtime 发送 terminal zero 并释放 `/dev/ttyTHS1` 后，Collector 可直接同步 sequence 并
+占用 manual 模式；无需重启 STM32 或重新烧录。
 
 Host 回归：
 
@@ -250,7 +255,7 @@ cd ../F407/data_celect
 Tests/run_host_tests.sh
 ```
 
-CubeIDE 工程仍需在具备 ARM 工具链的构建机上重新生成/构建并烧录；PC 当前生成的 Debug Makefile
+CubeIDE 工程仍需在具备 ARM 工具链的构建机上清理、构建并烧录；PC 当前生成的 Debug Makefile
 含历史 Windows 绝对路径，不能作为固件构建成功的证据。
 
 ## 7. 回归测试

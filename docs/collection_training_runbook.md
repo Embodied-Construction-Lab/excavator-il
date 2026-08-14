@@ -7,7 +7,7 @@
 
 ### 阶段 A：设备与链路验收
 
-1. 在 CubeIDE 中重新构建并烧录 `F407/data_celect`。
+1. 在 CubeIDE 中重新构建并烧录统一固件 `F407/data_celect`。
 2. 确认双手柄、前视 UVC 相机和 STM32 串口设备名。
 3. 完成 3 条由 deadman 按下/松开界定的短 Episode：成功、失败和人工中止各一条。
 4. 每条均执行 `build-steps` 和 `validate`。
@@ -245,6 +245,11 @@ python scripts/collect_guided_episode.py
 预定位只负责人工调整机构，不会自动运行 AiryLidar/RL Follow，也不会从 AiryLidar 读取目标。
 `config/guided_episode.pc.json` 的 `episode.dig_target_m` 目前是溯源元数据，不参与 ACT 输入；正式
 采集前仍必须把它与本轮 AiryLidar Mission 的 Dig 目标核对一致。
+
+如果本条 Episode 由真实 RL Follow 产生交接位姿，不再切换或重烧 STM32 固件。按以下边界切换串口
+所有者：RL 成功/停止并确认 terminal velocity zero → 退出 `orin_state_sender.py` → 确认
+`/dev/ttyTHS1` 无占用 → 运行本脚本并选择 `直接采集/n`。Collector 会从 v2 telemetry 同步
+`command_rx_seq`，再以 manual zero 占用人工模式。不得让 RL Runtime 和 Collector 同时运行。
 
 之后脚本完成：
 

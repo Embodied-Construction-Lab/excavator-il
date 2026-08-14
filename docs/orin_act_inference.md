@@ -207,6 +207,8 @@ merge 或延迟重锚定。后者会改变动作时序，只有新模型和专�
 ## 7. 在线 Shadow 验证
 
 先停止 Collector、`orin_state_sender.py`、RL Runtime 和任何占用 `/dev/ttyTHS1`/相机的进程。
+ACT 与 RL 使用同一个 `F407/data_celect` 统一固件，不需要在此处重烧 STM32；ACT motion Runtime
+会同步 v2 telemetry 的 command sequence，并用 manual zero 从 velocity 模式切换到 manual 模式。
 Shadow 使用真实相机与 STM32 遥测运行 ACT，但物理串口边界禁止全部写操作。ACT Runtime 的
 正式结构是 Orin 本地独立推理，运行时不接收 PC 手柄、deadman、UDP 或 HMAC 数据；PC teleop
 只属于人工示教采集与单独的手动控制诊断链路。
