@@ -9,7 +9,7 @@
   },
   "episode": {
     "task": "ExecuteDig",
-    "operator_id": "operator_01",
+    "operator_id": "zhaoshuai",
     "dig_target_m": [0.8, 0.0, -0.2],
     "material_id": "soil_default",
     "failure_reason": "diagnostic_task_failed"
