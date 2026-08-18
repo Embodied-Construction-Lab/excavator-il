@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 from .core import CollectorCore, CollectorDecision
+from .preview import LatestJpegFrame
 from .recorder import EpisodeRecorder
 
 
@@ -21,6 +22,7 @@ class CollectorRuntime:
         camera: Any,
         allowed_pc_host: str,
         joystick_timeout_ms: int,
+        camera_preview: LatestJpegFrame | None = None,
     ) -> None:
         self._core = core
         self._recorder = recorder
@@ -31,6 +33,7 @@ class CollectorRuntime:
         self._last_joystick_ns: int | None = None
         self._timeout_zero_sent = False
         self._serial_write_lock = threading.Lock()
+        self._camera_preview = camera_preview
 
     @staticmethod
     def _rejection_ack(*, receive_monotonic_ns: int, reason: str) -> bytes:
@@ -122,6 +125,11 @@ class CollectorRuntime:
 
     def capture_once(self) -> str | None:
         frame = self._camera.read_encoded()
+        if self._camera_preview is not None:
+            self._camera_preview.publish(
+                frame.encoded_image,
+                capture_monotonic_ns=frame.capture_monotonic_ns,
+            )
         return self._recorder.record_camera(
             encoded_image=frame.encoded_image,
             capture_monotonic_ns=frame.capture_monotonic_ns,

@@ -17,6 +17,7 @@ from .camera import UvcCamera
 from .config import CollectionConfig, load_collection_config
 from .control import EpisodeController
 from .core import CollectorCore
+from .preview import LatestJpegFrame, MjpegPreviewServer
 from .recorder import EpisodeRecorder
 from .runtime import CollectorRuntime
 
@@ -38,6 +39,8 @@ class CollectorService:
         self._serial = serial_port
         self._camera = camera
         self._recorder = EpisodeRecorder(config.data_root)
+        self._camera_preview = LatestJpegFrame()
+        self._preview_server: MjpegPreviewServer | None = None
         self._core = CollectorCore(
             recorder=self._recorder,
             expected_device_ids=config.controllers.device_ids,
@@ -52,6 +55,7 @@ class CollectorService:
             camera=camera,
             allowed_pc_host=config.joystick.allowed_pc_host,
             joystick_timeout_ms=config.joystick.timeout_ms,
+            camera_preview=self._camera_preview,
         )
         self._episode_controller = EpisodeController(
             recorder=self._recorder,
@@ -152,12 +156,29 @@ class CollectorService:
                 self._control_socket = None
             path.unlink(missing_ok=True)
 
+    def _preview_loop(self) -> None:
+        assert self._preview_server is not None
+        try:
+            self._preview_server.serve_forever()
+        except BaseException as exc:
+            self._fail_worker("camera-preview", exc)
+
     def _start_workers(self) -> None:
-        for name, target in (
+        if self._config.camera_preview is not None:
+            self._preview_server = MjpegPreviewServer(
+                self._camera_preview,
+                bind_host=self._config.camera_preview.bind_host,
+                port=self._config.camera_preview.port,
+                allowed_client_host=self._config.joystick.allowed_pc_host,
+            )
+        workers = [
             ("stm32-telemetry", self._serial_loop),
             ("camera-front", self._camera_loop),
             ("episode-control", self._control_loop),
-        ):
+        ]
+        if self._preview_server is not None:
+            workers.append(("camera-preview", self._preview_loop))
+        for name, target in workers:
             thread = threading.Thread(name=name, target=target, daemon=True)
             thread.start()
             self._threads.append(thread)
@@ -206,6 +227,13 @@ class CollectorService:
             self._config.camera.device,
             next_command_seq,
         )
+        if self._preview_server is not None:
+            LOGGER.info(
+                "camera preview ready: http=%s:%d allowed_pc=%s",
+                self._config.camera_preview.bind_host,
+                self._preview_server.port,
+                self._config.joystick.allowed_pc_host,
+            )
         try:
             while not self._stop.is_set():
                 try:
@@ -233,6 +261,8 @@ class CollectorService:
             except Exception:
                 LOGGER.exception("failed to send shutdown safe-zero command")
             udp.close()
+            if self._preview_server is not None:
+                self._preview_server.close()
             for thread in self._threads:
                 thread.join(timeout=1.0)
             self._abort_active_episode("collector_shutdown")

@@ -6,4 +6,4 @@ dependencies:
   - ffmpeg
   - pip
   - pip:
-      - -e .[teleop,training,test]
+      - -e .[teleop,training,test,ui]

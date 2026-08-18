@@ -300,6 +300,47 @@ Collector 或 teleop 的本地日志保存在 `logs/`，该目录不进入 Git�
 `runtime.log_dir` 只控制引导、teleop 和校验日志位置，不是数据集存储位置。迁移机器时必须显式
 检查这两个配置，不能仅复制 shell 历史中的绝对路径。
 
+### 3.2 PC 本地采集 UI
+
+UI 是终端引导脚本的本地浏览器 Adapter，不是另一套采集实现。它调用同一个
+`GuidedCollectionSupervisor → run_guided_episode()`，所以 RL/Collector/teleop 串口互斥、deadman
+门禁、Episode 封存、重录、校验和异常归零语义与 3.1 完全一致。服务强制只监听 loopback，浏览器
+之外的页面没有 UI 请求头时不能触发状态改变。
+
+PC 安装并启动：
+
+```bash
+cd /home/zhaoshuai/workspace_uinty/RL_prj/excavator-il
+conda activate excavator-il
+python -m pip install -e '.[teleop,training,test,ui]'
+python scripts/run_collection_ui.py
+```
+
+若不希望自动打开浏览器：
+
+```bash
+python scripts/run_collection_ui.py --no-browser
+```
+
+访问 `http://127.0.0.1:8088/`，选择 `RL 到目标点`、`手工预定位` 或 `直接采集` 后点击开始。RL
+模式仍要求先按 3.1 启动 AiryLidar Operator。手工模式完成预定位后必须双杆回中、释放 deadman，
+再点击页面中的完成按钮。正式记录仍由 deadman 按下开始、释放结束；页面只替代终端中的结果输入。
+
+相机预览由 Orin Collector 进程内部提供：同一 UVC 相机帧同时交给 Recorder 和容量为 1 的只读
+JPEG 缓冲区（Recorder 未激活时只更新预览），UI 不会第二次打开 `/dev/video0`。
+`config/collection.orin.json` 的 `camera_preview_http` 当前监听 `0.0.0.0:18092`，HTTP 层只接受
+`joystick.allowed_pc_host`。若 Orin 启用 UFW，增加当前有线 PC 的最小 TCP 规则：
+
+```bash
+sudo ufw allow in on enP8p1s0 \
+  proto tcp from 192.168.50.1 to 192.168.50.2 port 18092 \
+  comment 'excavator collector camera preview'
+```
+
+Collector 启动前、RL 定位期间和 Collector 退出后，前视区域显示“等待 Collector”属于正常状态。
+原生 RViz 不作为 iframe 嵌入；`config/collection_ui.pc.json.visualization_url` 仅保留未来
+Foxglove Web 三维视图入口，当前留空。
+
 Wi-Fi 局域网避免了公网路由，但不是实时总线：无线信道争用/重传/省电、驱动与内核队列，以及
 Orin 进程调度都可能把若干 20 Hz 包延后后再成批交付。`episode_0004` 中 PC 采样间隔仍约
 49.9 ms，而 Orin 应用层一次接收间隔达到 167 ms，随后出现约 16 ms 的成批到达；现有证据只能
@@ -308,7 +349,7 @@ Orin 进程调度都可能把若干 20 Hz 包延后后再成批交付。`episode
 恢复窗口并生成 Training Segment；事件无法定位或恢复时 `validate` 拒绝该条。不要通过插值、
 沿用旧动作或直接忽略 timeout 计数来挽救数据。
 
-### 3.2 常规分端命令
+### 3.3 常规分端命令
 
 Orin 终端 1——启动 Collector：
 

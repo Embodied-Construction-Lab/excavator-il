@@ -45,6 +45,12 @@ class CameraConfig:
 
 
 @dataclass(frozen=True)
+class CameraPreviewConfig:
+    bind_host: str
+    port: int
+
+
+@dataclass(frozen=True)
 class EpisodeDefaults:
     dig_target_m: tuple[float, float, float]
     material_id: str
@@ -60,6 +66,7 @@ class CollectionConfig:
     camera: CameraConfig
     episode_control_socket: Path
     episode_defaults: EpisodeDefaults
+    camera_preview: CameraPreviewConfig | None = None
 
 
 def _object(value: Any, field: str) -> dict[str, Any]:
@@ -98,6 +105,12 @@ def load_collection_config(path: str | Path) -> CollectionConfig:
     controllers = _object(root.get("controllers"), "controllers")
     serial = _object(root.get("stm32_serial"), "stm32_serial")
     camera = _object(root.get("camera_front"), "camera_front")
+    preview_value = root.get("camera_preview_http")
+    preview = (
+        None
+        if preview_value is None
+        else _object(preview_value, "camera_preview_http")
+    )
     defaults = _object(root.get("episode_defaults"), "episode_defaults")
 
     device_ids = controllers.get("device_ids")
@@ -178,5 +191,20 @@ def load_collection_config(path: str | Path) -> CollectionConfig:
             provenance=MappingProxyType(
                 dict(_object(defaults.get("provenance"), "episode_defaults.provenance"))
             ),
+        ),
+        camera_preview=(
+            None
+            if preview is None
+            else CameraPreviewConfig(
+                bind_host=_text(
+                    preview.get("bind_host"), "camera_preview_http.bind_host"
+                ),
+                port=_integer(
+                    preview.get("port"),
+                    "camera_preview_http.port",
+                    minimum=1,
+                    maximum=65535,
+                ),
+            )
         ),
     )

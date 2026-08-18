@@ -33,6 +33,19 @@ class PositioningMode(str, Enum):
     RL = "rl"
 
 
+class GuidedEpisodeStage(str, Enum):
+    PREFLIGHT = "preflight"
+    RL_POSITIONING = "rl_positioning"
+    COLLECTOR_STARTING = "collector_starting"
+    MANUAL_POSITIONING = "manual_positioning"
+    RECORDER_STANDBY = "recorder_standby"
+    RECORDING = "recording"
+    REVIEW = "review"
+    FINALIZING = "finalizing"
+    VALIDATING = "validating"
+    COMPLETED = "completed"
+
+
 def _object(value: Any, field: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{field} must be an object")
@@ -992,6 +1005,7 @@ def run_guided_episode(
     positioning_mode: PositioningMode | str | None = None,
     input_fn: Callable[[str], str] = input,
     output: Callable[[str], None] = print,
+    stage_callback: Callable[[GuidedEpisodeStage], None] | None = None,
 ) -> str:
     """Collect deadman-bounded attempts and validate them after motion I/O stops."""
     if positioning_mode is None:
@@ -1011,9 +1025,12 @@ def run_guided_episode(
     failure: BaseException | None = None
     cleanup_errors: list[str] = []
     episode_target_m = config.dig_target_m
+    emit_stage = stage_callback or (lambda _stage: None)
     try:
+        emit_stage(GuidedEpisodeStage.PREFLIGHT)
         operations.preflight()
         if mode is PositioningMode.RL:
+            emit_stage(GuidedEpisodeStage.RL_POSITIONING)
             output(
                 "RL 定位阶段：将按 AiryLidar Mission 配置执行 Plan DIG → Follow。"
             )
@@ -1026,12 +1043,14 @@ def run_guided_episode(
                 "RL Follow 已成功归零，RL Runtime 已退出并释放串口；"
                 "开始切换到人工示教 Collector。"
             )
+        emit_stage(GuidedEpisodeStage.COLLECTOR_STARTING)
         operations.start_collector()
         collector_started = True
         if mode is PositioningMode.MANUAL:
             operations.start_teleop()
             teleop_started = True
             operations.wait_for_ack(config.ack_timeout_s)
+            emit_stage(GuidedEpisodeStage.MANUAL_POSITIONING)
             output(
                 "预定位阶段（不记录 Episode）：按住 deadman，用双杆把挖掘机移动到 "
                 "RL Follow 的交接位姿附近。"
@@ -1050,11 +1069,13 @@ def run_guided_episode(
         teleop_started = True
         operations.wait_for_ack(config.ack_timeout_s)
         while True:
+            emit_stage(GuidedEpisodeStage.RECORDER_STANDBY)
             output(
                 "Recorder 已进入待命。保持双杆居中；按下 deadman 后可立即操纵 XY。"
             )
             operations.wait_for_deadman_pressed()
             deadman_started = True
+            emit_stage(GuidedEpisodeStage.RECORDING)
             output(
                 "记录已开始：按住 deadman 完成动作；双杆回中后松开 deadman 结束。"
             )
@@ -1063,7 +1084,9 @@ def run_guided_episode(
             episode_active = False
             pending_path = completed_path
             output("检测到 deadman 松开，动作命令已回零，Episode 已自动保存。")
+            emit_stage(GuidedEpisodeStage.REVIEW)
             outcome = _read_outcome(input_fn, output)
+            emit_stage(GuidedEpisodeStage.FINALIZING)
             if outcome == "success":
                 completed_path = operations.finalize_episode(
                     completed_path, "success"
@@ -1137,6 +1160,7 @@ def run_guided_episode(
                 output(f"ERROR: {message}")
             else:
                 failure = RuntimeError(message)
+    emit_stage(GuidedEpisodeStage.VALIDATING)
     for episode_path in retained_paths:
         try:
             operations.build_and_validate(episode_path)
@@ -1151,6 +1175,7 @@ def run_guided_episode(
     if failure is not None:
         raise failure.with_traceback(failure.__traceback__)
     assert completed_path is not None
+    emit_stage(GuidedEpisodeStage.COMPLETED)
     return completed_path
 
 

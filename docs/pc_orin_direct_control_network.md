@@ -164,6 +164,8 @@ ssh -o HostKeyAlias=192.168.31.10 jetson16@192.168.50.2
 - `config/teleop.pc.json`：`orin_host` 改为 `192.168.50.2`；
 - `config/guided_episode.pc.json`：`ssh_host` 改为 `jetson16@192.168.50.2`；
 - `config/collection.orin.json`：`allowed_pc_host` 改为 `192.168.50.1`。
+- `config/collection_ui.pc.json`：`camera_preview_url` 指向
+  `http://192.168.50.2:18092/camera/front.mjpg`。
 
 修改前用搜索确认没有遗漏，不盲目替换文档中的历史证据或代理地址：
 
@@ -177,6 +179,10 @@ rg -n '192\.168\.31\.(10|219)' config scripts docs README.md
 sudo ufw allow in on enP8p1s0 \
   proto udp from 192.168.50.1 to 192.168.50.2 port 18090 \
   comment 'excavator joystick direct control'
+
+sudo ufw allow in on enP8p1s0 \
+  proto tcp from 192.168.50.1 to 192.168.50.2 port 18092 \
+  comment 'excavator collector camera preview'
 ```
 
 不要为整个有线子网开放所有端口。AiryLidar/RL 的端口在迁移对应活动入口时按其权威配置逐项处理。

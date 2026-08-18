@@ -1,0 +1,10 @@
+{
+  "schema_version": "excavator_collection_ui_config.v1",
+  "guided_config": "guided_episode.pc.json",
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8088
+  },
+  "camera_preview_url": "http://192.168.50.2:18092/camera/front.mjpg",
+  "visualization_url": ""
+}

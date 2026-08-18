@@ -2,10 +2,12 @@ import json
 import socket
 import threading
 import time
+import urllib.request
 
 from excavator_il.collector.client import send_episode_command
 from excavator_il.collector.config import (
     CameraConfig,
+    CameraPreviewConfig,
     CollectionConfig,
     ControllerConfig,
     EpisodeDefaults,
@@ -63,8 +65,17 @@ def _free_udp_port():
     return port
 
 
+def _free_tcp_port():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
 def test_collector_service_connects_udp_episode_socket_camera_and_safe_shutdown(tmp_path):
     port = _free_udp_port()
+    preview_port = _free_tcp_port()
     control_socket = tmp_path / "collector.sock"
     config = CollectionConfig(
         data_root=tmp_path / "raw",
@@ -76,6 +87,7 @@ def test_collector_service_connects_udp_episode_socket_camera_and_safe_shutdown(
         camera=CameraConfig("fixture", 32, 24, 30, 95),
         episode_control_socket=control_socket,
         episode_defaults=EpisodeDefaults((0.8, 0.1, -0.2), "soil", {}),
+        camera_preview=CameraPreviewConfig("127.0.0.1", preview_port),
     )
     telemetry = {field: "0" for field in STM32_TELEMETRY_FIELDS}
     telemetry.update(
@@ -96,6 +108,10 @@ def test_collector_service_connects_udp_episode_socket_camera_and_safe_shutdown(
     while not control_socket.exists() and time.monotonic() < deadline:
         time.sleep(0.01)
     assert control_socket.exists()
+    with urllib.request.urlopen(
+        f"http://127.0.0.1:{preview_port}/camera/front.jpg", timeout=1.0
+    ) as response:
+        assert response.read() == b"jpeg"
 
     started = send_episode_command(
         control_socket,

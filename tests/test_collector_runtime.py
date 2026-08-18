@@ -9,6 +9,7 @@ from excavator_il.collector.config import (
     SerialConfig,
 )
 from excavator_il.collector.core import CollectorCore
+from excavator_il.collector.preview import LatestJpegFrame
 from excavator_il.collector.recorder import EpisodeRecorder, EpisodeStart
 from excavator_il.collector.runtime import CollectorRuntime
 from excavator_il.joystick_protocol import (
@@ -82,6 +83,7 @@ def test_runtime_forwards_packet_records_real_write_and_sends_one_timeout_zero(t
         calibration_id="raw.v1",
         deadzone=0.15,
     )
+    preview = LatestJpegFrame()
     runtime = CollectorRuntime(
         core=core,
         recorder=recorder,
@@ -89,6 +91,7 @@ def test_runtime_forwards_packet_records_real_write_and_sends_one_timeout_zero(t
         camera=_Camera(),
         allowed_pc_host="192.168.0.220",
         joystick_timeout_ms=150,
+        camera_preview=preview,
     )
 
     ack = runtime.handle_joystick(
@@ -107,6 +110,7 @@ def test_runtime_forwards_packet_records_real_write_and_sends_one_timeout_zero(t
     assert len(serial.writes) == 2
     assert all(json.loads(payload)["X1"] == expected for payload, expected in zip(serial.writes, (-0.8, 0.0)))
     assert image_path == "camera_front/000000.jpg"
+    assert preview.wait_after(0, timeout_s=0.01).encoded_image == b"jpeg"
 
     recorder.stop(
         success=True,

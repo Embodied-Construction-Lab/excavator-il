@@ -129,6 +129,44 @@ Episode 标为 `pending_review`，随后才提示输入 `成功/s`、`失败/f` 
 `重录`仅删除本轮刚封存的 Episode，下一次 deadman 复用同一个 Episode 编号。
 异常或人工 `Ctrl+C` 中止仍保留原始证据。该条诊断数据不进入 Pilot 训练集。
 
+### 本地采集 UI
+
+PC 端提供一个只监听 `127.0.0.1` 的本地 Web UI，复用与终端引导脚本相同的
+`run_guided_episode()` 状态机。UI 不直接写 STM32 串口，也不自己打开 Orin 相机；点击开始后由
+受控子进程依次管理 RL Runtime、Collector 和 PC teleop，点击“安全停止”只向本轮精确子进程发送
+中止信号并复用原有归零清理。
+
+首次安装或更新 PC 环境：
+
+```bash
+conda activate excavator-il
+python -m pip install -e '.[teleop,training,test,ui]'
+```
+
+日常启动：
+
+```bash
+cd /home/zhaoshuai/workspace_uinty/RL_prj/excavator-il
+conda activate excavator-il
+python scripts/run_collection_ui.py
+```
+
+浏览器默认打开 `http://127.0.0.1:8088/`。页面可选择：
+
+- `RL 到目标点`：要求 AiryLidar `live_commissioning` Operator 已在 PC 运行；
+- `手工预定位`：按住 deadman 调整，回中并释放后点击“完成手工预定位”；
+- `直接采集`：跳过定位，直接等待 Recorder 与 deadman；
+- Episode 结束后点击“成功”“失败”或“重录”。
+
+配置集中在 `config/collection_ui.pc.json`，其中 `guided_config` 继续指向权威的
+`guided_episode.pc.json`。前视画面由 Collector 已经拥有的相机线程维护一个最新 JPEG，并通过
+Orin `18092/tcp` 只读输出；因此 Collector 尚未启动或已经退出时页面显示等待状态是正常的。相机
+预览不落入训练数据路径，不改变相机 30 Hz 采集或 Recorder 的 Episode 生命周期。
+
+原生 RViz 是 Qt 桌面程序，第一版不把窗口强行嵌入浏览器。页面保留 `visualization_url` 扩展位；
+未来需要浏览器三维视图时，再将 ROS 2 数据通过 Foxglove Bridge 提供给浏览器，并保持采集状态机
+与可视化解耦。
+
 原始 Episode 保存在 Orin 的 `config/collection.orin.json` 中 `data_root` 指定的位置；当前为
 `/home/jetson16/workspace_excavator/data/excavator-data`。PC 的引导、teleop 和校验输出
 仅保存在 `config/guided_episode.pc.json` 的 `runtime.log_dir`；当前解析为仓库内 `logs/`。

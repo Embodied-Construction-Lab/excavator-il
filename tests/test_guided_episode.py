@@ -10,6 +10,7 @@ import pytest
 
 from excavator_il.guided_episode import (
     GuidedEpisodeConfig,
+    GuidedEpisodeStage,
     PositioningMode,
     SystemGuidedEpisodeOperations,
     _LineProcess,
@@ -356,6 +357,32 @@ def test_rl_positioning_finishes_and_releases_serial_before_collector_starts(tmp
     ]
     assert operations.events.index("stop_rl_runtime_and_wait_for_serial") < operations.events.index("start_episode")
     assert operations.episode_targets == [(1.0, 0.0, 0.0)]
+
+
+def test_guided_episode_reports_operator_relevant_stages_through_one_callback(tmp_path):
+    stages = []
+    answers = iter(("c", "s"))
+
+    run_guided_episode(
+        _guided_config(tmp_path),
+        _FakeOperations(),
+        positioning_mode=PositioningMode.MANUAL,
+        input_fn=lambda _prompt: next(answers),
+        output=lambda _message: None,
+        stage_callback=stages.append,
+    )
+
+    assert stages == [
+        GuidedEpisodeStage.PREFLIGHT,
+        GuidedEpisodeStage.COLLECTOR_STARTING,
+        GuidedEpisodeStage.MANUAL_POSITIONING,
+        GuidedEpisodeStage.RECORDER_STANDBY,
+        GuidedEpisodeStage.RECORDING,
+        GuidedEpisodeStage.REVIEW,
+        GuidedEpisodeStage.FINALIZING,
+        GuidedEpisodeStage.VALIDATING,
+        GuidedEpisodeStage.COMPLETED,
+    ]
 
 
 def test_rl_positioning_failure_stops_runtime_without_starting_collector(tmp_path):

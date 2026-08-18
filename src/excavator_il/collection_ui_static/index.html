@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>挖掘机示教采集台</title>
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body data-app="excavator-collection-ui">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">EXCAVATOR · IMITATION LEARNING</p>
+        <h1>真机示教采集台</h1>
+      </div>
+      <div class="runtime-chip">
+        <span id="status-dot" class="status-dot"></span>
+        <div><small>当前阶段</small><strong id="stage-label">连接中</strong></div>
+      </div>
+    </header>
+
+    <main class="collection-grid">
+      <section class="panel control-panel">
+        <div class="section-heading">
+          <div><span class="step-number">01</span><h2>选择定位方式</h2></div>
+          <p>只决定采集前如何到达交接位姿，采集标签契约保持不变。</p>
+        </div>
+        <div class="mode-grid" id="mode-grid">
+          <button class="mode-card selected" data-mode="rl" type="button">
+            <span class="mode-mark">RL</span><strong>RL 到目标点</strong>
+            <small>Plan → Follow，到达 DIG 交接位姿后自动切换 Collector。</small>
+          </button>
+          <button class="mode-card" data-mode="manual" type="button">
+            <span class="mode-mark">M</span><strong>手工预定位</strong>
+            <small>先用 deadman + 双杆调整，确认完成后开始正式记录。</small>
+          </button>
+          <button class="mode-card" data-mode="direct" type="button">
+            <span class="mode-mark">D</span><strong>直接采集</strong>
+            <small>跳过预定位，Collector 待命后按 deadman 开始记录。</small>
+          </button>
+        </div>
+
+        <div class="machine-strip">
+          <div><small>操作者</small><strong id="operator-id">—</strong></div>
+          <div><small>任务</small><strong id="task-name">—</strong></div>
+          <div><small>DIG 目标 (m)</small><strong id="dig-target">—</strong></div>
+          <div><small>Orin</small><strong id="orin-host">—</strong></div>
+        </div>
+
+        <div class="primary-actions">
+          <button id="start-button" class="button primary" type="button">开始采集流程</button>
+          <button id="stop-button" class="button danger" type="button" disabled>安全停止</button>
+        </div>
+
+        <div id="stage-actions" class="stage-actions hidden">
+          <div id="manual-actions" class="hidden">
+            <p>双杆回中并松开 deadman 后，确认预定位完成。</p>
+            <button id="manual-complete-button" class="button accent" type="button">完成手工预定位</button>
+          </div>
+          <div id="review-actions" class="hidden">
+            <p>Episode 已自动保存，请给出本次结果。</p>
+            <div class="review-buttons">
+              <button data-outcome="success" class="button success" type="button">成功</button>
+              <button data-outcome="failure" class="button warning" type="button">失败</button>
+              <button data-outcome="retake" class="button ghost" type="button">重录</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="timeline" aria-label="采集流程">
+          <span data-stage-group="position">定位</span><i></i>
+          <span data-stage-group="standby">待命</span><i></i>
+          <span data-stage-group="record">记录</span><i></i>
+          <span data-stage-group="review">结果</span><i></i>
+          <span data-stage-group="done">完成</span>
+        </div>
+      </section>
+
+      <section class="panel camera-panel">
+        <div class="section-heading compact">
+          <div><span class="step-number">02</span><h2>前视相机</h2></div>
+          <span id="camera-state" class="media-state">等待 Collector</span>
+        </div>
+        <div class="camera-frame">
+          <img id="camera-preview" alt="Collector 前视相机实时预览">
+          <div id="camera-placeholder" class="camera-placeholder">
+            <span>CAMERA / FRONT</span>
+            <strong>Collector 启动后显示画面</strong>
+            <small>相机由 Orin Collector 独占，UI 不会重复打开设备。</small>
+          </div>
+        </div>
+        <div class="visualization-slot">
+          <div><small>三维可视化</small><strong>RViz / Foxglove 扩展位</strong></div>
+          <a id="visualization-link" class="text-link hidden" target="_blank" rel="noopener">打开可视化</a>
+          <span id="visualization-note">第一版不嵌入原生 RViz，保留浏览器三维视图接口。</span>
+        </div>
+      </section>
+
+      <section class="panel log-panel">
+        <div class="section-heading compact">
+          <div><span class="step-number">03</span><h2>运行记录</h2></div>
+          <span id="episode-path" class="episode-path"></span>
+        </div>
+        <pre id="log-output">等待采集任务…</pre>
+        <div id="error-banner" class="error-banner hidden"></div>
+      </section>
+    </main>
+    <div id="toast" class="toast" role="status"></div>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
