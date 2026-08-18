@@ -566,6 +566,8 @@ class ActRuntimeService:
         self._states = LatestStateQueue()
         self._sensor_sequences = SensorSequenceTracker()
         self._stop = threading.Event()
+        self._inference_ready = threading.Event()
+        self._live_warmup_action: tuple[float, ...] | None = None
         self._error: BaseException | None = None
 
     def request_stop(self) -> None:
@@ -599,6 +601,10 @@ class ActRuntimeService:
                 )
 
     def _inference_loop(self) -> None:
+        self._live_warmup_action = _perform_live_warmup(
+            states=self._states, processor=self._processor
+        )
+        self._inference_ready.set()
         while not self._stop.is_set():
             try:
                 item, dropped = self._states.get(timeout_s=0.05)
@@ -630,15 +636,21 @@ class ActRuntimeService:
             )
             serial_worker.start()
             workers.append(serial_worker)
-            live_warmup_action = _perform_live_warmup(
-                states=self._states, processor=self._processor
-            )
-            LOGGER.info("ACT live warmup passed: action=%s", live_warmup_action)
             inference_worker = threading.Thread(
                 target=self._worker, args=(self._inference_loop,), daemon=True
             )
             inference_worker.start()
             workers.append(inference_worker)
+            while not self._inference_ready.wait(0.05):
+                if self._stop.is_set():
+                    if self._error is not None:
+                        raise RuntimeError(
+                            f"ACT runtime worker failed: {self._error}"
+                        ) from self._error
+                    raise RuntimeError("ACT inference worker stopped before warmup")
+            LOGGER.info(
+                "ACT live warmup passed: action=%s", self._live_warmup_action
+            )
             LOGGER.info(
                 "ACT hardware ready: mode=%s initial_command_seq=%d",
                 self._command_channel.mode.value,

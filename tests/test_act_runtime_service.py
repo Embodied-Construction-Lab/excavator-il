@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 
 import numpy as np
 import pytest
@@ -191,6 +193,72 @@ def test_runtime_service_run_does_not_open_a_pc_udp_socket(monkeypatch):
     service.request_stop()
 
     service.run()
+
+
+def test_runtime_service_warms_up_on_the_inference_worker(monkeypatch):
+    thread_ids = {}
+    service_holder = {}
+
+    class _Observations:
+        def add_camera(self, _frame):
+            pass
+
+        def wait_ready(self, _timeout_s):
+            return True
+
+    class _Camera:
+        def read_rgb(self):
+            time.sleep(0.001)
+            return object()
+
+    class _SerialSource:
+        def __init__(self):
+            self._sensor_seq = 0
+
+        def readline(self):
+            time.sleep(0.001)
+            self._sensor_seq += 1
+            return _telemetry_line(sensor_seq=self._sensor_seq)
+
+    class _Processor:
+        _observations = _Observations()
+
+        def warmup_live(self, _frame, *, dropped_state_count=0):
+            assert dropped_state_count >= 0
+            thread_ids["warmup"] = threading.get_ident()
+            return (0.0, 0.0, 0.0, 0.0)
+
+        def process(self, _frame, *, state_generation=None, dropped_state_count=0):
+            assert state_generation is not None
+            assert dropped_state_count >= 0
+            thread_ids["process"] = threading.get_ident()
+            service_holder["service"].request_stop()
+
+    class _Channel:
+        mode = RuntimeMode.SHADOW
+
+        def update_state(self, frame):
+            return int(frame.values["sensor_seq"])
+
+        def enforce_state_timeout(self, **_kwargs):
+            pass
+
+        def terminal_disarm(self, **_kwargs):
+            pass
+
+    monkeypatch.setattr(runtime_service_module, "_startup_stm32", lambda **_kwargs: 1)
+    service = ActRuntimeService(
+        serial_port=_SerialSource(),
+        camera=_Camera(),
+        processor=_Processor(),
+        command_channel=_Channel(),
+    )
+    service_holder["service"] = service
+
+    service.run()
+
+    assert thread_ids["warmup"] == thread_ids["process"]
+    assert thread_ids["warmup"] != threading.get_ident()
 
 
 def test_motion_startup_refuses_ready_without_zero_ack():
