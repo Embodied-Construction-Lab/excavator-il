@@ -204,6 +204,25 @@ def test_guided_episode_stands_by_before_deadman_and_seals_immediately_on_releas
     ]
 
 
+def test_guided_episode_accepts_bracketed_paste_outcome(tmp_path):
+    config = _guided_config(tmp_path)
+    operations = _FakeOperations()
+    answers = iter(("\x1b[200~s\x1b[201~", "s"))
+    prompts = []
+    messages = []
+
+    episode_path = run_guided_episode(
+        config,
+        operations,
+        input_fn=lambda prompt: prompts.append(prompt) or next(answers),
+        output=messages.append,
+    )
+
+    assert episode_path == "/data/raw/episode_0001"
+    assert len(prompts) == 1
+    assert not any("无法识别结果" in message for message in messages)
+
+
 def test_guided_episode_optional_preposition_happens_before_episode_is_created(
     tmp_path,
 ):

@@ -21,6 +21,7 @@ from typing import Any, Callable, Mapping, Protocol
 GUIDED_EPISODE_CONFIG_SCHEMA_VERSION = "excavator_guided_episode_config.v2"
 _SSH_HOST = re.compile(r"[A-Za-z0-9_.-]+@[A-Za-z0-9_.:-]+")
 _EPISODE_NAME = re.compile(r"episode_\d{4,}")
+_BRACKETED_PASTE_MARKER = re.compile(r"\x1b\[(?:200|201)~")
 _DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config/guided_episode.pc.json"
 
 
@@ -821,9 +822,8 @@ def _read_outcome(
         "r": "retake",
     }
     while True:
-        value = input_fn(
-            "请输入结果（成功/s、失败/f、重录/r）后按 Enter："
-        ).strip().lower()
+        raw_value = input_fn("请输入结果（成功/s、失败/f、重录/r）后按 Enter：")
+        value = _BRACKETED_PASTE_MARKER.sub("", raw_value).strip().lower()
         outcome = choices.get(value)
         if outcome is not None:
             return outcome
