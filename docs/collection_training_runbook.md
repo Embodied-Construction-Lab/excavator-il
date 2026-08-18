@@ -239,20 +239,41 @@ cd /home/zhaoshuai/workspace_uinty/RL_prj/excavator-il
 python scripts/collect_guided_episode.py
 ```
 
-脚本读取 `config/guided_episode.pc.json`。启动后先选择 `预定位/y` 或 `直接采集/n`：
+脚本读取 `config/guided_episode.pc.json`。启动后先选择
+`RL定位/l`、`人工预定位/y` 或 `直接采集/n`：
 
-- `预定位/y`：Collector 先运行一个不创建 Episode 的 teleop。按住 deadman 用双杆调整到 RL
+- `人工预定位/y`：Collector 先运行一个不创建 Episode 的 teleop。按住 deadman 用双杆调整到 RL
   Follow 的交接位姿附近；调整完成后双杆回中、松开 deadman，再输入 `完成/c`。脚本确认释放后
   停止该 teleop，预定位过程不落盘、不占 Episode 编号；
+- `RL定位/l`：脚本启动配置中指定的唯一 Orin RL Runtime，调用 AiryLidar live
+  `Plan DIG → Follow`，Follow 成功并确认终态归零后安全退出 RL Runtime、等待串口释放，再启动
+  Collector；
 - `直接采集/n` 或直接按 Enter：跳过预定位。
 
-预定位只负责人工调整机构，不会自动运行 AiryLidar/RL Follow，也不会从 AiryLidar 读取目标。
-`config/guided_episode.pc.json` 的 `episode.dig_target_m` 目前是溯源元数据，不参与 ACT 输入；正式
-采集前仍必须把它与本轮 AiryLidar Mission 的 Dig 目标核对一致。
+`RL定位/l` 前必须在另一个 PC 终端启动 `live_commissioning` Operator；不要在 Orin 手工启动
+`orin_state_sender.py`，否则串口独占预检会失败：
 
-如果本条 Episode 由真实 RL Follow 产生交接位姿，不再切换或重烧 STM32 固件。按以下边界切换串口
-所有者：RL 成功/停止并确认 terminal velocity zero → 退出 `orin_state_sender.py` → 确认
-`/dev/ttyTHS1` 无占用 → 运行本脚本并选择 `直接采集/n`。Collector 会从 v2 telemetry 同步
+```bash
+cd /home/zhaoshuai/workspace_uinty/RL_prj/AiryLidar
+source /opt/ros/jazzy/setup.zsh
+source ros2_ws/install/setup.zsh
+ros2 launch airy_excavator_bringup operator.launch.py \
+  profile:=live_commissioning \
+  motion_authorization:=ALLOW_LIVE_MACHINE_MOTION \
+  orin_host:=192.168.50.2 \
+  orin_port:=18083
+```
+
+Orin 的 `excavator-orin-runtime/deploy/edge_runtime.remote.json` 必须把
+`remote_behavior.allowed_client_host` 配为当前控制链路 PC 地址（有线链路为 `192.168.50.1`）。修改
+AiryLidar Mission 目标后必须重启 Operator，使 Planner 与引导客户端加载同一 Mission SHA。
+
+RL 模式从 `rl_preposition.mission_config` 读取实际 Dig 目标并写入 Episode 的 `dig_target_m`；人工和
+直接模式使用 `episode.dig_target_m`。该字段目前仅作溯源元数据，不参与 ACT 输入。
+
+RL 定位不切换或重烧 STM32 固件。脚本执行的串口所有权边界是：RL Follow 成功并确认 terminal
+velocity zero → 向本轮脚本启动的精确 RL PID 发送 `SIGTERM` → 等待其 `finally` 再次归零并关闭串口
+→ 用 `fuser` 确认 `/dev/ttyTHS1` 无占用 → 启动 Collector。Collector 从 v2 telemetry 同步
 `command_rx_seq`，再以 manual zero 占用人工模式。不得让 RL Runtime 和 Collector 同时运行。
 
 之后脚本完成：

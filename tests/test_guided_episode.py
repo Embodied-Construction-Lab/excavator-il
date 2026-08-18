@@ -10,9 +10,10 @@ import pytest
 
 from excavator_il.guided_episode import (
     GuidedEpisodeConfig,
+    PositioningMode,
     SystemGuidedEpisodeOperations,
     _LineProcess,
-    _read_preposition_choice,
+    _read_positioning_choice,
     run_guided_episode,
 )
 
@@ -21,12 +22,23 @@ class _FakeOperations:
     def __init__(self):
         self.events = []
         self.episode_index = 0
+        self.episode_targets = []
 
     def preflight(self):
         self.events.append("preflight")
 
     def start_collector(self):
         self.events.append("start_collector")
+
+    def start_rl_runtime(self):
+        self.events.append("start_rl_runtime")
+
+    def run_rl_preposition(self):
+        self.events.append("run_rl_preposition")
+        return (1.0, 0.0, 0.0)
+
+    def stop_rl_runtime_and_wait_for_serial(self):
+        self.events.append("stop_rl_runtime_and_wait_for_serial")
 
     def start_teleop(self):
         self.events.append("start_teleop")
@@ -40,8 +52,9 @@ class _FakeOperations:
     def wait_for_deadman_released(self):
         self.events.append("wait_for_deadman_released")
 
-    def start_episode(self):
+    def start_episode(self, dig_target_m=None):
         self.events.append("start_episode")
+        self.episode_targets.append(dig_target_m)
         self.episode_index += 1
         return f"/data/raw/episode_{self.episode_index:04d}"
 
@@ -78,13 +91,28 @@ def test_guided_episode_config_resolves_pc_paths_and_validates_contract(tmp_path
     config_path.write_text(
         json.dumps(
             {
-                "schema_version": "excavator_guided_episode_config.v2",
+                "schema_version": "excavator_guided_episode_config.v3",
                 "teleop_config": "teleop.pc.json",
                 "orin": {
                     "ssh_host": "operator@192.0.2.10",
                     "repo": "/srv/excavator-il",
                     "executable": "/opt/excavator/bin/excavator-il",
                     "collection_config": "config/collection.orin.json",
+                },
+                "rl_preposition": {
+                    "airy_repo": "../../AiryLidar",
+                    "ros_setup": "/opt/ros/jazzy/setup.zsh",
+                    "workspace_setup": "ros2_ws/install/setup.zsh",
+                    "mission_config": "mission/config/excavation_cycle.json",
+                    "phase": "dig",
+                    "timeout_s": 90,
+                    "serial_port": "/dev/ttyTHS1",
+                    "serial_release_timeout_s": 8,
+                    "orin_repo": "/srv/excavator-orin-runtime",
+                    "orin_python": "/opt/excavator-orin/bin/python",
+                    "edge_config": "deploy/edge_runtime.remote.json",
+                    "pc_host": "192.0.2.20",
+                    "ready_timeout_s": 15,
                 },
                 "episode": {
                     "task": "DiagnosticBoomJog",
@@ -112,6 +140,10 @@ def test_guided_episode_config_resolves_pc_paths_and_validates_contract(tmp_path
     assert config.dig_target_m == (0.8, 0.0, -0.2)
     assert config.teleop_print_every == 1
     assert config.zero_soak_duration_s == 30
+    assert config.rl_airy_repo == tmp_path.parent / "AiryLidar"
+    assert config.rl_mission_config == tmp_path.parent / "AiryLidar/mission/config/excavation_cycle.json"
+    assert config.rl_phase == "dig"
+    assert str(config.rl_serial_port) == "/dev/ttyTHS1"
 
 
 def test_guided_episode_config_rejects_unsafe_or_inconsistent_values(tmp_path):
@@ -119,13 +151,28 @@ def test_guided_episode_config_rejects_unsafe_or_inconsistent_values(tmp_path):
     config_path.write_text(
         json.dumps(
             {
-                "schema_version": "excavator_guided_episode_config.v2",
+                "schema_version": "excavator_guided_episode_config.v3",
                 "teleop_config": "teleop.pc.json",
                 "orin": {
                     "ssh_host": "operator@host; reboot",
                     "repo": "/srv/excavator-il",
                     "executable": "/opt/excavator/bin/excavator-il",
                     "collection_config": "config/collection.orin.json",
+                },
+                "rl_preposition": {
+                    "airy_repo": "../AiryLidar",
+                    "ros_setup": "/opt/ros/jazzy/setup.zsh",
+                    "workspace_setup": "ros2_ws/install/setup.zsh",
+                    "mission_config": "mission/config/excavation_cycle.json",
+                    "phase": "dig",
+                    "timeout_s": 90,
+                    "serial_port": "/dev/ttyTHS1",
+                    "serial_release_timeout_s": 8,
+                    "orin_repo": "/srv/excavator-orin-runtime",
+                    "orin_python": "/opt/excavator-orin/bin/python",
+                    "edge_config": "deploy/edge_runtime.remote.json",
+                    "pc_host": "192.0.2.20",
+                    "ready_timeout_s": 15,
                 },
                 "episode": {
                     "task": "DiagnosticBoomJog",
@@ -164,6 +211,19 @@ def _guided_config(tmp_path):
         teleop_print_every=1,
         log_dir=tmp_path / "logs",
         failure_reason="diagnostic_task_failed",
+        rl_airy_repo=tmp_path / "AiryLidar",
+        rl_ros_setup=Path("/opt/ros/jazzy/setup.zsh"),
+        rl_workspace_setup=tmp_path / "AiryLidar/ros2_ws/install/setup.zsh",
+        rl_mission_config=tmp_path / "AiryLidar/mission/config/excavation_cycle.json",
+        rl_phase="dig",
+        rl_timeout_s=90,
+        rl_serial_port="/dev/ttyTHS1",
+        rl_serial_release_timeout_s=8,
+        rl_orin_repo="/srv/excavator-orin-runtime",
+        rl_orin_python="/opt/excavator-orin/bin/python",
+        rl_edge_config="deploy/edge_runtime.remote.json",
+        rl_pc_host="192.0.2.20",
+        rl_ready_timeout_s=15,
     )
 
 
@@ -264,13 +324,169 @@ def test_guided_episode_optional_preposition_happens_before_episode_is_created(
     ]
 
 
-def test_preposition_choice_is_explicit_and_defaults_to_no():
+def test_positioning_choice_supports_rl_manual_and_direct_modes():
     messages = []
-    answers = iter(("unknown", "y"))
+    answers = iter(("unknown", "l", "y"))
 
-    assert _read_preposition_choice(lambda prompt: "", messages.append) is False
-    assert _read_preposition_choice(lambda prompt: next(answers), messages.append) is True
-    assert messages == ["无法识别选择，请输入：预定位/y 或直接采集/n。"]
+    assert _read_positioning_choice(lambda prompt: "", messages.append) is PositioningMode.DIRECT
+    assert _read_positioning_choice(lambda prompt: next(answers), messages.append) is PositioningMode.RL
+    assert _read_positioning_choice(lambda prompt: next(answers), messages.append) is PositioningMode.MANUAL
+    assert messages == ["无法识别选择，请输入：RL定位/l、人工预定位/y 或直接采集/n。"]
+
+
+def test_rl_positioning_finishes_and_releases_serial_before_collector_starts(tmp_path):
+    config = _guided_config(tmp_path)
+    operations = _FakeOperations()
+
+    episode_path = run_guided_episode(
+        config,
+        operations,
+        positioning_mode=PositioningMode.RL,
+        input_fn=lambda prompt: "成功",
+        output=lambda message: None,
+    )
+
+    assert episode_path == "/data/raw/episode_0001"
+    assert operations.events[:5] == [
+        "preflight",
+        "start_rl_runtime",
+        "run_rl_preposition",
+        "stop_rl_runtime_and_wait_for_serial",
+        "start_collector",
+    ]
+    assert operations.events.index("stop_rl_runtime_and_wait_for_serial") < operations.events.index("start_episode")
+    assert operations.episode_targets == [(1.0, 0.0, 0.0)]
+
+
+def test_rl_positioning_failure_stops_runtime_without_starting_collector(tmp_path):
+    class FailedRlOperations(_FakeOperations):
+        def run_rl_preposition(self):
+            self.events.append("run_rl_preposition")
+            raise RuntimeError("Follow failed")
+
+    operations = FailedRlOperations()
+
+    with pytest.raises(RuntimeError, match="Follow failed"):
+        run_guided_episode(
+            _guided_config(tmp_path),
+            operations,
+            positioning_mode=PositioningMode.RL,
+            input_fn=lambda prompt: "成功",
+            output=lambda message: None,
+        )
+
+    assert operations.events == [
+        "preflight",
+        "start_rl_runtime",
+        "run_rl_preposition",
+        "stop_rl_runtime_and_wait_for_serial",
+    ]
+
+
+def test_system_rl_positioning_uses_mission_target_and_live_plan_follow(tmp_path, monkeypatch):
+    config = _guided_config(tmp_path)
+    config.rl_airy_repo.mkdir()
+    assert config.rl_ros_setup.is_file()
+    config.rl_workspace_setup.parent.mkdir(parents=True)
+    config.rl_workspace_setup.touch()
+    config.rl_mission_config.parent.mkdir(parents=True)
+    config.rl_mission_config.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavation_mission.v1",
+                "targets": {"dig": {"position_m": [1.1, -0.2, 0.05]}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    process_calls = []
+
+    class FakeLineProcess:
+        returncode = 0
+
+        def __init__(self, argv, **kwargs):
+            process_calls.append((argv, kwargs))
+
+        def wait(self, timeout_s=5.0):
+            assert timeout_s == 90
+
+        def stop(self, signum, *, timeout_s=5.0):
+            raise AssertionError("successful RL positioning must not be stopped")
+
+    monkeypatch.setattr("excavator_il.guided_episode._LineProcess", FakeLineProcess)
+    operations = SystemGuidedEpisodeOperations(config, output=lambda message: None)
+
+    target = operations.run_rl_preposition()
+
+    assert target == (1.1, -0.2, 0.05)
+    command = process_calls[0][0]
+    assert command[:2] == ["/bin/zsh", "-lc"]
+    assert "mission.runtime_ros.run_plan_follow_live" in command[2]
+    assert str(config.rl_mission_config) in command[2]
+
+
+def test_system_starts_owned_rl_runtime_and_waits_for_ready(tmp_path, monkeypatch):
+    config = _guided_config(tmp_path)
+    process_calls = []
+    preflight_commands = []
+
+    class FakeRuntimeProcess:
+        def __init__(self, argv, **kwargs):
+            process_calls.append((argv, kwargs))
+
+        def wait_for(self, predicate, timeout_s, *, after_index=-1):
+            candidates = ("GUIDED_RL_PID=4242", "REMOTE EDGE CONTROL ARMED IDLE")
+            line = next(candidate for candidate in candidates if predicate(candidate))
+            return candidates.index(line), line
+
+    monkeypatch.setattr("excavator_il.guided_episode._LineProcess", FakeRuntimeProcess)
+    operations = SystemGuidedEpisodeOperations(config, output=lambda message: None)
+    monkeypatch.setattr(
+        operations,
+        "_run_ssh",
+        lambda command: preflight_commands.append(command) or "ready\n",
+    )
+
+    operations.start_rl_runtime()
+
+    assert operations._rl_runtime_pid == 4242
+    rendered = " ".join(process_calls[0][0])
+    assert "orin_state_sender.py" in rendered
+    assert "--edge-motion-authorization ALLOW_EDGE_MACHINE_MOTION" in rendered
+    assert "--pc-host 192.0.2.20" in rendered
+    assert len(preflight_commands) == 1
+    assert "allowed_client_host" in preflight_commands[0]
+    assert "192.0.2.20" in preflight_commands[0]
+    assert "fuser" in preflight_commands[0]
+
+
+def test_system_rl_release_targets_one_runtime_and_waits_for_serial(tmp_path, monkeypatch):
+    config = _guided_config(tmp_path)
+    remote_commands = []
+    operations = SystemGuidedEpisodeOperations(config, output=lambda message: None)
+    waits = []
+
+    class RunningRlRuntime:
+        def wait(self, timeout_s=5.0):
+            waits.append(timeout_s)
+
+    operations._rl_runtime = RunningRlRuntime()
+    operations._rl_runtime_pid = 4242
+    monkeypatch.setattr(
+        operations,
+        "_run_ssh",
+        lambda command: remote_commands.append(command) or "released\n",
+    )
+
+    operations.stop_rl_runtime_and_wait_for_serial()
+
+    assert len(remote_commands) == 1
+    assert "kill -TERM" in remote_commands[0]
+    assert "orin_state_sender" in remote_commands[0]
+    assert "fuser" in remote_commands[0]
+    assert "/dev/ttyTHS1" in remote_commands[0]
+    assert "pid=4242" in remote_commands[0]
+    assert waits == [2.0]
 
 
 def test_guided_episode_interrupt_aborts_before_stopping_motion_io(tmp_path):
@@ -432,6 +648,19 @@ def test_system_operations_manage_exact_collector_and_episode_commands(
         ack_timeout_s=8,
         teleop_print_every=1,
         log_dir=tmp_path / "logs",
+        rl_airy_repo=tmp_path / "AiryLidar",
+        rl_ros_setup=Path("/opt/ros/jazzy/setup.zsh"),
+        rl_workspace_setup=tmp_path / "AiryLidar/ros2_ws/install/setup.zsh",
+        rl_mission_config=tmp_path / "AiryLidar/mission/config/excavation_cycle.json",
+        rl_phase="dig",
+        rl_timeout_s=90,
+        rl_serial_port="/dev/ttyTHS1",
+        rl_serial_release_timeout_s=8,
+        rl_orin_repo="/srv/excavator-orin-runtime",
+        rl_orin_python="/opt/excavator-orin/bin/python",
+        rl_edge_config="deploy/edge_runtime.remote.json",
+        rl_pc_host="192.0.2.20",
+        rl_ready_timeout_s=15,
     )
     popen_calls = []
     signal_calls = []

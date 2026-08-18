@@ -14,15 +14,23 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping, Protocol
 
 
-GUIDED_EPISODE_CONFIG_SCHEMA_VERSION = "excavator_guided_episode_config.v2"
+GUIDED_EPISODE_CONFIG_SCHEMA_VERSION = "excavator_guided_episode_config.v3"
 _SSH_HOST = re.compile(r"[A-Za-z0-9_.-]+@[A-Za-z0-9_.:-]+")
+_NETWORK_HOST = re.compile(r"[A-Za-z0-9_.:-]+")
 _EPISODE_NAME = re.compile(r"episode_\d{4,}")
 _BRACKETED_PASTE_MARKER = re.compile(r"\x1b\[(?:200|201)~")
 _DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config/guided_episode.pc.json"
+
+
+class PositioningMode(str, Enum):
+    DIRECT = "direct"
+    MANUAL = "manual"
+    RL = "rl"
 
 
 def _object(value: Any, field: str) -> Mapping[str, Any]:
@@ -58,6 +66,19 @@ class GuidedEpisodeConfig:
     ack_timeout_s: int
     teleop_print_every: int
     log_dir: Path
+    rl_airy_repo: Path
+    rl_ros_setup: Path
+    rl_workspace_setup: Path
+    rl_mission_config: Path
+    rl_phase: str
+    rl_timeout_s: int
+    rl_serial_port: PurePosixPath
+    rl_serial_release_timeout_s: int
+    rl_orin_repo: PurePosixPath
+    rl_orin_python: PurePosixPath
+    rl_edge_config: PurePosixPath
+    rl_pc_host: str
+    rl_ready_timeout_s: int
     failure_reason: str = "diagnostic_task_failed"
     zero_soak_duration_s: int = 30
 
@@ -74,6 +95,7 @@ class GuidedEpisodeConfig:
                 f"schema_version must be {GUIDED_EPISODE_CONFIG_SCHEMA_VERSION}"
             )
         orin = _object(root.get("orin"), "orin")
+        rl_preposition = _object(root.get("rl_preposition"), "rl_preposition")
         episode = _object(root.get("episode"), "episode")
         runtime = _object(root.get("runtime"), "runtime")
         ssh_host = _text(orin.get("ssh_host"), "orin.ssh_host")
@@ -93,6 +115,58 @@ class GuidedEpisodeConfig:
                 "runtime.teleop_print_every must be 1 for 20 Hz deadman edge detection"
             )
         base = config_path.parent
+        airy_repo = (
+            base / _text(rl_preposition.get("airy_repo"), "rl_preposition.airy_repo")
+        ).resolve()
+        ros_setup = Path(
+            _text(rl_preposition.get("ros_setup"), "rl_preposition.ros_setup")
+        ).expanduser()
+        if not ros_setup.is_absolute():
+            raise ValueError("rl_preposition.ros_setup must be an absolute path")
+        workspace_setup = (
+            airy_repo
+            / _text(
+                rl_preposition.get("workspace_setup"),
+                "rl_preposition.workspace_setup",
+            )
+        ).resolve()
+        mission_config = (
+            airy_repo
+            / _text(
+                rl_preposition.get("mission_config"),
+                "rl_preposition.mission_config",
+            )
+        ).resolve()
+        phase = _text(rl_preposition.get("phase"), "rl_preposition.phase")
+        if phase != "dig":
+            raise ValueError("rl_preposition.phase must be dig for Episode collection")
+        serial_port = PurePosixPath(
+            _text(rl_preposition.get("serial_port"), "rl_preposition.serial_port")
+        )
+        if not serial_port.is_absolute() or not str(serial_port).startswith("/dev/"):
+            raise ValueError("rl_preposition.serial_port must be an absolute /dev path")
+        rl_orin_repo = PurePosixPath(
+            _text(rl_preposition.get("orin_repo"), "rl_preposition.orin_repo")
+        )
+        rl_orin_python = PurePosixPath(
+            _text(rl_preposition.get("orin_python"), "rl_preposition.orin_python")
+        )
+        if not rl_orin_repo.is_absolute() or not rl_orin_python.is_absolute():
+            raise ValueError(
+                "rl_preposition.orin_repo and orin_python must be absolute paths"
+            )
+        rl_edge_config = PurePosixPath(
+            _text(rl_preposition.get("edge_config"), "rl_preposition.edge_config")
+        )
+        if rl_edge_config.is_absolute() or ".." in rl_edge_config.parts:
+            raise ValueError(
+                "rl_preposition.edge_config must be a safe path relative to orin_repo"
+            )
+        rl_pc_host = _text(
+            rl_preposition.get("pc_host"), "rl_preposition.pc_host"
+        )
+        if _NETWORK_HOST.fullmatch(rl_pc_host) is None:
+            raise ValueError("rl_preposition.pc_host must not contain shell syntax")
         return cls(
             teleop_config=(base / _text(root.get("teleop_config"), "teleop_config")).resolve(),
             orin_ssh_host=ssh_host,
@@ -116,6 +190,27 @@ class GuidedEpisodeConfig:
             ),
             teleop_print_every=teleop_print_every,
             log_dir=(base / _text(runtime.get("log_dir"), "runtime.log_dir")).resolve(),
+            rl_airy_repo=airy_repo,
+            rl_ros_setup=ros_setup.resolve(),
+            rl_workspace_setup=workspace_setup,
+            rl_mission_config=mission_config,
+            rl_phase=phase,
+            rl_timeout_s=_positive_int(
+                rl_preposition.get("timeout_s"), "rl_preposition.timeout_s"
+            ),
+            rl_serial_port=serial_port,
+            rl_serial_release_timeout_s=_positive_int(
+                rl_preposition.get("serial_release_timeout_s"),
+                "rl_preposition.serial_release_timeout_s",
+            ),
+            rl_orin_repo=rl_orin_repo,
+            rl_orin_python=rl_orin_python,
+            rl_edge_config=rl_edge_config,
+            rl_pc_host=rl_pc_host,
+            rl_ready_timeout_s=_positive_int(
+                rl_preposition.get("ready_timeout_s"),
+                "rl_preposition.ready_timeout_s",
+            ),
             failure_reason=_text(
                 episode.get("failure_reason", "diagnostic_task_failed"),
                 "episode.failure_reason",
@@ -130,6 +225,12 @@ class GuidedEpisodeConfig:
 class GuidedEpisodeOperations(Protocol):
     def preflight(self) -> None: ...
 
+    def start_rl_runtime(self) -> None: ...
+
+    def run_rl_preposition(self) -> tuple[float, float, float]: ...
+
+    def stop_rl_runtime_and_wait_for_serial(self) -> None: ...
+
     def start_collector(self) -> None: ...
 
     def start_teleop(self) -> None: ...
@@ -140,7 +241,9 @@ class GuidedEpisodeOperations(Protocol):
 
     def wait_for_deadman_released(self) -> None: ...
 
-    def start_episode(self) -> str: ...
+    def start_episode(
+        self, dig_target_m: tuple[float, float, float] | None = None
+    ) -> str: ...
 
     def seal_episode(self) -> str: ...
 
@@ -256,6 +359,10 @@ class _LineProcess:
         self._reader.join(timeout=1.0)
 
     @property
+    def returncode(self) -> int | None:
+        return self._process.poll()
+
+    @property
     def running(self) -> bool:
         return self._process.poll() is None
 
@@ -281,6 +388,8 @@ class SystemGuidedEpisodeOperations:
         self._collector: _LineProcess | None = None
         self._teleop: _LineProcess | None = None
         self._collector_pid: int | None = None
+        self._rl_runtime: _LineProcess | None = None
+        self._rl_runtime_pid: int | None = None
         self._teleop_cursor = -1
         self._started_episode_paths: tuple[str, ...] = ()
         self._discardable_episode_paths: tuple[str, ...] = ()
@@ -308,6 +417,12 @@ class SystemGuidedEpisodeOperations:
     def _in_repo(self, argv: list[str]) -> str:
         return (
             f"cd {shlex.quote(str(self._config.orin_repo))} && "
+            f"{shlex.join(argv)}"
+        )
+
+    def _in_remote_rl_repo(self, argv: list[str]) -> str:
+        return (
+            f"cd {shlex.quote(str(self._config.rl_orin_repo))} && "
             f"{shlex.join(argv)}"
         )
 
@@ -367,6 +482,205 @@ class SystemGuidedEpisodeOperations:
             ]
         )
         self._run_ssh(remote_check)
+
+    def _rl_target(self) -> tuple[float, float, float]:
+        try:
+            root = json.loads(self._config.rl_mission_config.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"cannot load RL Mission config {self._config.rl_mission_config}: {exc}"
+            ) from exc
+        root = _object(root, "RL Mission config")
+        if root.get("schema_version") != "excavation_mission.v1":
+            raise RuntimeError("RL Mission schema_version must be excavation_mission.v1")
+        targets = _object(root.get("targets"), "RL Mission targets")
+        target = _object(
+            targets.get(self._config.rl_phase),
+            f"RL Mission targets.{self._config.rl_phase}",
+        ).get("position_m")
+        if not isinstance(target, list) or len(target) != 3:
+            raise RuntimeError("RL Mission dig position_m must contain three numbers")
+        try:
+            values = tuple(float(value) for value in target)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("RL Mission dig position_m must contain numbers") from exc
+        if any(not math.isfinite(value) for value in values):
+            raise RuntimeError("RL Mission dig position_m must be finite")
+        return values
+
+    def start_rl_runtime(self) -> None:
+        python = shlex.quote(str(self._config.rl_orin_python))
+        edge_config = shlex.quote(str(self._config.rl_edge_config))
+        pc_host = shlex.quote(self._config.rl_pc_host)
+        serial = shlex.quote(str(self._config.rl_serial_port))
+        validate_edge = (
+            "import json,sys; "
+            "actual=json.load(open(sys.argv[1], encoding='utf-8'))"
+            ".get('remote_behavior',{}).get('allowed_client_host'); "
+            "actual == sys.argv[2] or sys.exit("
+            "f'allowed_client_host={actual!r}, expected {sys.argv[2]!r}')"
+        )
+        preflight_script = f"""set -eu
+command -v pgrep >/dev/null
+command -v fuser >/dev/null
+test -x {python}
+test -f {edge_config}
+{python} -c {shlex.quote(validate_edge)} {edge_config} {pc_host}
+if pgrep -u "$(id -u)" -f '[p]ython[^ ]* .*[/ ]orin_state_sender\\.py([[:space:]]|$)' >/dev/null; then
+  echo "orin_state_sender.py is already running" >&2
+  exit 15
+fi
+if fuser -s {serial}; then
+  echo "serial is already owned: {serial}" >&2
+  exit 16
+fi
+echo ready
+"""
+        preflight = self._run_ssh(
+            self._in_remote_rl_repo(
+                ["/bin/sh", "-c", preflight_script]
+            )
+        )
+        if preflight.strip() != "ready":
+            raise RuntimeError("RL Runtime preflight did not confirm readiness")
+        rl_log = self._config.log_dir / f"guided_episode_{self._timestamp}.rl-runtime.log"
+        remote_command = self._in_remote_rl_repo(
+            [
+                str(self._config.rl_orin_python),
+                "-u",
+                "orin_state_sender.py",
+                "--serial-port",
+                str(self._config.rl_serial_port),
+                "--control-enabled",
+                "--pc-host",
+                self._config.rl_pc_host,
+                "--edge-config",
+                str(self._config.rl_edge_config),
+                "--edge-motion-authorization",
+                "ALLOW_EDGE_MACHINE_MOTION",
+                "--print-every",
+                "100",
+            ]
+        )
+        remote_command = remote_command.replace(
+            "&& ", "&& echo GUIDED_RL_PID=$$ && exec ", 1
+        )
+        self._rl_runtime = _LineProcess(
+            self._ssh_argv(remote_command),
+            log_path=rl_log,
+            prefix="rl-runtime",
+            output=self._output,
+        )
+        try:
+            _, pid_line = self._rl_runtime.wait_for(
+                lambda line: line.startswith("GUIDED_RL_PID="),
+                self._config.rl_ready_timeout_s,
+            )
+            self._rl_runtime_pid = int(pid_line.split("=", maxsplit=1)[1])
+            self._rl_runtime.wait_for(
+                lambda line: "REMOTE EDGE CONTROL ARMED IDLE" in line,
+                self._config.rl_ready_timeout_s,
+            )
+        except BaseException:
+            self.stop_rl_runtime_and_wait_for_serial()
+            raise
+
+    def run_rl_preposition(self) -> tuple[float, float, float]:
+        required_paths = (
+            self._config.rl_airy_repo,
+            self._config.rl_ros_setup,
+            self._config.rl_workspace_setup,
+            self._config.rl_mission_config,
+        )
+        missing = [str(path) for path in required_paths if not path.exists()]
+        if missing:
+            raise RuntimeError(f"RL positioning path does not exist: {', '.join(missing)}")
+        target = self._rl_target()
+        rl_log = self._config.log_dir / f"guided_episode_{self._timestamp}.rl.log"
+        shell_command = " && ".join(
+            (
+                f"source {shlex.quote(str(self._config.rl_ros_setup))}",
+                f"source {shlex.quote(str(self._config.rl_workspace_setup))}",
+                f"cd {shlex.quote(str(self._config.rl_airy_repo))}",
+                shlex.join(
+                    [
+                        "exec",
+                        "/usr/bin/python3",
+                        "-m",
+                        "mission.runtime_ros.run_plan_follow_live",
+                        self._config.rl_phase,
+                        "--mission",
+                        str(self._config.rl_mission_config),
+                        "--wait-s",
+                        str(self._config.ack_timeout_s),
+                    ]
+                ),
+            )
+        )
+        process = _LineProcess(
+            ["/bin/zsh", "-lc", shell_command],
+            log_path=rl_log,
+            prefix="rl-position",
+            output=self._output,
+        )
+        try:
+            process.wait(timeout_s=self._config.rl_timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            process.stop(signal.SIGINT, timeout_s=3.0)
+            raise RuntimeError(
+                f"RL positioning timed out after {self._config.rl_timeout_s}s"
+            ) from exc
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"RL positioning failed with exit code {process.returncode}; "
+                f"see {rl_log}"
+            )
+        return target
+
+    def stop_rl_runtime_and_wait_for_serial(self) -> None:
+        runtime = self._rl_runtime
+        runtime_pid = self._rl_runtime_pid
+        if runtime is None:
+            return
+        if runtime_pid is None:
+            runtime.stop(signal.SIGKILL, timeout_s=2.0)
+            self._rl_runtime = None
+            raise RuntimeError("RL Runtime PID was not observed; serial release is unknown")
+        serial = shlex.quote(str(self._config.rl_serial_port))
+        attempts = self._config.rl_serial_release_timeout_s * 4
+        script = f"""set -eu
+command -v fuser >/dev/null
+pid={runtime_pid}
+if kill -0 "$pid" 2>/dev/null; then
+  tr '\\000' ' ' < "/proc/$pid/cmdline" | grep -q '[o]rin_state_sender.py'
+  kill -TERM "$pid"
+fi
+attempt=0
+while kill -0 "$pid" 2>/dev/null; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge {attempts} ]; then
+    echo "orin_state_sender.py did not exit after SIGTERM" >&2
+    exit 13
+  fi
+  sleep 0.25
+done
+if fuser -s {serial}; then
+  echo "serial is still owned: {serial}" >&2
+  exit 14
+fi
+echo released
+"""
+        try:
+            output = self._run_ssh(f"/bin/sh -c {shlex.quote(script)}")
+            if output.strip() != "released":
+                raise RuntimeError("RL Runtime exit did not confirm serial release")
+            try:
+                runtime.wait(timeout_s=2.0)
+            except subprocess.TimeoutExpired:
+                runtime.stop(signal.SIGKILL, timeout_s=2.0)
+        finally:
+            self._rl_runtime = None
+            self._rl_runtime_pid = None
 
     def start_collector(self) -> None:
         collector_log, _, _ = self.log_paths
@@ -497,7 +811,10 @@ class SystemGuidedEpisodeOperations:
                 f"zero-command soak received only {sample_count} teleop samples"
             )
 
-    def start_episode(self) -> str:
+    def start_episode(
+        self, dig_target_m: tuple[float, float, float] | None = None
+    ) -> str:
+        target = self._config.dig_target_m if dig_target_m is None else dig_target_m
         response = self._remote_cli(
             [
                 "episode",
@@ -509,7 +826,7 @@ class SystemGuidedEpisodeOperations:
                 "--operator",
                 self._config.operator_id,
                 "--dig-target-m",
-                *(str(value) for value in self._config.dig_target_m),
+                *(str(value) for value in target),
                 "--material-id",
                 self._config.material_id,
             ]
@@ -672,11 +989,19 @@ def run_guided_episode(
     operations: GuidedEpisodeOperations,
     *,
     preposition: bool = False,
+    positioning_mode: PositioningMode | str | None = None,
     input_fn: Callable[[str], str] = input,
     output: Callable[[str], None] = print,
 ) -> str:
     """Collect deadman-bounded attempts and validate them after motion I/O stops."""
+    if positioning_mode is None:
+        mode = PositioningMode.MANUAL if preposition else PositioningMode.DIRECT
+    else:
+        mode = PositioningMode(positioning_mode)
+        if preposition and mode is not PositioningMode.MANUAL:
+            raise ValueError("preposition=True conflicts with positioning_mode")
     collector_started = False
+    rl_runtime_started = False
     teleop_started = False
     episode_active = False
     deadman_started = False
@@ -685,11 +1010,25 @@ def run_guided_episode(
     retained_paths: tuple[str, ...] = ()
     failure: BaseException | None = None
     cleanup_errors: list[str] = []
+    episode_target_m = config.dig_target_m
     try:
         operations.preflight()
+        if mode is PositioningMode.RL:
+            output(
+                "RL 定位阶段：将按 AiryLidar Mission 配置执行 Plan DIG → Follow。"
+            )
+            operations.start_rl_runtime()
+            rl_runtime_started = True
+            episode_target_m = operations.run_rl_preposition()
+            operations.stop_rl_runtime_and_wait_for_serial()
+            rl_runtime_started = False
+            output(
+                "RL Follow 已成功归零，RL Runtime 已退出并释放串口；"
+                "开始切换到人工示教 Collector。"
+            )
         operations.start_collector()
         collector_started = True
-        if preposition:
+        if mode is PositioningMode.MANUAL:
             operations.start_teleop()
             teleop_started = True
             operations.wait_for_ack(config.ack_timeout_s)
@@ -705,7 +1044,7 @@ def run_guided_episode(
                 "预定位结束：已确认 deadman 释放并停止预定位 teleop。"
                 "请保持双杆居中，开始正式 Recorder 门禁。"
             )
-        operations.start_episode()
+        operations.start_episode(episode_target_m)
         episode_active = True
         operations.start_teleop()
         teleop_started = True
@@ -747,7 +1086,7 @@ def run_guided_episode(
                 f"本次已删除：{completed_path}。双杆居中后可再次按 deadman 重录，"
                 "Episode 编号保持不变。"
             )
-            operations.start_episode()
+            operations.start_episode(episode_target_m)
             episode_active = True
             deadman_started = False
     except BaseException as exc:
@@ -777,6 +1116,11 @@ def run_guided_episode(
                 )
             pending_path = None
     finally:
+        if rl_runtime_started:
+            try:
+                operations.stop_rl_runtime_and_wait_for_serial()
+            except Exception as exc:
+                cleanup_errors.append(f"RL Runtime cleanup failed: {exc}")
         if teleop_started:
             try:
                 operations.stop_teleop()
@@ -830,26 +1174,30 @@ def _read_outcome(
         output("无法识别结果，请输入：成功、失败或重录。")
 
 
-def _read_preposition_choice(
+def _read_positioning_choice(
     input_fn: Callable[[str], str], output: Callable[[str], None]
-) -> bool:
+) -> PositioningMode:
     choices = {
-        "": False,
-        "预定位": True,
-        "y": True,
-        "yes": True,
-        "直接采集": False,
-        "n": False,
-        "no": False,
+        "": PositioningMode.DIRECT,
+        "rl定位": PositioningMode.RL,
+        "rl": PositioningMode.RL,
+        "l": PositioningMode.RL,
+        "人工预定位": PositioningMode.MANUAL,
+        "预定位": PositioningMode.MANUAL,
+        "y": PositioningMode.MANUAL,
+        "yes": PositioningMode.MANUAL,
+        "直接采集": PositioningMode.DIRECT,
+        "n": PositioningMode.DIRECT,
+        "no": PositioningMode.DIRECT,
     }
     while True:
         value = input_fn(
-            "是否先手动预定位挖掘机？（预定位/y、直接采集/n，默认 n）："
+            "选择采集前定位方式（RL定位/l、人工预定位/y、直接采集/n，默认 n）："
         ).strip().lower()
         choice = choices.get(value)
         if choice is not None:
             return choice
-        output("无法识别选择，请输入：预定位/y 或直接采集/n。")
+        output("无法识别选择，请输入：RL定位/l、人工预定位/y 或直接采集/n。")
 
 
 def _wait_for_preposition_complete(
@@ -877,8 +1225,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = GuidedEpisodeConfig.load(args.config)
         operations = SystemGuidedEpisodeOperations(config)
-        preposition = _read_preposition_choice(input, print)
-        path = run_guided_episode(config, operations, preposition=preposition)
+        positioning_mode = _read_positioning_choice(input, print)
+        path = run_guided_episode(
+            config, operations, positioning_mode=positioning_mode
+        )
     except KeyboardInterrupt:
         print("guided Episode aborted by operator", file=sys.stderr)
         return 130
