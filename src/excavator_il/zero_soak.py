@@ -150,11 +150,35 @@ def _rate_hz(stamps_ns: list[int]) -> float:
     return (len(stamps_ns) - 1) * 1_000_000_000.0 / (stamps_ns[-1] - stamps_ns[0])
 
 
+def _counter_rate_hz(values: list[int], stamps_ns: list[int]) -> float:
+    if (
+        len(values) < 2
+        or len(values) != len(stamps_ns)
+        or stamps_ns[-1] <= stamps_ns[0]
+    ):
+        return 0.0
+    delta = (values[-1] - values[0]) & 0xFFFFFFFF
+    return delta * 1_000_000_000.0 / (stamps_ns[-1] - stamps_ns[0])
+
+
 def _sequence_issues(values: list[int]) -> int:
     issues = 0
     for left, right in zip(values, values[1:]):
         issues += 1 if right <= left else max(0, right - left - 1)
     return issues
+
+
+def _control_sequence_issues(values: list[int]) -> int:
+    """Count discontinuities while allowing independent 20 Hz loop phases.
+
+    The STM32 control loop and telemetry publisher run independently at the
+    same nominal rate.  A telemetry sample may therefore repeat the previous
+    control sequence or observe a two-step advance without any serial loss.
+    """
+    return sum(
+        ((right - left) & 0xFFFFFFFF) not in (0, 1, 2)
+        for left, right in zip(values, values[1:])
+    )
 
 
 def _outside_rate(name: str, value: float) -> bool:
@@ -209,6 +233,21 @@ def inspect_zero_command_episode(episode_path: str | Path) -> ZeroSoakReport:
             [int(record["camera_stamp_monotonic_ns"]) for record in cameras]
         ),
     }
+    telemetry_stamps_ns = [
+        int(record["orin_receive_monotonic_ns"]) for record in parsed_stm32
+    ]
+    control_rate_hz = _counter_rate_hz(
+        [int(frame["control_seq"]) for frame in telemetry], telemetry_stamps_ns
+    )
+    max_stm32_receive_period_ms = max(
+        (
+            (current - previous) / 1_000_000.0
+            for previous, current in zip(
+                telemetry_stamps_ns, telemetry_stamps_ns[1:]
+            )
+        ),
+        default=0.0,
+    )
 
     nonzero_commands = 0
     invalid_payloads = 0
@@ -240,7 +279,13 @@ def inspect_zero_command_episode(episode_path: str | Path) -> ZeroSoakReport:
     )
     sequence_issues = sum(
         (
-            _sequence_issues([int(frame["control_seq"]) for frame in telemetry]),
+            _sequence_issues([int(record["raw_frame_seq"]) for record in stm32]),
+            _control_sequence_issues(
+                [int(frame["control_seq"]) for frame in telemetry]
+            ),
+            _sequence_issues(
+                [int(record["telemetry"]["sensor_seq"]) for record in new_states]
+            ),
             _sequence_issues(
                 [
                     int(record["joystick_sample_seq"])
@@ -264,6 +309,15 @@ def inspect_zero_command_episode(episode_path: str | Path) -> ZeroSoakReport:
     for name, rate in stream_rates.items():
         if _outside_rate(name, rate):
             failures.append(f"{name} rate {rate:.3f} Hz is outside its allowed range")
+    if not 18.0 <= control_rate_hz <= 22.0:
+        failures.append(
+            f"STM32 control rate {control_rate_hz:.3f} Hz is outside [18, 22]"
+        )
+    if max_stm32_receive_period_ms > 80.0:
+        failures.append(
+            "STM32 maximum receive period "
+            f"{max_stm32_receive_period_ms:.3f} ms exceeds 80 ms"
+        )
     counters = {
         "nonzero command": nonzero_commands,
         "invalid command payload": invalid_payloads,

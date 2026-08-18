@@ -141,6 +141,52 @@ def test_zero_soak_accepts_safe_zero_commands_and_nominal_stream_rates(tmp_path)
     }
 
 
+def test_zero_soak_accepts_independent_control_and_telemetry_phase(tmp_path):
+    episode = _safe_episode(tmp_path)
+    stm32_path = episode / "stm32_raw.jsonl"
+    records = [json.loads(line) for line in stm32_path.read_text().splitlines()]
+    control_sequences = (0, 2, 2, 4, 4, 5, 7, 7, 9, 9, 10)
+    for record, control_seq in zip(records, control_sequences):
+        record["telemetry"]["control_seq"] = control_seq
+    _write_jsonl(stm32_path, records)
+
+    report = inspect_zero_command_episode(episode)
+
+    assert report.passed is True
+    assert report.sequence_gap_count == 0
+
+
+def test_zero_soak_rejects_frozen_control_sequence(tmp_path):
+    episode = _safe_episode(tmp_path)
+    stm32_path = episode / "stm32_raw.jsonl"
+    records = [json.loads(line) for line in stm32_path.read_text().splitlines()]
+    for record in records:
+        record["telemetry"]["control_seq"] = 7
+    _write_jsonl(stm32_path, records)
+
+    report = inspect_zero_command_episode(episode)
+
+    assert report.passed is False
+    assert "STM32 control rate 0.000 Hz is outside [18, 22]" in report.failure_reasons
+
+
+def test_zero_soak_rejects_missing_stm32_wire_period(tmp_path):
+    episode = _safe_episode(tmp_path)
+    stm32_path = episode / "stm32_raw.jsonl"
+    records = [json.loads(line) for line in stm32_path.read_text().splitlines()]
+    for record in records[10:]:
+        record["orin_receive_monotonic_ns"] += 50_000_000
+    _write_jsonl(stm32_path, records)
+
+    report = inspect_zero_command_episode(episode)
+
+    assert report.passed is False
+    assert (
+        "STM32 maximum receive period 100.000 ms exceeds 80 ms"
+        in report.failure_reasons
+    )
+
+
 def test_zero_soak_automates_safe_lifecycle_before_inspection():
     class Operations:
         def __init__(self):
