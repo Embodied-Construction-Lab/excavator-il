@@ -188,7 +188,52 @@ sudo ufw allow in on enP8p1s0 \
 不要为整个有线子网开放所有端口。AiryLidar/RL 的端口在迁移对应活动入口时按其权威配置逐项处理。
 PC 局域网代理仍可沿 Wi-Fi 使用 `192.168.31.219:7897`，无需给独立有线网设置网关。
 
-## 6. Wi-Fi 省电与回滚
+## 6. PC–Orin 时间同步
+
+RL 规划和状态新鲜度检查使用 UTC 时间戳。长时间断电后，PC 和 Orin 可能先从各自 RTC/上次
+记录时间启动，再等待外部 NTP 校时；两端未都完成校时前，不运行 RL Plan/Follow。分别检查：
+
+```bash
+timedatectl status
+timedatectl timesync-status
+```
+
+两端都必须显示 `System clock synchronized: yes`、`NTP service: active`，且 `Packet count`
+大于 0。PC 使用 Clash Verge Rev/Mihomo Fake-IP 时，还要确认 NTP 域名没有解析到
+`198.18.0.0/15`：
+
+```bash
+getent ahostsv4 ntp.ubuntu.com | awk '{print $1}' | sort -u
+```
+
+如果返回 `198.18.*`，在 Clash Verge Rev 当前订阅的“扩展配置”中合并：
+
+```yaml
+dns:
+  fake-ip-filter:
+    - ntp.ubuntu.com
+    - +.pool.ntp.org
+    - time.cloudflare.com
+```
+
+并在当前订阅的“编辑规则 → 前置规则”加入：
+
+```text
+DST-PORT,123,DIRECT
+```
+
+重载 Mihomo 配置、清理 DNS 缓存并让 timesyncd 重新建联：
+
+```bash
+resolvectl flush-caches
+systemctl restart systemd-timesyncd
+timedatectl timesync-status
+```
+
+重启后 `Server` 必须是真实公网 IP，不得为 `198.18.*`。不把每次手动 `date -s`作为常规
+方案；它只修改当前时钟，不会修复 NTP 不通的根因。
+
+## 7. Wi-Fi 省电与回滚
 
 有线控制网不依赖 Wi-Fi，但双方 Wi-Fi profile 仍建议显式关闭省电：
 
