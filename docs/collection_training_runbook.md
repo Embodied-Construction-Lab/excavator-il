@@ -110,6 +110,10 @@ STM32 串口。
 
 ### 网络、代理与防火墙迁移清单
 
+当前现场已经增加 PC–Orin 千兆直连控制网。首次配置、路由隔离、双向延迟、SSH 主机密钥、应用
+地址迁移和回滚步骤见 [`pc_orin_direct_control_network.md`](pc_orin_direct_control_network.md)。
+下文 Wi-Fi 地址保留为外网、代理和迁移前备用 SSH 基线，不再作为正式采集控制链路的目标状态。
+
 每次更换 Wi-Fi、PC 或 Orin 后都要重新执行本节。不要假定旧网络的 IP、接口名、UFW 规则或
 代理 TUN 局域网段会自动迁移。当前 dr202 现场配置为：
 

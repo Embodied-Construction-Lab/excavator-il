@@ -1,6 +1,6 @@
 {
   "schema_version": "excavator_teleop_config.v3",
-  "orin_host": "192.168.31.10",
+  "orin_host": "192.168.50.2",
   "orin_port": 18090,
   "rate_hz": 20,
   "mapping_id": "dual_stick.v1",

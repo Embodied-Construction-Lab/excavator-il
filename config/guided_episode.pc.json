@@ -2,7 +2,7 @@
   "schema_version": "excavator_guided_episode_config.v2",
   "teleop_config": "teleop.pc.json",
   "orin": {
-    "ssh_host": "jetson16@192.168.31.10",
+    "ssh_host": "jetson16@192.168.50.2",
     "repo": "/home/jetson16/workspace_excavator/excavator-il",
     "executable": "/home/jetson16/apps/miniconda3/envs/excavator-il-collector/bin/excavator-il",
     "collection_config": "config/collection.orin.json"

@@ -217,6 +217,8 @@ ACT 训练命令见 [docs/collection_training_runbook.md](docs/collection_traini
 [docs/manual_act_training.md](docs/manual_act_training.md)。
 Orin NVIDIA PyTorch 镜像构建、GPU 自检、checkpoint 传输、只读离线推理和在线 Runtime 见
 [docs/orin_act_inference.md](docs/orin_act_inference.md)。
+PC/Orin 独立有线控制网的首次配置、路由验收、SSH 和回滚见
+[docs/pc_orin_direct_control_network.md](docs/pc_orin_direct_control_network.md)。
 在线 `act-runtime` 固定复用 LeRobot `ACTPolicy.select_action()`：motion 仅接受 v2 deployment
 manifest、单前视因果 RGB、11 维状态和 `[boom, stick, bucket, swing]` 四维动作。启动时必须先通过
 synthetic CUDA warmup 与真实相机/STM32 live warmup；状态丢帧、安全中断或无因果图像时清空
