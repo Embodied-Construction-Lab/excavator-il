@@ -1,3 +1,8 @@
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
 from fastapi.testclient import TestClient
 
 from excavator_il.collection_ui_app import (
@@ -123,3 +128,14 @@ def test_collection_ui_rejects_state_change_without_local_ui_header(tmp_path):
 
     assert response.status_code == 403
     assert supervisor.calls == [("close",)]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_collection_ui_camera_recovers_when_collector_starts_later():
+    test_script = (
+        Path(__file__).parent
+        / "js"
+        / "collection_ui_camera_reconnect.test.cjs"
+    )
+
+    subprocess.run(["node", str(test_script)], check=True)

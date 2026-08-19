@@ -17,8 +17,15 @@ const stageProgress = {
   finalizing: 4, validating: 4, completed: 4
 };
 
-const state = {selectedMode: "rl", config: null, snapshot: null};
+const state = {
+  selectedMode: "rl",
+  config: null,
+  snapshot: null,
+  cameraRetryTimer: null,
+  cameraAttempt: 0
+};
 const $ = (id) => document.getElementById(id);
+const CAMERA_RETRY_MS = 1000;
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
@@ -48,8 +55,11 @@ function renderConfig(config) {
   $("dig-target").textContent = config.dig_target_m.map(value => Number(value).toFixed(2)).join(", ");
   $("orin-host").textContent = config.orin_host;
   const image = $("camera-preview");
-  image.src = config.camera_preview_url;
   image.addEventListener("load", () => {
+    if (state.cameraRetryTimer !== null) {
+      window.clearTimeout(state.cameraRetryTimer);
+      state.cameraRetryTimer = null;
+    }
     image.classList.add("ready");
     $("camera-placeholder").classList.add("hidden");
     $("camera-state").textContent = "实时";
@@ -58,13 +68,30 @@ function renderConfig(config) {
     image.classList.remove("ready");
     $("camera-placeholder").classList.remove("hidden");
     $("camera-state").textContent = "等待 Collector";
+    scheduleCameraRetry();
   });
+  loadCameraPreview();
   if (config.visualization_url) {
     const link = $("visualization-link");
     link.href = config.visualization_url;
     link.classList.remove("hidden");
     $("visualization-note").classList.add("hidden");
   }
+}
+
+function loadCameraPreview() {
+  if (!state.config?.camera_preview_url) return;
+  state.cameraAttempt += 1;
+  const separator = state.config.camera_preview_url.includes("?") ? "&" : "?";
+  $("camera-preview").src = `${state.config.camera_preview_url}${separator}attempt=${state.cameraAttempt}`;
+}
+
+function scheduleCameraRetry() {
+  if (state.cameraRetryTimer !== null) return;
+  state.cameraRetryTimer = window.setTimeout(() => {
+    state.cameraRetryTimer = null;
+    loadCameraPreview();
+  }, CAMERA_RETRY_MS);
 }
 
 function renderSnapshot(snapshot) {

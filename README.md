@@ -161,6 +161,7 @@ python scripts/run_collection_ui.py
 配置集中在 `config/collection_ui.pc.json`，其中 `guided_config` 继续指向权威的
 `guided_episode.pc.json`。前视画面由 Collector 已经拥有的相机线程维护一个最新 JPEG，并通过
 Orin `18092/tcp` 只读输出；因此 Collector 尚未启动或已经退出时页面显示等待状态是正常的。相机
+预览连接失败后会每秒重试，所以页面可以先于 Collector 打开，Collector 就绪后不需要手动刷新。
 预览不落入训练数据路径，不改变相机 30 Hz 采集或 Recorder 的 Episode 生命周期。
 
 原生 RViz 是 Qt 桌面程序，第一版不把窗口强行嵌入浏览器。页面保留 `visualization_url` 扩展位；
