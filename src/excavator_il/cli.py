@@ -128,6 +128,10 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         help="stop safely after this many post-warmup 10 Hz inference steps",
     )
+    act_runtime.add_argument(
+        "--hardware-start-gate",
+        help="absolute file gate consumed after CUDA warmup and before hardware open",
+    )
 
     inspect_runtime = commands.add_parser(
         "inspect-act-runtime-log",
@@ -347,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.config,
                 motion_authorization=args.motion_authorization,
                 max_steps=args.max_steps,
+                hardware_start_gate=args.hardware_start_gate,
             )
         elif args.command == "inspect-act-runtime-log":
             from .act_runtime_config import load_act_runtime_config

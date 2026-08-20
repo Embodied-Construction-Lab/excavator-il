@@ -1,6 +1,7 @@
 "use strict";
 
 const UI_HEADER = {"X-Excavator-UI": "1"};
+const HYBRID_MOTION_AUTHORIZATION = "ALLOW_HYBRID_MACHINE_MOTION";
 const terminalStages = new Set(["idle", "completed", "failed", "cancelled"]);
 const hybridTerminalStages = new Set(["idle", "completed", "failed", "cancelled"]);
 const stageLabels = {
@@ -289,27 +290,24 @@ function bindActions() {
     motion_authorization: null
   }));
   $("hybrid-auto-start").addEventListener("click", () => {
-    const authorization = requestHybridAuthorization("自动一轮将依次执行 RL、ACT 与固定倾倒。");
-    if (authorization === null) return;
     commandHybrid("/api/hybrid/start", {
       dig_target_id: state.selectedTargetId,
       automatic: true,
-      motion_authorization: authorization
+      motion_authorization: hybridMotionAuthorization()
     });
   });
   $("hybrid-advance").addEventListener("click", () => {
     const needsAuthorization = state.hybridSnapshot?.next_segment === "act_dig";
     const authorization = needsAuthorization
-      ? requestHybridAuthorization("下一段 ACT 将获得 STM32 写权限并自动运行。")
+      ? hybridMotionAuthorization()
       : null;
-    if (needsAuthorization && authorization === null) return;
     commandHybrid("/api/hybrid/advance", {motion_authorization: authorization});
   });
   $("hybrid-stop").addEventListener("click", () => commandHybrid("/api/hybrid/stop"));
 }
 
-function requestHybridAuthorization(message) {
-  return window.prompt(`${message}\n请输入 ALLOW_HYBRID_MACHINE_MOTION 继续：`);
+function hybridMotionAuthorization() {
+  return HYBRID_MOTION_AUTHORIZATION;
 }
 
 async function commandHybrid(path, body) {

@@ -698,6 +698,7 @@ def run_act_runtime(
     *,
     motion_authorization: str | None = None,
     max_steps: int | None = None,
+    hardware_start_gate: str | Path | None = None,
 ) -> None:
     config = load_act_runtime_config(config_path)
     _verify_checkpoint(config)
@@ -741,6 +742,28 @@ def run_act_runtime(
             checkpoint_path=config.checkpoint_path,
             machine_profile_path=config.machine_profile_path,
         )
+    if hardware_start_gate is not None:
+        if mode is not RuntimeMode.MOTION:
+            raise ValueError("hardware start gate is only valid in motion mode")
+        gate_stop = threading.Event()
+        previous_gate_handlers: dict[int, Any] = {}
+
+        def stop_prewarm(signum: int, _frame: Any) -> None:
+            LOGGER.info("received signal %d; stopping ACT prewarm", signum)
+            gate_stop.set()
+
+        try:
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                previous_gate_handlers[signum] = signal.signal(
+                    signum, stop_prewarm
+                )
+            if not _wait_for_hardware_start_gate(
+                hardware_start_gate, stop_event=gate_stop
+            ):
+                return
+        finally:
+            for signum, handler in previous_gate_handlers.items():
+                signal.signal(signum, handler)
     controller = ActRuntimeController(
         mode=mode,
         motion_authorization=motion_authorization,
@@ -808,3 +831,32 @@ def run_act_runtime(
         camera.close()
         serial_port.close()
         log.close()
+
+
+def _wait_for_hardware_start_gate(
+    path: str | Path,
+    *,
+    stop_event: threading.Event,
+    poll_interval_s: float = 0.05,
+) -> bool:
+    """Wait after CUDA warmup without opening the serial port or camera."""
+
+    gate = Path(path)
+    if not gate.is_absolute():
+        raise ValueError("hardware start gate must be an absolute path")
+    if poll_interval_s <= 0:
+        raise ValueError("poll_interval_s must be positive")
+    LOGGER.info(
+        "ACT prewarm ready: waiting for hardware start gate: %s", gate
+    )
+    while not stop_event.is_set():
+        try:
+            gate.unlink()
+        except FileNotFoundError:
+            if stop_event.wait(poll_interval_s):
+                break
+        else:
+            LOGGER.info("ACT hardware start gate accepted: %s", gate)
+            return True
+    LOGGER.info("ACT prewarm cancelled before hardware acquisition")
+    return False

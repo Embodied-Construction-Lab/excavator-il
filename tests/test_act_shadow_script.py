@@ -23,6 +23,18 @@ def test_act_runtime_uses_the_verified_uvc_capture_node():
     assert '"device": "/dev/video0"' in config
 
 
+def test_act_runtime_requires_and_mounts_the_fixed_resnet18_backbone_cache():
+    root = Path(__file__).resolve().parents[1]
+
+    for name in ("run_act_shadow.sh", "run_act_motion.sh"):
+        script = (root / "scripts" / name).read_text(encoding="utf-8")
+
+        assert "resnet18-f37072fd.pth" in script
+        assert "f37072fd47e89c5e827621c5baffa7500819f7896bbacec160b1a16c560e07ec" in script
+        assert 'test -f "${backbone_weight}"' in script
+        assert '"${backbone_cache}:/tmp/cache/torch/hub:ro"' in script
+
+
 def test_act_motion_requires_local_authorization_without_pc_runtime_input():
     script_path = (
         Path(__file__).resolve().parents[1] / "scripts" / "run_act_motion.sh"
@@ -54,3 +66,14 @@ def test_act_motion_supports_bounded_noninteractive_hybrid_segment():
     assert "sudo -n docker" not in script
     assert "非交互 ACT 启动需要 jetson16 直接访问 Docker" in script
     assert "docker group" in script
+
+
+def test_act_motion_supports_hardware_free_prewarm_gate():
+    script = (
+        Path(__file__).resolve().parents[1] / "scripts" / "run_act_motion.sh"
+    ).read_text(encoding="utf-8")
+
+    assert '"--hardware-start-gate"' in script
+    assert '--hardware-start-gate "/opt/act-control/${hardware_start_gate}"' in script
+    assert '"${act_control_root}:/opt/act-control"' in script
+    assert "ACT 预热等待模式" in script

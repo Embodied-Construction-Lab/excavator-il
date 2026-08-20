@@ -141,8 +141,9 @@ def test_act_runtime_cli_defaults_to_shadow_and_passes_exact_motion_authorizatio
     monkeypatch.setattr(
         act_runtime_service,
         "run_act_runtime",
-        lambda path, motion_authorization=None, max_steps=None: calls.append(
-            (path, motion_authorization, max_steps)
+        lambda path, motion_authorization=None, max_steps=None,
+        hardware_start_gate=None: calls.append(
+            (path, motion_authorization, max_steps, hardware_start_gate)
         ),
     )
 
@@ -154,11 +155,18 @@ def test_act_runtime_cli_defaults_to_shadow_and_passes_exact_motion_authorizatio
             "runtime.json",
             "--motion-authorization",
             "ALLOW_ACT_MACHINE_MOTION",
+            "--hardware-start-gate",
+            "/opt/act-control/hybrid_001.start",
         ]
     ) == 0
     assert calls == [
-        ("runtime.json", None, None),
-        ("runtime.json", "ALLOW_ACT_MACHINE_MOTION", None),
+        ("runtime.json", None, None, None),
+        (
+            "runtime.json",
+            "ALLOW_ACT_MACHINE_MOTION",
+            None,
+            "/opt/act-control/hybrid_001.start",
+        ),
     ]
     assert all(call["force"] is True for call in logging_calls)
 

@@ -371,13 +371,18 @@ Collector 运行时，同一只读 HTTP 服务还提供最新 STM32 遥测。UI 
 
 页面选择 DIG 点后点击“开始分段验证”，按顺序检查：
 
-- `RL 到挖点` 完成后进入 `等待 ACT 挖掘`；
-- 点击 ACT 段并输入 `ALLOW_HYBRID_MACHINE_MOTION`，默认完成 130 个 10 Hz step 后自动回零；
-- 点击“前往倾倒并倾倒”，同一 RL Runtime 先 Follow DUMP，再调用现有 `ExecuteDump`；
-- 点击“RL 返回挖点”，返回本轮选择的同一 DIG 点，完成一轮。
+- `RL 到挖点` 期间会并行预热 ACT；此时 ACT 不打开串口或相机。RL 完成、终态回零并确认
+  `/dev/ttyTHS1` 释放后进入 `等待 ACT 挖掘`；
+- 点击 ACT 段；这次明确点击就是本地运动授权，页面自动发送固定授权值，不需要手工输入口令。
+  默认完成 130 个 10 Hz step 后自动回零；
+- 点击“前往倾倒并倾倒”，同一 RL Runtime 先 Follow DUMP，再调用现有 `ExecuteDump`，完成后以
+  零动作保持热待命；
+- 点击“RL 返回挖点”，直接复用热待命 Runtime 返回本轮选择的同一 DIG 点，完成后终态回零并退出。
 
-每一段都重新建立唯一 Runtime owner，结束时执行 terminal zero，并在下一 owner 启动前确认
-`/dev/ttyTHS1` 已释放。分段全部通过后才能使用“自动执行一轮”。ACT step 上限集中在
+整个分段流程由一个后台 worker 保存预热/热待命状态，但任何时刻仍只有一个硬件 owner。RL→ACT
+交接必须先执行 terminal zero 并确认串口释放；ACT 预热本身不持有硬件。倾倒→返回不切换 owner，
+RL Runtime 保持零动作待命；等待阶段点击“安全停止”会停止当前 Runtime 并释放串口。分段全部通过
+后才能使用“自动执行一轮”。ACT step 上限集中在
 `config/hybrid_mission.pc.json`，不得通过页面临时随意扩大。该有界 step 规则只是当前实验的
 最小完成条件，不代表任务成功识别；真实土壤验收仍记录是否完成挖掘、是否带土和最终交接位姿。
 原生 RViz 不作为 iframe 嵌入；`config/collection_ui.pc.json.visualization_url` 仅保留未来

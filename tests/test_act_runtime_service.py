@@ -23,6 +23,7 @@ from excavator_il.act_runtime_service import (
     _perform_live_warmup,
     _route_telemetry_frame,
     _startup_stm32,
+    _wait_for_hardware_start_gate,
 )
 from excavator_il.act_deployment import verify_deployment_manifest
 from excavator_il.collector.camera import RgbCameraFrame
@@ -92,6 +93,37 @@ def _telemetry_line(**overrides):
     return (
         ",".join(str(values[field]) for field in STM32_TELEMETRY_FIELDS) + "\n"
     ).encode("ascii")
+
+
+def test_hardware_start_gate_waits_without_opening_hardware(tmp_path):
+    gate = tmp_path / "hybrid_001.start"
+    stop = threading.Event()
+    completed = threading.Event()
+
+    worker = threading.Thread(
+        target=lambda: (
+            _wait_for_hardware_start_gate(gate, stop_event=stop),
+            completed.set(),
+        )
+    )
+    worker.start()
+    time.sleep(0.05)
+    assert not completed.is_set()
+
+    gate.touch()
+    worker.join(timeout=1.0)
+
+    assert completed.is_set()
+    assert not gate.exists()
+
+
+def test_hardware_start_gate_can_be_cancelled_without_gate_file(tmp_path):
+    stop = threading.Event()
+    stop.set()
+
+    assert not _wait_for_hardware_start_gate(
+        tmp_path / "never.start", stop_event=stop
+    )
 
 
 def test_motion_startup_drains_backlog_and_waits_for_exact_zero_ack():
@@ -521,6 +553,80 @@ def test_motion_manifest_rejects_unsafe_evaluation(tmp_path):
             checkpoint_path=checkpoint,
             machine_profile_path=machine_profile,
         )
+
+
+def test_motion_manifest_accepts_operator_authorized_training_loss_selection(tmp_path):
+    from hashlib import sha256
+    from excavator_il.lerobot_conversion import STATE_FIELDS
+
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "model.safetensors").write_bytes(b"model")
+    machine_profile = tmp_path / "machine_profile.json"
+    machine_profile.write_text(
+        json.dumps({"action_order": ["boom", "stick", "bucket", "swing"]}),
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "deployment.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavator_act_deployment.v3",
+                "checkpoint": {
+                    "selected": True,
+                    "selection_reason": "operator-authorized lowest saved training loss",
+                    "files_sha256": {
+                        "model.safetensors": sha256(b"model").hexdigest()
+                    },
+                },
+                "selection": {
+                    "method": "training_loss",
+                    "checkpoint_step": 200000,
+                    "training_loss": 0.038,
+                    "training_log_sha256": "d" * 64,
+                    "validation_performed": False,
+                },
+                "data": {
+                    "pipeline_validation_present": False,
+                    "source_dataset_sha256": "c" * 64,
+                    "train_dataset_sha256": "a" * 64,
+                    "validation_dataset_sha256": "b" * 64,
+                },
+                "contract": {
+                    "action_order": ["boom", "stick", "bucket", "swing"],
+                    "action_fields": [
+                        "action_boom",
+                        "action_stick",
+                        "action_bucket",
+                        "action_swing",
+                    ],
+                    "state_fields": list(STATE_FIELDS),
+                    "state_dim": 11,
+                    "action_dim": 4,
+                    "front_rgb_chw": [3, 480, 640],
+                    "chunk_size": 20,
+                    "n_action_steps": 10,
+                    "input_feature_keys": [
+                        "observation.images.front",
+                        "observation.state",
+                    ],
+                    "temporal_ensemble_coeff": None,
+                },
+                "machine_profile_sha256": sha256(
+                    machine_profile.read_bytes()
+                ).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    verified = verify_deployment_manifest(
+        manifest_path=manifest,
+        checkpoint_path=checkpoint,
+        machine_profile_path=machine_profile,
+    )
+
+    assert verified["selection"]["training_loss"] == pytest.approx(0.038)
 
 
 def test_shadow_step_never_calls_serial_write_and_logs_prediction():

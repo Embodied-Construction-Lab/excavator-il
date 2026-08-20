@@ -181,12 +181,12 @@ Orin `18092/tcp` 只读输出；因此 Collector 尚未启动或已经退出时�
 shell，而是按固定状态机执行：
 
 ```text
-RL Plan/Follow DIG
+RL Plan/Follow DIG + 并行 ACT 模型/CUDA 预热（ACT 不打开硬件）
 → 终态零 + 退出 RL Runtime + 确认串口释放
-→ ACT 挖掘
+→ 内部交接门放行 → ACT 打开串口/相机并挖掘
 → 终态零 + 退出 ACT Runtime + 确认串口释放
 → RL Plan/Follow DUMP → Orin ExecuteDump
-→ RL Plan/Follow DIG 返回同一挖掘点
+→ RL Runtime 保持零动作热待命 → Plan/Follow DIG 返回同一挖掘点 → 退出
 ```
 
 第一版 ACT 完成条件是 `config/hybrid_mission.pc.json` 中的 `act.max_steps=130`：live warmup 后累计
@@ -198,10 +198,16 @@ success detector。
 使用前 PC 必须已经运行 AiryLidar `live_commissioning` Operator；Orin 不要手工启动
 `orin_state_sender.py`、Collector 或 ACT Runtime。Web UI 提供：
 
-- `开始分段验证`：每完成一段后停在明确的等待阶段，由操作者点击下一段；进入 ACT 段时输入
-  `ALLOW_HYBRID_MACHINE_MOTION`；
-- `自动执行一轮`：启动前输入一次相同授权，然后连续执行完整闭环；只有四段分别通过后才使用；
+- `开始分段验证`：每完成一段后停在明确的等待阶段，由操作者点击下一段；点击执行 ACT 段本身
+  作为本地显式运动授权，页面自动发送固定授权值，不再要求手工输入口令；
+- `自动执行一轮`：点击按钮即显式授权这一轮并连续执行完整闭环；只有四段分别通过后才使用；
 - `安全停止`：中断当前精确 owner，执行终态零并检查 `/dev/ttyTHS1` 释放。
+
+为减少分段演示中的静止冷启动，分段 Mission 从开始到完成由同一个后台 worker 持有：第一段 RL
+运行时并行加载 ACT checkpoint 并完成 synthetic CUDA warmup，但 ACT 在内部交接门放行前不打开
+`/dev/ttyTHS1` 或 `/dev/video0`；只有 RL 已终态回零并确认串口释放后才放行。倾倒完成后同一个 RL
+Runtime 保持零动作待命，点击返回时直接复用。等待阶段点击“安全停止”会清理预热 ACT 或热待命
+RL 并释放设备。该优化只隐藏进程冷启动，不缩短轨迹跟踪、ACT 130 step、固定倾倒或安全回零。
 
 Web UI 通过 SSH 非交互启动 ACT Docker。Orin 的 `jetson16` 必须能直接运行 Docker；实验机可一次性
 加入 `docker` 组并重新登录，之后先验证 `docker info`：

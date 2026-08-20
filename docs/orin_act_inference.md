@@ -178,8 +178,7 @@ Runtime 必须在运动授权前完成 checkpoint 校验、模型加载、至少
 
 ## 6. 生成正式部署清单
 
-在线 motion 不接受人工填写的 checkpoint 路径作为充分证明。必须在训练 PC 上重新运行 held-out
-Episode 评估，并由 evaluator 原子生成部署清单：
+正式模型选择应在训练 PC 上运行 held-out Episode 评估，并由 evaluator 原子生成部署清单：
 
 ```bash
 excavator-il evaluate-checkpoints \
@@ -204,6 +203,13 @@ merge 或延迟重锚定。后者会改变动作时序，只有新模型和专�
 `0.20` 仅是当前 5 条 Pilot 的阶段门限（当前选中模型 runtime replay 实测 `0.12668`），正式采集扩大后必须用
 新的 held-out Pilot 和真机任务成功率重新标定，不能把该数值视为永久性能标准。
 
+当前实验若明确要求跳过 held-out replay，也可以部署“人工授权的最低已保存训练 loss”checkpoint。
+这种清单使用 `excavator_act_deployment.v3`，必须如实记录 `validation_performed=false`、checkpoint step、
+训练 loss 和训练日志 SHA-256；Runtime 仍严格校验 checkpoint 全文件哈希、训练数据指纹、动作/状态/图像
+契约、machine profile，并在每个在线 step 拒绝非有限或越过 `[-1,1]` 的动作。该选择只说明实验操作者
+明确接受了未经 held-out 排名的模型，不能写成验证集性能结论，也不能替代之后的真机任务成功率评估。
+首次切换仍按 Shadow → 发动机关闭 Motion → 受控真机短运行的顺序验收。
+
 ## 7. 在线 Shadow 验证
 
 先停止 Collector、`orin_state_sender.py`、RL Runtime 和任何占用 `/dev/ttyTHS1`/相机的进程。
@@ -212,6 +218,18 @@ ACT 与 RL 使用同一个 `F407/data_celect` 统一固件，不需要在此处�
 Shadow 使用真实相机与 STM32 遥测运行 ACT，但物理串口边界禁止全部写操作。ACT Runtime 的
 正式结构是 Orin 本地独立推理，运行时不接收 PC 手柄、deadman、UDP 或 HMAC 数据；PC teleop
 只属于人工示教采集与单独的手动控制诊断链路。
+
+若 checkpoint 的 `pretrained_backbone_weights` 不是 `null`，LeRobot 在载入完整 checkpoint 前仍会先
+构造 torchvision backbone。在线 Runtime 保持 `--network=none`，因此必须把训练时固定的权重部署到：
+
+```text
+/home/jetson16/workspace_excavator/act_inference/torch-cache/checkpoints/resnet18-f37072fd.pth
+```
+
+当前权威 SHA-256 是
+`f37072fd47e89c5e827621c5baffa7500819f7896bbacec160b1a16c560e07ec`。Shadow/Motion 启动脚本都会在
+Docker 启动前校验该文件，并把缓存只读挂载到 `/tmp/cache/torch/hub`；不得为了下载 backbone 而给
+Motion 容器开放网络。
 
 先在 PC 执行只读 USART2 验收；该命令不启动 Collector、不写串口，也不发送零命令：
 

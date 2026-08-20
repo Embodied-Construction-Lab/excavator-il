@@ -3,15 +3,15 @@
   "checkpoint_path": "/opt/act-checkpoint",
   "deployment_manifest_path": "/opt/act-deployment/deployment_manifest.json",
   "machine_profile_path": "/opt/excavator-config/machine_profile.json",
-  "checkpoint_model_sha256": "4a1a9647cb80c5b703ce0ca75c965a69e2f9507d3f288ab67212f77d5c8a6743",
+  "checkpoint_model_sha256": "cb69bb5251c393129fbef2db3917a879e7602c4d978e2bf446858e24f8336fd2",
   "checkpoint_files_sha256": {
-    "config.json": "508a4895fef37f4d073977b0c80764b69b8825bb68a0133edeaf2f186afc190f",
-    "model.safetensors": "4a1a9647cb80c5b703ce0ca75c965a69e2f9507d3f288ab67212f77d5c8a6743",
+    "config.json": "93cb5ed474db2f1eda5b488be15e938e72d79c34dc04e9e997b7ac68730ee10b",
+    "model.safetensors": "cb69bb5251c393129fbef2db3917a879e7602c4d978e2bf446858e24f8336fd2",
     "policy_postprocessor.json": "0e1790afcabc4ab149c95f833f8068f8470f6fa923e87734284e63d4d5eb0ee5",
-    "policy_postprocessor_step_0_unnormalizer_processor.safetensors": "b9ecd7239634517727c172b8728eddce783073961caeece1a445ab5b35f8e414",
+    "policy_postprocessor_step_0_unnormalizer_processor.safetensors": "5cb709ad90443b6967f2a33f3b5bc65c2b683ecb7c4100840e65bb6adf8b4bd7",
     "policy_preprocessor.json": "5316da175aa491991d636a5e320392660bd49b1165cf8f763a4d0b79f3668b93",
-    "policy_preprocessor_step_3_normalizer_processor.safetensors": "b9ecd7239634517727c172b8728eddce783073961caeece1a445ab5b35f8e414",
-    "train_config.json": "5a25fbc3750b685699893e3bb3c88319367f4fa26b6bfddc94e16b4a765c67b8"
+    "policy_preprocessor_step_3_normalizer_processor.safetensors": "5cb709ad90443b6967f2a33f3b5bc65c2b683ecb7c4100840e65bb6adf8b4bd7",
+    "train_config.json": "4868bac694e6dcd849d36a0c1c532677fe3051de0b9a2523d708756679a7f418"
   },
   "log_root": "/opt/act-runtime-logs",
   "device": "cuda",

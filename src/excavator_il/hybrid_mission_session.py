@@ -18,7 +18,6 @@ from .hybrid_mission import (
     HybridMissionSegment,
     execute_hybrid_segment,
     next_hybrid_segment,
-    remaining_hybrid_segments,
 )
 from .hybrid_mission_system import SystemHybridMissionOperations
 
@@ -49,23 +48,24 @@ def run_hybrid_mission_worker(
     automatic: bool,
     motion_authorization: str | None,
     events: Any,
+    commands: Any,
 ) -> None:
     config = HybridMissionConfig.load(config_path)
     operations = SystemHybridMissionOperations(
         config,
         output=lambda message: events.put({"kind": "log", "message": str(message)}),
     )
-    first = HybridMissionSegment(start_segment)
-    segments = remaining_hybrid_segments(first) if automatic else (first,)
+    segment = HybridMissionSegment(start_segment)
+    current_authorization = motion_authorization
     try:
-        for segment in segments:
+        while True:
             events.put({"kind": "stage", "stage": f"running_{segment.value}"})
             execute_hybrid_segment(
                 operations,
                 segment=segment,
                 dig_target_id=dig_target_id,
                 act_max_steps=config.act_max_steps,
-                motion_authorization=motion_authorization,
+                motion_authorization=current_authorization,
             )
             events.put(
                 {
@@ -73,6 +73,46 @@ def run_hybrid_mission_worker(
                     "message": f"混合 Mission 分段完成：{segment.value}",
                 }
             )
+            next_segment = next_hybrid_segment(segment)
+            if next_segment is None:
+                events.put(
+                    {
+                        "kind": "terminal",
+                        "stage": "completed",
+                        "next_segment": "",
+                    }
+                )
+                return
+            if automatic:
+                segment = next_segment
+                continue
+            events.put(
+                {
+                    "kind": "waiting",
+                    "stage": _WAITING_STAGES[next_segment],
+                    "next_segment": next_segment.value,
+                }
+            )
+            command = commands.get()
+            if isinstance(command, dict) and command.get("kind") == "stop":
+                operations.safe_stop()
+                events.put(
+                    {
+                        "kind": "terminal",
+                        "stage": "cancelled",
+                        "next_segment": "",
+                    }
+                )
+                return
+            if not isinstance(command, dict) or command.get("kind") != "advance":
+                raise RuntimeError("invalid hybrid Mission worker command")
+            requested = HybridMissionSegment(command.get("segment"))
+            if requested is not next_segment:
+                raise RuntimeError(
+                    f"hybrid Mission expected {next_segment.value}, got {requested.value}"
+                )
+            current_authorization = command.get("motion_authorization")
+            segment = requested
     except KeyboardInterrupt:
         try:
             operations.safe_stop()
@@ -97,18 +137,6 @@ def run_hybrid_mission_worker(
             }
         )
         return
-    next_segment = next_hybrid_segment(segments[-1])
-    events.put(
-        {
-            "kind": "terminal",
-            "stage": (
-                "completed"
-                if next_segment is None
-                else _WAITING_STAGES[next_segment]
-            ),
-            "next_segment": "" if next_segment is None else next_segment.value,
-        }
-    )
 
 
 class HybridMissionSupervisor:
@@ -133,6 +161,7 @@ class HybridMissionSupervisor:
         self._state = HybridMissionSnapshot()
         self._completed_cycles = 0
         self._events: Any | None = None
+        self._commands: Any | None = None
         self._process: Any | None = None
         self._monitor: threading.Thread | None = None
 
@@ -181,23 +210,35 @@ class HybridMissionSupervisor:
                 and motion_authorization != REQUIRED_HYBRID_MOTION_AUTHORIZATION
             ):
                 raise ValueError("ACT segment requires exact motion authorization")
-        self._launch(
-            segment=segment,
-            automatic=False,
-            motion_authorization=motion_authorization,
-        )
+            commands = self._commands
+            process = self._process
+            if commands is None or process is None or not process.is_alive():
+                raise RuntimeError("hybrid Mission worker is not available")
+            self._state = replace(
+                self._state,
+                stage="starting",
+                automatic=False,
+                next_segment=segment.value,
+                error="",
+            )
+            commands.put(
+                {
+                    "kind": "advance",
+                    "segment": segment.value,
+                    "motion_authorization": motion_authorization,
+                }
+            )
 
     def stop(self) -> None:
         with self._lock:
             process = self._process
             if process is not None and process.is_alive():
+                was_waiting = self._state.stage in _WAITING_STAGES.values()
                 self._state = replace(self._state, stage="stopping")
+                if was_waiting and self._commands is not None:
+                    self._commands.put({"kind": "stop"})
+                    return
                 os.kill(process.pid, signal.SIGINT)
-                return
-            if self._state.stage in _WAITING_STAGES.values():
-                self._state = replace(
-                    self._state, stage="cancelled", next_segment=""
-                )
                 return
             raise RuntimeError("no hybrid Mission is active")
 
@@ -231,7 +272,9 @@ class HybridMissionSupervisor:
         with self._lock:
             self._release_finished_locked()
             events = self._context.Queue()
+            commands = self._context.Queue()
             self._events = events
+            self._commands = commands
             self._state = replace(
                 self._state,
                 stage="starting",
@@ -248,6 +291,7 @@ class HybridMissionSupervisor:
                     automatic,
                     motion_authorization,
                     events,
+                    commands,
                 ),
                 name=f"hybrid-mission-{segment.value}",
             )
@@ -306,6 +350,20 @@ class HybridMissionSupervisor:
                 if isinstance(stage, str) and stage:
                     self._state = replace(self._state, stage=stage)
                 return False
+            if event.get("kind") == "waiting":
+                stage = event.get("stage")
+                next_segment = event.get("next_segment")
+                if stage not in _WAITING_STAGES.values():
+                    return False
+                if not isinstance(next_segment, str) or not next_segment:
+                    return False
+                self._state = replace(
+                    self._state,
+                    stage=stage,
+                    next_segment=next_segment,
+                    error="",
+                )
+                return False
             if event.get("kind") != "terminal":
                 return False
             stage = event.get("stage")
@@ -340,3 +398,7 @@ class HybridMissionSupervisor:
             self._events.close()
             self._events.join_thread()
         self._events = None
+        if self._commands is not None:
+            self._commands.close()
+            self._commands.join_thread()
+        self._commands = None
