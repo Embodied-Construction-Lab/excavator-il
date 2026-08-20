@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import threading
 import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .collection_ui_app import CollectionUiMetadata, create_collection_ui_app
 from .collection_ui_config import CollectionUiConfig, load_collection_ui_config
 from .collection_ui_session import GuidedCollectionSupervisor
-from .guided_episode import GuidedEpisodeConfig
+from .guided_episode import GuidedEpisodeConfig, load_rl_dig_targets
+from .hybrid_mission import HybridMissionConfig
+from .hybrid_mission_session import HybridMissionSupervisor
 
 
 @dataclass(frozen=True)
@@ -28,6 +30,7 @@ def metadata_from_guided_config(
         task=config.task,
         dig_target_m=config.dig_target_m,
         orin_host=orin_host,
+        rl_dig_targets=load_rl_dig_targets(config),
     )
 
 
@@ -37,10 +40,26 @@ def build_collection_ui_runtime(
     ui_config = load_collection_ui_config(config_path)
     guided_config = GuidedEpisodeConfig.load(ui_config.guided_config)
     supervisor = GuidedCollectionSupervisor(config_path=ui_config.guided_config)
+    hybrid_supervisor = None
+    metadata = metadata_from_guided_config(guided_config)
+    if ui_config.hybrid_mission_config is not None:
+        hybrid_config = HybridMissionConfig.load(ui_config.hybrid_mission_config)
+        if hybrid_config.guided_config != ui_config.guided_config:
+            raise ValueError(
+                "collection UI and hybrid Mission must reference the same guided config"
+            )
+        hybrid_supervisor = HybridMissionSupervisor(
+            config_path=ui_config.hybrid_mission_config
+        )
+        metadata = replace(
+            metadata,
+            hybrid_act_max_steps=hybrid_config.act_max_steps,
+        )
     app = create_collection_ui_app(
         config=ui_config,
-        metadata=metadata_from_guided_config(guided_config),
+        metadata=metadata,
         supervisor=supervisor,
+        hybrid_supervisor=hybrid_supervisor,
     )
     return CollectionUiRuntime(config=ui_config, app=app)
 

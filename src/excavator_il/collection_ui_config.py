@@ -19,6 +19,8 @@ class CollectionUiConfig:
     port: int
     camera_preview_url: str
     visualization_url: str
+    telemetry_url: str = ""
+    hybrid_mission_config: Path | None = None
 
 
 def _text(value: object, field: str, *, allow_empty: bool = False) -> str:
@@ -76,5 +78,14 @@ def load_collection_ui_config(path: str | Path) -> CollectionUiConfig:
             raw.get("visualization_url", ""),
             "visualization_url",
             allow_empty=True,
+        ),
+        telemetry_url=_http_url(raw.get("telemetry_url"), "telemetry_url"),
+        hybrid_mission_config=(
+            None
+            if raw.get("hybrid_mission_config") is None
+            else (
+                config_path.parent
+                / _text(raw.get("hybrid_mission_config"), "hybrid_mission_config")
+            ).resolve()
         ),
     )

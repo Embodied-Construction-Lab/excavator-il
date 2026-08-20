@@ -8,7 +8,7 @@ import time
 from typing import Any
 
 from .core import CollectorCore, CollectorDecision
-from .preview import LatestJpegFrame
+from .preview import LatestJpegFrame, LatestTelemetryFrame
 from .recorder import EpisodeRecorder
 
 
@@ -23,6 +23,7 @@ class CollectorRuntime:
         allowed_pc_host: str,
         joystick_timeout_ms: int,
         camera_preview: LatestJpegFrame | None = None,
+        telemetry_preview: LatestTelemetryFrame | None = None,
     ) -> None:
         self._core = core
         self._recorder = recorder
@@ -34,6 +35,7 @@ class CollectorRuntime:
         self._timeout_zero_sent = False
         self._serial_write_lock = threading.Lock()
         self._camera_preview = camera_preview
+        self._telemetry_preview = telemetry_preview
 
     @staticmethod
     def _rejection_ack(*, receive_monotonic_ns: int, reason: str) -> bytes:
@@ -117,11 +119,18 @@ class CollectorRuntime:
     def accept_stm32(
         self, raw_line: bytes, *, receive_monotonic_ns: int, receive_wall_ns: int
     ) -> None:
-        self._core.accept_stm32(
+        frame = self._core.accept_stm32(
             raw_line,
             receive_monotonic_ns=receive_monotonic_ns,
             receive_wall_ns=receive_wall_ns,
         )
+        if frame is not None and self._telemetry_preview is not None:
+            values = dict(frame.values)
+            values["sensor_valid"] = frame.sensor_valid
+            self._telemetry_preview.publish(
+                values,
+                receive_monotonic_ns=receive_monotonic_ns,
+            )
 
     def capture_once(self) -> str | None:
         frame = self._camera.read_encoded()

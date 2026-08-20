@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 
 _TERMINAL_STAGES = frozenset({"completed", "failed", "cancelled"})
-_POSITIONING_MODES = frozenset({"rl", "manual", "direct"})
+_POSITIONING_MODES = frozenset({"rl", "manual", "direct", "teleop"})
 _OUTCOMES = frozenset({"success", "failure", "retake"})
 
 
@@ -22,14 +22,17 @@ _OUTCOMES = frozenset({"success", "failure", "retake"})
 class CollectionSessionSnapshot:
     stage: str = "idle"
     positioning_mode: str = ""
+    dig_target_id: str = ""
     episode_path: str = ""
     error: str = ""
     logs: tuple[str, ...] = ()
+    completed_count: int = 0
 
 
 def run_guided_collection_worker(
     config_path: str,
     positioning_mode: str,
+    dig_target_id: str | None,
     commands: Any,
     events: Any,
 ) -> None:
@@ -40,6 +43,7 @@ def run_guided_collection_worker(
         PositioningMode,
         SystemGuidedEpisodeOperations,
         run_guided_episode,
+        run_standalone_teleop,
     )
 
     current_stage = GuidedEpisodeStage.PREFLIGHT
@@ -71,14 +75,25 @@ def run_guided_collection_worker(
     try:
         config = GuidedEpisodeConfig.load(config_path)
         operations = SystemGuidedEpisodeOperations(config, output=emit_log)
-        episode_path = run_guided_episode(
-            config,
-            operations,
-            positioning_mode=PositioningMode(positioning_mode),
-            input_fn=wait_for_operator,
-            output=emit_log,
-            stage_callback=emit_stage,
-        )
+        if positioning_mode == "teleop":
+            run_standalone_teleop(
+                config,
+                operations,
+                wait_fn=signal.pause,
+                output=emit_log,
+                stage_callback=emit_stage,
+            )
+            episode_path = ""
+        else:
+            episode_path = run_guided_episode(
+                config,
+                operations,
+                positioning_mode=PositioningMode(positioning_mode),
+                input_fn=wait_for_operator,
+                output=emit_log,
+                stage_callback=emit_stage,
+                rl_target_id=dig_target_id,
+            )
     except KeyboardInterrupt:
         events.put({"kind": "terminal", "stage": "cancelled"})
     except BaseException as exc:
@@ -90,13 +105,10 @@ def run_guided_collection_worker(
             }
         )
     else:
-        events.put(
-            {
-                "kind": "terminal",
-                "stage": "completed",
-                "episode_path": episode_path,
-            }
-        )
+        event = {"kind": "terminal", "stage": "completed"}
+        if episode_path:
+            event["episode_path"] = episode_path
+        events.put(event)
 
 
 class GuidedCollectionSupervisor:
@@ -118,6 +130,7 @@ class GuidedCollectionSupervisor:
         self._log_capacity = log_capacity
         self._lock = threading.RLock()
         self._state = CollectionSessionSnapshot()
+        self._completed_count = 0
         self._logs: deque[str] = deque(maxlen=log_capacity)
         self._commands: Any | None = None
         self._events: Any | None = None
@@ -128,9 +141,17 @@ class GuidedCollectionSupervisor:
         with self._lock:
             return replace(self._state, logs=tuple(self._logs))
 
-    def start(self, positioning_mode: str) -> None:
+    def start(
+        self, positioning_mode: str, dig_target_id: str | None = None
+    ) -> None:
         if positioning_mode not in _POSITIONING_MODES:
-            raise ValueError("positioning_mode must be rl, manual or direct")
+            raise ValueError("positioning_mode must be rl, manual, direct or teleop")
+        with self._lock:
+            if self._state.stage not in {"idle", *_TERMINAL_STAGES}:
+                raise RuntimeError("a guided collection session is already active")
+            prior_monitor = self._monitor
+        if prior_monitor is not None and prior_monitor is not threading.current_thread():
+            prior_monitor.join(timeout=2.0)
         with self._lock:
             if self._state.stage not in {"idle", *_TERMINAL_STAGES}:
                 raise RuntimeError("a guided collection session is already active")
@@ -139,13 +160,17 @@ class GuidedCollectionSupervisor:
             self._commands = self._context.Queue()
             self._events = self._context.Queue()
             self._state = CollectionSessionSnapshot(
-                stage="starting", positioning_mode=positioning_mode
+                stage="starting",
+                positioning_mode=positioning_mode,
+                dig_target_id=dig_target_id or "",
+                completed_count=self._completed_count,
             )
             process = self._context.Process(
                 target=self._worker_target,
                 args=(
                     str(self._config_path),
                     positioning_mode,
+                    dig_target_id,
                     self._commands,
                     self._events,
                 ),
@@ -264,6 +289,12 @@ class GuidedCollectionSupervisor:
                     stage = "failed"
                 episode_path = event.get("episode_path", "")
                 error = event.get("error", "")
+                if (
+                    stage == "completed"
+                    and isinstance(episode_path, str)
+                    and episode_path
+                ):
+                    self._completed_count += 1
                 self._state = replace(
                     self._state,
                     stage=stage,
@@ -271,6 +302,7 @@ class GuidedCollectionSupervisor:
                         episode_path if isinstance(episode_path, str) else ""
                     ),
                     error=error if isinstance(error, str) else "",
+                    completed_count=self._completed_count,
                 )
                 return True
         return False

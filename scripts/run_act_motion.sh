@@ -1,6 +1,37 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+authorization=""
+max_steps=""
+noninteractive=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    "--authorization")
+      [[ $# -ge 2 ]] || { echo "--authorization 缺少值" >&2; exit 2; }
+      authorization="$2"
+      noninteractive=true
+      shift 2
+      ;;
+    "--max-steps")
+      [[ $# -ge 2 ]] || { echo "--max-steps 缺少值" >&2; exit 2; }
+      max_steps="$2"
+      shift 2
+      ;;
+    *)
+      echo "未知参数：$1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -n "${max_steps}" ]] && {
+  [[ ! "${max_steps}" =~ ^[0-9]+$ ]] ||
+  (( max_steps < 1 || max_steps > 2000 ));
+}; then
+  echo "--max-steps 必须是 [1, 2000] 内的整数。" >&2
+  exit 2
+fi
+
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="${ACT_RUNTIME_IMAGE:-excavator-act-inference:jp72-pytorch261}"
 deployment_root="/home/jetson16/workspace_excavator/act_inference"
@@ -31,13 +62,34 @@ echo "即将启动 ACT motion Runtime；该模式具备 STM32 写权限。"
 echo "Runtime 在 Orin 本地独立推理，不需要启动 PC teleop。"
 echo "授权后模型可能立即发送非零杆量；首次验收必须保持发动机关闭。"
 echo "继续前确认串口、相机和传感器独占，作业区无人且急停可用。"
-read -r -p "请输入 ALLOW_ACT_MACHINE_MOTION 继续：" confirmation
+confirmation="${authorization}"
+if [[ -z "${confirmation}" ]]; then
+  read -r -p "请输入 ALLOW_ACT_MACHINE_MOTION 继续：" confirmation
+fi
 if [[ "${confirmation}" != "ALLOW_ACT_MACHINE_MOTION" ]]; then
   echo "授权不匹配，未启动 Runtime。" >&2
   exit 1
 fi
 
-exec sudo docker run --rm \
+docker_command=(docker)
+if ! docker info >/dev/null 2>&1; then
+  if ${noninteractive}; then
+    echo "非交互 ACT 启动需要 jetson16 直接访问 Docker（加入 docker group 并重新登录）。" >&2
+    exit 1
+  else
+    docker_command=(sudo docker)
+  fi
+fi
+
+runtime_args=(
+  excavator-il act-runtime --config /opt/act-runtime.json
+  --motion-authorization ALLOW_ACT_MACHINE_MOTION
+)
+if [[ -n "${max_steps}" ]]; then
+  runtime_args+=(--max-steps "${max_steps}")
+fi
+
+exec "${docker_command[@]}" run --rm \
   --runtime=nvidia --gpus all \
   --network=none \
   --read-only \
@@ -59,5 +111,4 @@ exec sudo docker run --rm \
   -v "${deployment_root}/logs:/opt/act-runtime-logs" \
   -v "${repo_dir}/config/act_runtime.orin.json:/opt/act-runtime.json:ro" \
   "${image}" \
-  excavator-il act-runtime --config /opt/act-runtime.json \
-  --motion-authorization ALLOW_ACT_MACHINE_MOTION
+  "${runtime_args[@]}"

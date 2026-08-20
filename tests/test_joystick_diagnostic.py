@@ -22,8 +22,10 @@ def test_mapping_diagnostic_detects_raw_axes_and_deadman_without_transforming_va
     probes = (
         AxisEndpointProbe("X1", 1, _snapshot(neutral, neutral), _snapshot((-0.98,) + neutral[1:], neutral), _snapshot((0.99,) + neutral[1:], neutral), _snapshot(neutral, neutral)),
         AxisEndpointProbe("Y1", 1, _snapshot(neutral, neutral), _snapshot((0.0, -0.97) + neutral[2:], neutral), _snapshot((0.0, 0.98) + neutral[2:], neutral), _snapshot(neutral, neutral)),
+        AxisEndpointProbe("Z1", 1, _snapshot(neutral, neutral), _snapshot(neutral[:4] + (-0.96,) + neutral[5:], neutral), _snapshot(neutral[:4] + (0.97,) + neutral[5:], neutral), _snapshot(neutral, neutral)),
         AxisEndpointProbe("X2", 2, _snapshot(neutral, neutral), _snapshot(neutral, (-0.99,) + neutral[1:]), _snapshot(neutral, (0.98,) + neutral[1:]), _snapshot(neutral, neutral)),
         AxisEndpointProbe("Y2", 2, _snapshot(neutral, neutral), _snapshot(neutral, (0.0, -0.95) + neutral[2:]), _snapshot(neutral, (0.0, 0.96) + neutral[2:]), _snapshot(neutral, neutral)),
+        AxisEndpointProbe("Z2", 2, _snapshot(neutral, neutral), _snapshot(neutral, neutral[:4] + (-0.94,) + neutral[5:]), _snapshot(neutral, neutral[:4] + (0.95,) + neutral[5:]), _snapshot(neutral, neutral)),
     )
     config = TeleopConfig(
         orin_host="192.168.31.10",
@@ -33,7 +35,7 @@ def test_mapping_diagnostic_detects_raw_axes_and_deadman_without_transforming_va
         calibration_id="raw.v1",
         device_ids=("same-guid", "same-guid"),
         device_paths=(__file__, __file__ + ".right"),
-        axis_indices=((0, 1), (0, 1)),
+        axis_indices=((0, 1, 4), (0, 1, 4)),
         deadman_slot=1,
         deadman_button=22,
     )
@@ -44,7 +46,7 @@ def test_mapping_diagnostic_detects_raw_axes_and_deadman_without_transforming_va
         (ButtonPress(1, 22), ButtonPress(1, 22), ButtonPress(1, 22)),
     )
 
-    assert report.detected_axis_indices == ((0, 1), (0, 1))
+    assert report.detected_axis_indices == ((0, 1, 4), (0, 1, 4))
     assert report.detected_deadman == (1, 22)
     assert report.matches_config is True
     assert report.axis_results[0].first_value == -0.98
@@ -69,7 +71,7 @@ def test_mapping_diagnostic_fails_closed_for_ambiguous_axis_or_button():
         calibration_id="raw.v1",
         device_ids=("same-guid", "same-guid"),
         device_paths=(__file__, __file__ + ".right"),
-        axis_indices=((0, 1), (0, 1)),
+        axis_indices=((0, 1, 4), (0, 1, 4)),
         deadman_slot=1,
         deadman_button=0,
     )
@@ -128,7 +130,7 @@ def test_interactive_diagnostic_captures_all_axes_and_releases_devices(monkeypat
         return (changed, neutral) if slot == 1 else (neutral, changed)
 
     snapshots = []
-    for slot, axis in ((1, 0), (1, 1), (2, 0), (2, 1)):
+    for slot, axis in ((1, 0), (1, 1), (1, 4), (2, 0), (2, 1), (2, 4)):
         snapshots.extend(
             [
                 (neutral, neutral),
@@ -153,7 +155,7 @@ def test_interactive_diagnostic_captures_all_axes_and_releases_devices(monkeypat
         calibration_id="raw.v1",
         device_ids=("same-guid", "same-guid"),
         device_paths=(Path("/dev/input/left"), Path("/dev/input/right")),
-        axis_indices=((0, 1), (0, 1)),
+        axis_indices=((0, 1, 4), (0, 1, 4)),
         deadman_slot=1,
         deadman_button=22,
     )
@@ -180,6 +182,6 @@ def test_interactive_diagnostic_captures_all_axes_and_releases_devices(monkeypat
     )
 
     assert report.matches_config is True
-    assert report.detected_axis_indices == ((0, 1), (0, 1))
+    assert report.detected_axis_indices == ((0, 1, 4), (0, 1, 4))
     assert all(device.closed for device in devices)
     assert any("LOCAL_ONLY" in line for line in output)

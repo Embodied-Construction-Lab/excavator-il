@@ -1,0 +1,13 @@
+{
+  "schema_version": "excavator_hybrid_mission_config.v1",
+  "guided_config": "guided_episode.pc.json",
+  "act": {
+    "max_steps": 130,
+    "ready_timeout_s": 60,
+    "run_timeout_s": 120,
+    "remote_script": "scripts/run_act_motion.sh"
+  },
+  "rl": {
+    "behavior_port": 18083
+  }
+}

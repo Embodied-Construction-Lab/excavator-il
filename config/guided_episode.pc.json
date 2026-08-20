@@ -12,6 +12,7 @@
     "ros_setup": "/opt/ros/jazzy/setup.zsh",
     "workspace_setup": "ros2_ws/install/setup.zsh",
     "mission_config": "mission/config/excavation_cycle.json",
+    "demo_config": "mission/config/excavation_demo.json",
     "phase": "dig",
     "timeout_s": 90,
     "serial_port": "/dev/ttyTHS1",

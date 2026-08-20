@@ -52,6 +52,7 @@ class CollectorCore:
         self._deadzone = deadzone
         self._last_sequences: dict[tuple[str, str], int] = {}
         self._action_seq = 0
+        self._drive_axes_locked_out = False
         self._command_encoder = Stm32ManualCommandEncoder()
         self._stm32_raw_frame_seq = 0
         self._stm32_parser = Stm32TelemetryParser()
@@ -202,9 +203,15 @@ class CollectorCore:
             },
         )
 
+        if self._recorder.active:
+            self._drive_axes_locked_out = True
+
         if packet.deadman_pressed:
-            x1, y1, _z1, x2, y2, _z2 = packet.axes
-            command_axes = (x1, y1, 0.0, x2, y2, 0.0)
+            x1, y1, z1, x2, y2, z2 = packet.axes
+            if self._drive_axes_locked_out:
+                command_axes = (x1, y1, 0.0, x2, y2, 0.0)
+            else:
+                command_axes = (x1, y1, z1, x2, y2, z2)
         else:
             command_axes = (0.0,) * 6
         command_seq = self._command_encoder.next_sequence

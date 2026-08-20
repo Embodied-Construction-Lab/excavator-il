@@ -6,8 +6,9 @@
 
 正式数据不得直接由当前 `deploy_scale_model/doublestick_send.py` 的 `formatted_data` 生成：
 该联调发送器目前以 10 Hz 发送四舍五入到两位小数的文本轴值，且没有样本序号和单调时间。
-正式采集必须保留 Orin 接收的未舍入四个 XY 原始值，并另存映射后的四维专家 Action。线上协议
-继续保留 Z1/Z2 字段以维持 schema 兼容，但人工示教链必须将两者固定为零。
+正式采集必须保留 Orin 接收的未舍入原始手柄包，并另存由四个 XY 映射得到的四维专家 Action。
+Z1/Z2 只用于独立遥操作和 Episode 开始前的人工预定位履带控制，不进入训练标签；Collector 一旦
+观察到本轮 Recorder 激活，直到该进程退出都必须将 STM32 命令中的 Z1/Z2 固定为零。
 
 ## 在线接口
 
@@ -16,7 +17,7 @@
 UDP 数值包固定包含：
 
 - `session_id`、`sample_seq`、PC 单调/墙钟时间；
-- 六轴 `X1/Y1/Z1/X2/Y2/Z2`：四个 XY 为未舍入的 `[-1,1]` 数值，Z1/Z2 必须精确为零；
+- 六轴 `X1/Y1/Z1/X2/Y2/Z2`：均为未舍入的 `[-1,1]` 数值；
 - 两个手柄的 slot、GUID、名称和按钮数组；
 - `deadman_pressed`、`mapping_id`、`calibration_id`。
 
@@ -27,13 +28,13 @@ Orin/STM32 时钟直接相减。
 PC 本地使用带 USB 序列号的 `/dev/input/by-id/*-event-joystick` 稳定路径把物理手柄绑定到
 slot；该路径不进入 UDP 包。两个同型号手柄可以具有相同 GUID，但必须配置不同路径，且启动时
 同时校验路径、GUID 和 SDL 实例 ID，禁止依赖 SDL 枚举顺序猜测左右。此本地绑定要求 SDL 2.24
-或更新版本；`device_path` 必填的本地配置 schema 是 `excavator_teleop_config.v3`，每只手柄只
-配置 X/Y 两个原始轴号。PC 构造线上六轴包时插入零 Z1/Z2，不改变线上
-`excavator_joystick.v1` 协议。Collector 在 STM32 串口边界再次强制 Z1/Z2 为零；即使异常或旧
-发送端提供非零 Z，也不得转发到固件的左右行走输出。
+或更新版本；`device_path` 必填的本地配置 schema 是 `excavator_teleop_config.v4`，每只手柄配置
+X/Y/Z 三个原始轴号。PC 构造的线上 `excavator_joystick.v1` 六轴包保留 Z1/Z2；Collector 仅在
+独立遥操作或 Episode 开始前的人工预定位阶段将它们转发为左右履带遥操作；Episode 一旦开始，
+直到 Collector 退出都必须在 STM32 串口边界清零，封存/结果选择不会重新开放履带。
 
 Pygame/SDL 打开手柄后的初始读数可能短暂包含错误轴值或按钮状态。PC 在创建 UDP socket 前
-必须通过本地启动稳定门：配置的四个 XY 均在 `startup_gate.axis_abs_max` 内且 deadman 释放，
+必须通过本地启动稳定门：配置的六个 X/Y/Z 均在 `startup_gate.axis_abs_max` 内且 deadman 释放，
 连续满足 `startup_gate.stable_samples` 次后才允许发送首包；默认分别为 `0.15` 和 `10`，按
 20 Hz 等价于 0.5 秒。`startup_gate.timeout_s` 默认 5 秒，超时必须无网络输出地失败关闭，禁止
 把初始化瞬态当作人工动作发送。
@@ -49,8 +50,9 @@ Orin 收包后以自身 `CLOCK_MONOTONIC` 同时生成专家标签：
 
 ### Orin → STM32：`stm32_manual_command.v1`
 
-换行结尾 JSON 包含 schema、未改变方向的四个 XY、固定为零的 Z1/Z2、`command_seq` 和
-`command_source_stamp_ms`。STM32 才负责死区后的阀角、PWM、泵和硬件方向适配。未知 schema、
+换行结尾 JSON 包含 schema、未改变方向的六轴、`command_seq` 和 `command_source_stamp_ms`。
+manual 模式下 STM32 将 Z1/Z2 映射到左右履带；RL/ACT velocity/manual 编码以及正式 Recorder
+命令仍明确发送零 Z。STM32 负责死区后的阀角、PWM、泵和硬件方向适配。未知 schema、
 缺字段、重复/乱序帧不会更新控制目标；超过 300 ms 未收到有效命令时输出中位/零命令。
 Collector 每次启动都必须先读取一帧有效 STM32 遥测，以当前 `command_rx_seq` 恢复下一条
 `command_seq`，再发送启动零命令；2 秒内无法取得有效遥测时不得进入 ready 状态。这样既保留

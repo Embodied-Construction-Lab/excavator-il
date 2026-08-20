@@ -17,7 +17,7 @@ from .camera import UvcCamera
 from .config import CollectionConfig, load_collection_config
 from .control import EpisodeController
 from .core import CollectorCore
-from .preview import LatestJpegFrame, MjpegPreviewServer
+from .preview import LatestJpegFrame, LatestTelemetryFrame, MjpegPreviewServer
 from .recorder import EpisodeRecorder
 from .runtime import CollectorRuntime
 
@@ -40,6 +40,7 @@ class CollectorService:
         self._camera = camera
         self._recorder = EpisodeRecorder(config.data_root)
         self._camera_preview = LatestJpegFrame()
+        self._telemetry_preview = LatestTelemetryFrame()
         self._preview_server: MjpegPreviewServer | None = None
         self._core = CollectorCore(
             recorder=self._recorder,
@@ -56,6 +57,7 @@ class CollectorService:
             allowed_pc_host=config.joystick.allowed_pc_host,
             joystick_timeout_ms=config.joystick.timeout_ms,
             camera_preview=self._camera_preview,
+            telemetry_preview=self._telemetry_preview,
         )
         self._episode_controller = EpisodeController(
             recorder=self._recorder,
@@ -167,6 +169,7 @@ class CollectorService:
         if self._config.camera_preview is not None:
             self._preview_server = MjpegPreviewServer(
                 self._camera_preview,
+                telemetry=self._telemetry_preview,
                 bind_host=self._config.camera_preview.bind_host,
                 port=self._config.camera_preview.port,
                 allowed_client_host=self._config.joystick.allowed_pc_host,

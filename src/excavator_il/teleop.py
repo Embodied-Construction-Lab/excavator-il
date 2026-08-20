@@ -19,14 +19,14 @@ from .joystick_protocol import (
 )
 
 
-TELEOP_CONFIG_SCHEMA_VERSION = "excavator_teleop_config.v3"
+TELEOP_CONFIG_SCHEMA_VERSION = "excavator_teleop_config.v4"
 
 
 @dataclass(frozen=True)
 class DeviceSnapshot:
     device_id: str
     name: str
-    axes: tuple[float, float]
+    axes: tuple[float, float, float]
     buttons: tuple[bool, ...]
 
 
@@ -47,7 +47,7 @@ class TeleopConfig:
     calibration_id: str
     device_ids: tuple[str, str]
     device_paths: tuple[Path, Path]
-    axis_indices: tuple[tuple[int, int], tuple[int, int]]
+    axis_indices: tuple[tuple[int, int, int], tuple[int, int, int]]
     deadman_slot: int
     deadman_button: int
     startup_axis_abs_max: float = 0.15
@@ -68,7 +68,7 @@ class TeleopConfig:
             raise ValueError("teleop config devices must contain exactly two entries")
         device_ids: list[str] = []
         device_paths: list[Path] = []
-        axis_indices: list[tuple[int, int]] = []
+        axis_indices: list[tuple[int, int, int]] = []
         for index, device in enumerate(devices, start=1):
             if not isinstance(device, Mapping):
                 raise ValueError(f"devices[{index}] must be an object")
@@ -84,10 +84,12 @@ class TeleopConfig:
                 raise ValueError(f"devices[{index}].device_path must be absolute")
             if (
                 not isinstance(indices, list)
-                or len(indices) != 2
+                or len(indices) != 3
                 or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in indices)
             ):
-                raise ValueError(f"devices[{index}].axis_indices must contain X/Y indices")
+                raise ValueError(
+                    f"devices[{index}].axis_indices must contain X/Y/Z indices"
+                )
             device_ids.append(device_id)
             device_paths.append(parsed_path)
             axis_indices.append(tuple(indices))
@@ -176,18 +178,16 @@ def build_joystick_packet(
     calibration_id: str,
 ) -> JoystickPacket:
     for device in devices:
-        if len(device.axes) != 2:
-            raise ValueError("each joystick must provide X/Y axes")
+        if len(device.axes) != 3:
+            raise ValueError("each joystick must provide X/Y/Z axes")
         if any(not math.isfinite(value) or not -1.0 <= value <= 1.0 for value in device.axes):
             raise ValueError("joystick axes must be finite and within [-1, 1]")
-    left_axes = (devices[0].axes[0], devices[0].axes[1], 0.0)
-    right_axes = (devices[1].axes[0], devices[1].axes[1], 0.0)
     return JoystickPacket(
         session_id=session_id,
         sample_seq=sample_seq,
         pc_sample_monotonic_ns=pc_sample_monotonic_ns,
         pc_sample_wall_ns=pc_sample_wall_ns,
-        axes=left_axes + right_axes,
+        axes=devices[0].axes + devices[1].axes,
         controllers=(
             ControllerIdentity(1, devices[0].device_id, devices[0].name, devices[0].buttons),
             ControllerIdentity(2, devices[1].device_id, devices[1].name, devices[1].buttons),
@@ -342,7 +342,7 @@ def _wait_for_safe_startup(
             return
         if time.monotonic() >= deadline:
             raise RuntimeError(
-                "joystick startup gate timed out: release deadman and center both XY sticks"
+                "joystick startup gate timed out: release deadman and center all configured X/Y/Z axes"
             )
         time.sleep(period_s)
 

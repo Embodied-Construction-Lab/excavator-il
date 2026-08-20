@@ -7,6 +7,8 @@ import threading
 import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import MappingProxyType
+from typing import Mapping
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,44 @@ class LatestJpegFrame:
             return self._latest
 
 
+@dataclass(frozen=True)
+class TelemetryPreviewFrame:
+    receive_monotonic_ns: int
+    values: Mapping[str, int | float | str | bool]
+
+
+class LatestTelemetryFrame:
+    """Keep one immutable parsed STM32 frame for read-only operator display."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._latest: TelemetryPreviewFrame | None = None
+
+    def publish(
+        self,
+        values: Mapping[str, int | float | str | bool],
+        *,
+        receive_monotonic_ns: int,
+    ) -> TelemetryPreviewFrame:
+        if (
+            isinstance(receive_monotonic_ns, bool)
+            or not isinstance(receive_monotonic_ns, int)
+            or receive_monotonic_ns < 0
+        ):
+            raise ValueError("receive_monotonic_ns must be a non-negative integer")
+        frame = TelemetryPreviewFrame(
+            receive_monotonic_ns=receive_monotonic_ns,
+            values=MappingProxyType(dict(values)),
+        )
+        with self._lock:
+            self._latest = frame
+        return frame
+
+    def snapshot(self) -> TelemetryPreviewFrame | None:
+        with self._lock:
+            return self._latest
+
+
 class _PreviewHttpServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -74,6 +114,7 @@ class MjpegPreviewServer:
         self,
         frames: LatestJpegFrame,
         *,
+        telemetry: LatestTelemetryFrame | None = None,
         bind_host: str,
         port: int,
         allowed_client_host: str,
@@ -85,6 +126,7 @@ class MjpegPreviewServer:
         if not isinstance(allowed_client_host, str) or not allowed_client_host:
             raise ValueError("allowed_client_host must be non-empty")
         self._frames = frames
+        self._telemetry = telemetry
         self._allowed_client_host = allowed_client_host
         self._stop = threading.Event()
         self._server = _PreviewHttpServer(
@@ -118,6 +160,8 @@ class MjpegPreviewServer:
                     self._snapshot()
                 elif route == "/camera/front.mjpg":
                     self._stream()
+                elif route == "/telemetry/latest.json":
+                    self._telemetry_snapshot()
                 else:
                     self.send_error(404, "preview route not found")
 
@@ -145,6 +189,50 @@ class MjpegPreviewServer:
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(frame.encoded_image)
+
+            def _telemetry_snapshot(self) -> None:
+                if owner._telemetry is None:
+                    self.send_error(404, "telemetry preview is disabled")
+                    return
+                frame = owner._telemetry.snapshot()
+                if frame is None:
+                    self.send_error(503, "telemetry frame is not available")
+                    return
+                values = frame.values
+                payload = json.dumps(
+                    {
+                        "control_seq": int(values["control_seq"]),
+                        "sensor_seq": int(values["sensor_seq"]),
+                        "sensor_is_new": bool(values["sensor_is_new"]),
+                        "sensor_valid": bool(values.get("sensor_valid", False)),
+                        "control_enabled": bool(values["control_enabled"]),
+                        "command_timed_out": bool(values["command_timed_out"]),
+                        "fault_flags": int(values["fault_flags"]),
+                        "age_ms": max(
+                            0.0,
+                            (time.monotonic_ns() - frame.receive_monotonic_ns)
+                            / 1_000_000.0,
+                        ),
+                        "cylinders_mm": {
+                            "boom": float(values["boom_pos_mm"]),
+                            "stick": float(values["stick_pos_mm"]),
+                            "bucket": float(values["bucket_pos_mm"]),
+                        },
+                        "joint_angles_deg": {
+                            "boom": float(values["boom_angle_deg"]),
+                            "arm": float(values["arm_angle_deg"]),
+                            "bucket": float(values["bucket_angle_deg"]),
+                            "swing": float(values["swing_angle_deg"]),
+                        },
+                    },
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(payload)
 
             def _stream(self) -> None:
                 self.send_response(200)

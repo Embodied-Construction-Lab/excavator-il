@@ -46,6 +46,14 @@ def _parser() -> argparse.ArgumentParser:
     materialize.add_argument("--manifest", required=True)
     materialize.add_argument("--output-root", required=True)
 
+    swing_zero = commands.add_parser(
+        "derive-zero-swing-split",
+        help="copy a materialized split and force expert action_swing labels to zero",
+    )
+    swing_zero.add_argument("--source-root", required=True)
+    swing_zero.add_argument("--output-root", required=True)
+    swing_zero.add_argument("--repo-suffix", default="swing_zero")
+
     evaluate = commands.add_parser(
         "evaluate-checkpoints",
         help="rank ACT checkpoints on held-out Episodes with action safety gates",
@@ -114,6 +122,11 @@ def _parser() -> argparse.ArgumentParser:
     act_runtime.add_argument(
         "--motion-authorization",
         help="exact explicit authorization; omitted means no-write shadow mode",
+    )
+    act_runtime.add_argument(
+        "--max-steps",
+        type=int,
+        help="stop safely after this many post-warmup 10 Hz inference steps",
     )
 
     inspect_runtime = commands.add_parser(
@@ -204,6 +217,15 @@ def main(argv: list[str] | None = None) -> int:
             split = materialize_training_split(
                 manifest_path=args.manifest,
                 output_root=args.output_root,
+            )
+            _print_json(asdict(split))
+        elif args.command == "derive-zero-swing-split":
+            from .action_dataset_transform import derive_zero_swing_split
+
+            split = derive_zero_swing_split(
+                source_root=args.source_root,
+                output_root=args.output_root,
+                repo_suffix=args.repo_suffix,
             )
             _print_json(asdict(split))
         elif args.command == "evaluate-checkpoints":
@@ -322,7 +344,9 @@ def main(argv: list[str] | None = None) -> int:
                 force=True,
             )
             run_act_runtime(
-                args.config, motion_authorization=args.motion_authorization
+                args.config,
+                motion_authorization=args.motion_authorization,
+                max_steps=args.max_steps,
             )
         elif args.command == "inspect-act-runtime-log":
             from .act_runtime_config import load_act_runtime_config

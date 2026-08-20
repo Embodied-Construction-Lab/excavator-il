@@ -11,8 +11,11 @@ from excavator_il.collection_ui_session import (
 )
 
 
-def _scripted_manual_collection(_config_path, positioning_mode, commands, events):
+def _scripted_manual_collection(
+    _config_path, positioning_mode, dig_target_id, commands, events
+):
     assert positioning_mode == "manual"
+    assert dig_target_id is None
     events.put({"kind": "stage", "stage": "manual_positioning"})
     assert commands.get(timeout=1.0) == {"command": "complete_manual_positioning"}
     events.put({"kind": "stage", "stage": "review"})
@@ -29,13 +32,24 @@ def _scripted_manual_collection(_config_path, positioning_mode, commands, events
     )
 
 
-def _cancellable_collection(_config_path, _positioning_mode, _commands, events):
+def _cancellable_collection(
+    _config_path, _positioning_mode, _dig_target_id, _commands, events
+):
     events.put({"kind": "stage", "stage": "recording"})
     try:
         while True:
             time.sleep(0.1)
     except KeyboardInterrupt:
         events.put({"kind": "terminal", "stage": "cancelled"})
+
+
+def _scripted_standalone_teleop(
+    _config_path, positioning_mode, dig_target_id, _commands, events
+):
+    assert positioning_mode == "teleop"
+    assert dig_target_id is None
+    events.put({"kind": "stage", "stage": "teleoperation"})
+    events.put({"kind": "terminal", "stage": "completed"})
 
 
 def _wait_for_stage(supervisor, stage, timeout_s=2.0):
@@ -69,7 +83,16 @@ def test_guided_collection_supervisor_exposes_one_stateful_control_interface(tmp
 
         assert completed.episode_path == "/data/episode_0001"
         assert completed.positioning_mode == "manual"
+        assert completed.completed_count == 1
         assert completed.error == ""
+
+        supervisor.start("manual")
+        _wait_for_stage(supervisor, "manual_positioning")
+        supervisor.complete_manual_positioning()
+        _wait_for_stage(supervisor, "review")
+        supervisor.submit_outcome("success")
+        second = _wait_for_stage(supervisor, "completed")
+        assert second.completed_count == 2
     finally:
         supervisor.close()
 
@@ -88,6 +111,23 @@ def test_guided_collection_supervisor_interrupts_the_owned_worker_on_stop(tmp_pa
 
         cancelled = _wait_for_stage(supervisor, "cancelled")
         assert cancelled.error == ""
+    finally:
+        supervisor.close()
+
+
+def test_guided_collection_supervisor_accepts_teleop_without_counting_episode(tmp_path):
+    supervisor = GuidedCollectionSupervisor(
+        config_path=tmp_path / "guided.json",
+        worker_target=_scripted_standalone_teleop,
+        process_context=multiprocessing.get_context("spawn"),
+    )
+
+    try:
+        supervisor.start("teleop")
+        completed = _wait_for_stage(supervisor, "completed")
+        assert completed.positioning_mode == "teleop"
+        assert completed.episode_path == ""
+        assert completed.completed_count == 0
     finally:
         supervisor.close()
 
@@ -145,9 +185,11 @@ def test_guided_collection_worker_adapts_structured_ui_commands(monkeypatch):
         input_fn,
         output,
         stage_callback,
+        rl_target_id,
     ):
         assert loaded is config
         assert positioning_mode is guided_episode.PositioningMode.MANUAL
+        assert rl_target_id is None
         stage_callback(guided_episode.GuidedEpisodeStage.MANUAL_POSITIONING)
         assert input_fn("manual") == "c"
         stage_callback(guided_episode.GuidedEpisodeStage.REVIEW)
@@ -157,7 +199,7 @@ def test_guided_collection_worker_adapts_structured_ui_commands(monkeypatch):
 
     monkeypatch.setattr(guided_episode, "run_guided_episode", fake_run)
 
-    run_guided_collection_worker("guided.json", "manual", commands, events)
+    run_guided_collection_worker("guided.json", "manual", None, commands, events)
 
     emitted = []
     while not events.empty():
@@ -168,3 +210,65 @@ def test_guided_collection_worker_adapts_structured_ui_commands(monkeypatch):
         "stage": "completed",
         "episode_path": "/data/episode_0002",
     }
+
+
+def test_guided_collection_worker_passes_selected_rl_target(monkeypatch):
+    commands = queue.Queue()
+    events = queue.Queue()
+    config = object()
+    calls = []
+
+    monkeypatch.setattr(guided_episode.GuidedEpisodeConfig, "load", lambda _path: config)
+    monkeypatch.setattr(
+        guided_episode,
+        "SystemGuidedEpisodeOperations",
+        lambda loaded, output: (loaded, output),
+    )
+    monkeypatch.setattr(
+        guided_episode,
+        "run_guided_episode",
+        lambda _config, _operations, **kwargs: calls.append(kwargs)
+        or "/data/episode_0003",
+    )
+
+    run_guided_collection_worker("guided.json", "rl", "dig_03", commands, events)
+
+    assert calls[0]["rl_target_id"] == "dig_03"
+
+
+def test_guided_collection_worker_runs_teleop_without_episode_lifecycle(monkeypatch):
+    commands = queue.Queue()
+    events = queue.Queue()
+    config = object()
+    calls = []
+
+    monkeypatch.setattr(guided_episode.GuidedEpisodeConfig, "load", lambda _path: config)
+    monkeypatch.setattr(
+        guided_episode,
+        "SystemGuidedEpisodeOperations",
+        lambda loaded, output: (loaded, output),
+    )
+
+    def fake_teleop(loaded, _operations, *, wait_fn, output, stage_callback):
+        assert loaded is config
+        assert callable(wait_fn)
+        stage_callback(guided_episode.GuidedEpisodeStage.TELEOPERATION)
+        output("standalone teleop ready")
+        calls.append("teleop")
+
+    monkeypatch.setattr(guided_episode, "run_standalone_teleop", fake_teleop)
+    monkeypatch.setattr(
+        guided_episode,
+        "run_guided_episode",
+        lambda *_args, **_kwargs: pytest.fail("Episode workflow must not run"),
+    )
+
+    run_guided_collection_worker("guided.json", "teleop", None, commands, events)
+
+    emitted = []
+    while not events.empty():
+        emitted.append(events.get_nowait())
+    assert calls == ["teleop"]
+    assert {"kind": "stage", "stage": "teleoperation"} in emitted
+    assert {"kind": "log", "message": "standalone teleop ready"} in emitted
+    assert emitted[-1] == {"kind": "terminal", "stage": "completed"}

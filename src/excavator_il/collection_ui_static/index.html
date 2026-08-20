@@ -16,13 +16,16 @@
         <span id="status-dot" class="status-dot"></span>
         <div><small>当前阶段</small><strong id="stage-label">连接中</strong></div>
       </div>
+      <div class="runtime-chip episode-counter">
+        <div><small>本次 UI 已完成</small><strong><span id="completed-count">0</span> 条 Episode</strong></div>
+      </div>
     </header>
 
     <main class="collection-grid">
       <section class="panel control-panel">
         <div class="section-heading">
-          <div><span class="step-number">01</span><h2>选择定位方式</h2></div>
-          <p>只决定采集前如何到达交接位姿，采集标签契约保持不变。</p>
+          <div><span class="step-number">01</span><h2>选择工作模式</h2></div>
+          <p>可采集 Episode，也可只遥操作；两者共用 deadman 与安全回零。</p>
         </div>
         <div class="mode-grid" id="mode-grid">
           <button class="mode-card selected" data-mode="rl" type="button">
@@ -31,12 +34,24 @@
           </button>
           <button class="mode-card" data-mode="manual" type="button">
             <span class="mode-mark">M</span><strong>手工预定位</strong>
-            <small>先用 deadman + 双杆调整，确认完成后开始正式记录。</small>
+            <small>deadman + X/Y/Z 调整机构与履带，全部回中后开始正式记录。</small>
           </button>
           <button class="mode-card" data-mode="direct" type="button">
             <span class="mode-mark">D</span><strong>直接采集</strong>
             <small>跳过预定位，Collector 待命后按 deadman 开始记录。</small>
           </button>
+          <button class="mode-card" data-mode="teleop" type="button">
+            <span class="mode-mark">T</span><strong>仅遥操作</strong>
+            <small>使用 deadman + X/Y/Z 控制机构与履带，不启动 Recorder。</small>
+          </button>
+        </div>
+
+        <div id="rl-target-section" class="target-section">
+          <div class="target-heading">
+            <div><strong>本次 RL 挖掘点</strong><small>分散选择点位，避免连续 Episode 只挖同一位置。</small></div>
+            <span id="target-count">—</span>
+          </div>
+          <div id="target-grid" class="target-grid"></div>
         </div>
 
         <div class="machine-strip">
@@ -50,10 +65,11 @@
           <button id="start-button" class="button primary" type="button">开始采集流程</button>
           <button id="stop-button" class="button danger" type="button" disabled>安全停止</button>
         </div>
+        <p id="batch-hint" class="batch-hint">每条完成后可直接选择下一点并再次开始；计数只统计本次 UI 运行期间成功完成校验的 Episode。</p>
 
         <div id="stage-actions" class="stage-actions hidden">
           <div id="manual-actions" class="hidden">
-            <p>双杆回中并松开 deadman 后，确认预定位完成。</p>
+            <p>双杆 X/Y/Z 全部回中并松开 deadman 后，确认预定位完成。</p>
             <button id="manual-complete-button" class="button accent" type="button">完成手工预定位</button>
           </div>
           <div id="review-actions" class="hidden">
@@ -66,7 +82,7 @@
           </div>
         </div>
 
-        <div class="timeline" aria-label="采集流程">
+        <div id="collection-timeline" class="timeline" aria-label="采集流程">
           <span data-stage-group="position">定位</span><i></i>
           <span data-stage-group="standby">待命</span><i></i>
           <span data-stage-group="record">记录</span><i></i>
@@ -93,18 +109,71 @@
           <a id="visualization-link" class="text-link hidden" target="_blank" rel="noopener">打开可视化</a>
           <span id="visualization-note">第一版不嵌入原生 RViz，保留浏览器三维视图接口。</span>
         </div>
+        <div class="telemetry-card">
+          <div class="telemetry-heading">
+            <div><small>STM32 / LIVE</small><strong>机构状态</strong></div>
+            <span id="telemetry-state" class="media-state waiting">等待 Collector</span>
+          </div>
+          <div class="telemetry-groups">
+            <div>
+              <h3>关节角度 <small>deg</small></h3>
+              <dl class="metric-grid">
+                <div><dt>动臂</dt><dd id="angle-boom">—</dd></div>
+                <div><dt>斗杆</dt><dd id="angle-arm">—</dd></div>
+                <div><dt>铲斗</dt><dd id="angle-bucket">—</dd></div>
+                <div><dt>回转</dt><dd id="angle-swing">—</dd></div>
+              </dl>
+            </div>
+            <div>
+              <h3>活塞杆伸缩量 <small>mm</small></h3>
+              <dl class="metric-grid three">
+                <div><dt>动臂</dt><dd id="cylinder-boom">—</dd></div>
+                <div><dt>斗杆</dt><dd id="cylinder-stick">—</dd></div>
+                <div><dt>铲斗</dt><dd id="cylinder-bucket">—</dd></div>
+              </dl>
+            </div>
+          </div>
+        </div>
       </section>
 
       <section class="panel log-panel">
         <div class="section-heading compact">
-          <div><span class="step-number">03</span><h2>运行记录</h2></div>
+          <div><span class="step-number">04</span><h2>采集运行记录</h2></div>
           <span id="episode-path" class="episode-path"></span>
         </div>
         <pre id="log-output">等待采集任务…</pre>
         <div id="error-banner" class="error-banner hidden"></div>
       </section>
+
+      <section id="hybrid-panel" class="panel hybrid-panel hidden">
+        <div class="section-heading">
+          <div><span class="step-number">03</span><h2>RL + ACT 混合 Mission</h2></div>
+          <p>分段验证或自动执行一轮：RL 到挖点 → ACT 挖掘 → RL 到倾倒点并倾倒 → RL 返回挖点。</p>
+        </div>
+        <div class="hybrid-summary">
+          <div><small>当前阶段</small><strong id="hybrid-stage">空闲</strong></div>
+          <div><small>ACT 上限</small><strong><span id="hybrid-act-steps">—</span> steps · 10 Hz</strong></div>
+          <div><small>目标点</small><strong id="hybrid-target">—</strong></div>
+          <div><small>完成循环</small><strong id="hybrid-cycles">0</strong></div>
+        </div>
+        <div class="hybrid-flow" aria-label="RL ACT 闭环步骤">
+          <span data-hybrid-segment="rl_to_dig">1 · RL 到挖点</span>
+          <span data-hybrid-segment="act_dig">2 · ACT 挖掘</span>
+          <span data-hybrid-segment="rl_to_dump_and_dump">3 · RL 倾倒</span>
+          <span data-hybrid-segment="rl_return_to_dig">4 · RL 返回</span>
+        </div>
+        <div class="hybrid-actions">
+          <button id="hybrid-segmented-start" class="button primary" type="button">开始分段验证</button>
+          <button id="hybrid-auto-start" class="button accent" type="button">自动执行一轮</button>
+          <button id="hybrid-advance" class="button success" type="button" disabled>执行下一段</button>
+          <button id="hybrid-stop" class="button danger" type="button" disabled>安全停止</button>
+        </div>
+        <p class="batch-hint">需要 AiryLidar live operator 保持运行。ACT 段按有效推理 step 计数，任何故障提前回零失败；固定倾倒继续使用 Orin ExecuteDump。</p>
+        <pre id="hybrid-log">等待混合 Mission…</pre>
+        <div id="hybrid-error" class="error-banner hidden"></div>
+      </section>
     </main>
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js" defer></script>
+    <script src="/static/app.js?v=20260819-hybrid-mission" defer></script>
   </body>
 </html>

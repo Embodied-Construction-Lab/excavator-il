@@ -4,7 +4,11 @@ import threading
 import time
 from urllib.request import urlopen
 
-from excavator_il.collector.preview import LatestJpegFrame, MjpegPreviewServer
+from excavator_il.collector.preview import (
+    LatestJpegFrame,
+    LatestTelemetryFrame,
+    MjpegPreviewServer,
+)
 
 
 def test_latest_jpeg_frame_is_bounded_and_waits_for_a_new_sequence():
@@ -21,8 +25,10 @@ def test_latest_jpeg_frame_is_bounded_and_waits_for_a_new_sequence():
 
 def test_mjpeg_preview_server_streams_the_collector_owned_latest_frame():
     latest = LatestJpegFrame()
+    telemetry = LatestTelemetryFrame()
     server = MjpegPreviewServer(
         latest,
+        telemetry=telemetry,
         bind_host="127.0.0.1",
         port=0,
         allowed_client_host="127.0.0.1",
@@ -30,6 +36,25 @@ def test_mjpeg_preview_server_streams_the_collector_owned_latest_frame():
     thread = threading.Thread(target=server.serve_forever)
     thread.start()
     latest.publish(b"fixture-jpeg", capture_monotonic_ns=time.monotonic_ns())
+    telemetry.publish(
+        {
+            "control_seq": 42,
+            "sensor_seq": 21,
+            "boom_pos_mm": 123.4,
+            "stick_pos_mm": 234.5,
+            "bucket_pos_mm": 345.6,
+            "boom_angle_deg": 10.1,
+            "arm_angle_deg": 20.2,
+            "bucket_angle_deg": 30.3,
+            "swing_angle_deg": -4.5,
+            "sensor_is_new": 1,
+            "sensor_valid": True,
+            "control_enabled": 1,
+            "command_timed_out": 0,
+            "fault_flags": 0,
+        },
+        receive_monotonic_ns=time.monotonic_ns(),
+    )
 
     with urlopen(f"http://127.0.0.1:{server.port}/healthz", timeout=1.0) as health:
         assert json.load(health) == {"ok": True, "frame_available": True}
@@ -38,6 +63,24 @@ def test_mjpeg_preview_server_streams_the_collector_owned_latest_frame():
     ) as snapshot:
         assert snapshot.headers["Content-Type"] == "image/jpeg"
         assert snapshot.read() == b"fixture-jpeg"
+    with urlopen(
+        f"http://127.0.0.1:{server.port}/telemetry/latest.json", timeout=1.0
+    ) as response:
+        payload = json.load(response)
+    assert payload["control_seq"] == 42
+    assert payload["command_timed_out"] is False
+    assert payload["cylinders_mm"] == {
+        "boom": 123.4,
+        "stick": 234.5,
+        "bucket": 345.6,
+    }
+    assert payload["joint_angles_deg"] == {
+        "boom": 10.1,
+        "arm": 20.2,
+        "bucket": 30.3,
+        "swing": -4.5,
+    }
+    assert payload["age_ms"] >= 0.0
 
     client = socket.create_connection(("127.0.0.1", server.port), timeout=1.0)
     client.settimeout(1.0)

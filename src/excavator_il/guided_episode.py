@@ -38,6 +38,7 @@ class GuidedEpisodeStage(str, Enum):
     RL_POSITIONING = "rl_positioning"
     COLLECTOR_STARTING = "collector_starting"
     MANUAL_POSITIONING = "manual_positioning"
+    TELEOPERATION = "teleoperation"
     RECORDER_STANDBY = "recorder_standby"
     RECORDING = "recording"
     REVIEW = "review"
@@ -92,6 +93,7 @@ class GuidedEpisodeConfig:
     rl_edge_config: PurePosixPath
     rl_pc_host: str
     rl_ready_timeout_s: int
+    rl_demo_config: Path | None = None
     failure_reason: str = "diagnostic_task_failed"
     zero_soak_duration_s: int = 30
 
@@ -150,6 +152,13 @@ class GuidedEpisodeConfig:
                 "rl_preposition.mission_config",
             )
         ).resolve()
+        demo_config_value = rl_preposition.get("demo_config")
+        demo_config = None
+        if demo_config_value is not None:
+            demo_config = (
+                airy_repo
+                / _text(demo_config_value, "rl_preposition.demo_config")
+            ).resolve()
         phase = _text(rl_preposition.get("phase"), "rl_preposition.phase")
         if phase != "dig":
             raise ValueError("rl_preposition.phase must be dig for Episode collection")
@@ -224,6 +233,7 @@ class GuidedEpisodeConfig:
                 rl_preposition.get("ready_timeout_s"),
                 "rl_preposition.ready_timeout_s",
             ),
+            rl_demo_config=demo_config,
             failure_reason=_text(
                 episode.get("failure_reason", "diagnostic_task_failed"),
                 "episode.failure_reason",
@@ -235,12 +245,52 @@ class GuidedEpisodeConfig:
         )
 
 
+def load_rl_dig_targets(
+    config: GuidedEpisodeConfig,
+) -> tuple[tuple[str, tuple[float, float, float]], ...]:
+    """Load selectable DIG points without importing the ROS Mission runtime."""
+    path = config.rl_demo_config
+    if path is None:
+        return ()
+    try:
+        root = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot load RL demo config {path}: {exc}") from exc
+    root = _object(root, "RL demo config")
+    if root.get("schema_version") != "excavation_demo.v1":
+        raise ValueError("RL demo schema_version must be excavation_demo.v1")
+    points = root.get("dig_points")
+    if not isinstance(points, list) or not points:
+        raise ValueError("RL demo dig_points must be a non-empty list")
+    targets: list[tuple[str, tuple[float, float, float]]] = []
+    seen: set[str] = set()
+    for index, raw_point in enumerate(points):
+        point = _object(raw_point, f"RL demo dig_points[{index}]")
+        point_id = _text(point.get("point_id"), f"RL demo dig_points[{index}].point_id")
+        if point_id in seen:
+            raise ValueError(f"duplicate RL demo point_id: {point_id}")
+        raw_position = point.get("position_m")
+        if not isinstance(raw_position, list) or len(raw_position) != 3:
+            raise ValueError(f"RL demo {point_id}.position_m must contain three numbers")
+        try:
+            position = tuple(float(value) for value in raw_position)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"RL demo {point_id}.position_m must be numeric") from exc
+        if any(not math.isfinite(value) for value in position):
+            raise ValueError(f"RL demo {point_id}.position_m must be finite")
+        seen.add(point_id)
+        targets.append((point_id, position))
+    return tuple(targets)
+
+
 class GuidedEpisodeOperations(Protocol):
     def preflight(self) -> None: ...
 
     def start_rl_runtime(self) -> None: ...
 
-    def run_rl_preposition(self) -> tuple[float, float, float]: ...
+    def run_rl_preposition(
+        self, target_id: str | None = None
+    ) -> tuple[float, float, float]: ...
 
     def stop_rl_runtime_and_wait_for_serial(self) -> None: ...
 
@@ -496,7 +546,9 @@ class SystemGuidedEpisodeOperations:
         )
         self._run_ssh(remote_check)
 
-    def _rl_target(self) -> tuple[float, float, float]:
+    def _rl_target(self, phase: str = "dig") -> tuple[float, float, float]:
+        if phase not in {"dig", "dump"}:
+            raise ValueError("RL phase must be dig or dump")
         try:
             root = json.loads(self._config.rl_mission_config.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -508,17 +560,17 @@ class SystemGuidedEpisodeOperations:
             raise RuntimeError("RL Mission schema_version must be excavation_mission.v1")
         targets = _object(root.get("targets"), "RL Mission targets")
         target = _object(
-            targets.get(self._config.rl_phase),
-            f"RL Mission targets.{self._config.rl_phase}",
+            targets.get(phase),
+            f"RL Mission targets.{phase}",
         ).get("position_m")
         if not isinstance(target, list) or len(target) != 3:
-            raise RuntimeError("RL Mission dig position_m must contain three numbers")
+            raise RuntimeError(f"RL Mission {phase} position_m must contain three numbers")
         try:
             values = tuple(float(value) for value in target)
         except (TypeError, ValueError) as exc:
-            raise RuntimeError("RL Mission dig position_m must contain numbers") from exc
+            raise RuntimeError(f"RL Mission {phase} position_m must contain numbers") from exc
         if any(not math.isfinite(value) for value in values):
-            raise RuntimeError("RL Mission dig position_m must be finite")
+            raise RuntimeError(f"RL Mission {phase} position_m must be finite")
         return values
 
     def start_rl_runtime(self) -> None:
@@ -594,22 +646,58 @@ echo ready
                 lambda line: "REMOTE EDGE CONTROL ARMED IDLE" in line,
                 self._config.rl_ready_timeout_s,
             )
+            self._rl_runtime.wait_for(
+                lambda line: "sent seq=" in line and "sensor_valid=True" in line,
+                self._config.rl_ready_timeout_s,
+            )
         except BaseException:
             self.stop_rl_runtime_and_wait_for_serial()
             raise
 
-    def run_rl_preposition(self) -> tuple[float, float, float]:
+    def run_rl_preposition(
+        self, target_id: str | None = None
+    ) -> tuple[float, float, float]:
+        return self.run_rl_follow("dig", target_id=target_id)
+
+    def run_rl_follow(
+        self, phase: str, *, target_id: str | None = None
+    ) -> tuple[float, float, float]:
+        if phase not in {"dig", "dump"}:
+            raise ValueError("RL phase must be dig or dump")
+        if phase != "dig" and target_id is not None:
+            raise ValueError("a selected demo target is only valid for the dig phase")
         required_paths = (
             self._config.rl_airy_repo,
             self._config.rl_ros_setup,
             self._config.rl_workspace_setup,
             self._config.rl_mission_config,
         )
+        if target_id is not None:
+            if self._config.rl_demo_config is None:
+                raise RuntimeError("RL demo config is required for a selected DIG point")
+            required_paths = (*required_paths, self._config.rl_demo_config)
         missing = [str(path) for path in required_paths if not path.exists()]
         if missing:
             raise RuntimeError(f"RL positioning path does not exist: {', '.join(missing)}")
-        target = self._rl_target()
-        rl_log = self._config.log_dir / f"guided_episode_{self._timestamp}.rl.log"
+        if target_id is None:
+            target = self._rl_target(phase)
+            target_args = ["--mission", str(self._config.rl_mission_config)]
+        else:
+            targets = dict(load_rl_dig_targets(self._config))
+            try:
+                target = targets[target_id]
+            except KeyError as exc:
+                raise RuntimeError(f"unknown RL DIG target: {target_id}") from exc
+            target_args = [
+                "--demo",
+                str(self._config.rl_demo_config),
+                "--dig-point",
+                target_id,
+            ]
+        rl_log = (
+            self._config.log_dir
+            / f"guided_episode_{self._timestamp}.rl-{phase}.log"
+        )
         shell_command = " && ".join(
             (
                 f"source {shlex.quote(str(self._config.rl_ros_setup))}",
@@ -621,9 +709,8 @@ echo ready
                         "/usr/bin/python3",
                         "-m",
                         "mission.runtime_ros.run_plan_follow_live",
-                        self._config.rl_phase,
-                        "--mission",
-                        str(self._config.rl_mission_config),
+                        phase,
+                        *target_args,
                         "--wait-s",
                         str(self._config.ack_timeout_s),
                     ]
@@ -649,6 +736,60 @@ echo ready
                 f"see {rl_log}"
             )
         return target
+
+    def run_rl_fixed_action(self, behavior: str, *, behavior_port: int) -> None:
+        if behavior not in {"ExecuteDig", "ExecuteDump"}:
+            raise ValueError("behavior must be ExecuteDig or ExecuteDump")
+        if (
+            isinstance(behavior_port, bool)
+            or not isinstance(behavior_port, int)
+            or not 1 <= behavior_port <= 65535
+        ):
+            raise ValueError("behavior_port must be an integer in [1, 65535]")
+        required_paths = (self._config.rl_airy_repo,)
+        missing = [str(path) for path in required_paths if not path.exists()]
+        if missing:
+            raise RuntimeError(f"RL fixed-action path does not exist: {', '.join(missing)}")
+        _user, orin_host = self._config.orin_ssh_host.split("@", maxsplit=1)
+        rl_log = (
+            self._config.log_dir
+            / f"guided_episode_{self._timestamp}.{behavior}.log"
+        )
+        shell_command = " && ".join(
+            (
+                f"cd {shlex.quote(str(self._config.rl_airy_repo))}",
+                shlex.join(
+                    [
+                        "exec",
+                        "/usr/bin/python3",
+                        "-m",
+                        "runtime_bridge.apps.run_orin_fixed_action",
+                        behavior,
+                        "--host",
+                        orin_host,
+                        "--port",
+                        str(behavior_port),
+                    ]
+                ),
+            )
+        )
+        process = _LineProcess(
+            ["/bin/zsh", "-lc", shell_command],
+            log_path=rl_log,
+            prefix="rl-fixed-action",
+            output=self._output,
+        )
+        try:
+            process.wait(timeout_s=self._config.rl_timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            process.stop(signal.SIGINT, timeout_s=3.0)
+            raise RuntimeError(
+                f"{behavior} timed out after {self._config.rl_timeout_s}s"
+            ) from exc
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"{behavior} failed with exit code {process.returncode}; see {rl_log}"
+            )
 
     def stop_rl_runtime_and_wait_for_serial(self) -> None:
         runtime = self._rl_runtime
@@ -997,6 +1138,59 @@ echo released
         )
 
 
+def run_standalone_teleop(
+    config: GuidedEpisodeConfig,
+    operations: GuidedEpisodeOperations,
+    *,
+    wait_fn: Callable[[], None],
+    output: Callable[[str], None] = print,
+    stage_callback: Callable[[GuidedEpisodeStage], None] | None = None,
+) -> None:
+    """Run deadman-gated manual control without creating an Episode."""
+    collector_started = False
+    teleop_started = False
+    failure: BaseException | None = None
+    cleanup_errors: list[str] = []
+    emit_stage = stage_callback or (lambda _stage: None)
+    try:
+        emit_stage(GuidedEpisodeStage.PREFLIGHT)
+        operations.preflight()
+        emit_stage(GuidedEpisodeStage.COLLECTOR_STARTING)
+        operations.start_collector()
+        collector_started = True
+        operations.start_teleop()
+        teleop_started = True
+        operations.wait_for_ack(config.ack_timeout_s)
+        emit_stage(GuidedEpisodeStage.TELEOPERATION)
+        output(
+            "仅遥操作已就绪：按住 deadman 后用双杆控制；释放 deadman 立即回零。"
+            "按 Ctrl+C 或点击安全停止退出，不会创建 Episode。"
+        )
+        wait_fn()
+    except BaseException as exc:
+        failure = exc
+    finally:
+        if teleop_started:
+            try:
+                operations.stop_teleop()
+            except Exception as exc:
+                cleanup_errors.append(f"teleop cleanup failed: {exc}")
+        if collector_started:
+            try:
+                operations.stop_collector()
+            except Exception as exc:
+                cleanup_errors.append(f"Collector cleanup failed: {exc}")
+        if cleanup_errors:
+            message = "; ".join(cleanup_errors)
+            if failure is not None:
+                output(f"ERROR: {message}")
+            else:
+                failure = RuntimeError(message)
+    if failure is not None:
+        raise failure.with_traceback(failure.__traceback__)
+    emit_stage(GuidedEpisodeStage.COMPLETED)
+
+
 def run_guided_episode(
     config: GuidedEpisodeConfig,
     operations: GuidedEpisodeOperations,
@@ -1006,6 +1200,7 @@ def run_guided_episode(
     input_fn: Callable[[str], str] = input,
     output: Callable[[str], None] = print,
     stage_callback: Callable[[GuidedEpisodeStage], None] | None = None,
+    rl_target_id: str | None = None,
 ) -> str:
     """Collect deadman-bounded attempts and validate them after motion I/O stops."""
     if positioning_mode is None:
@@ -1036,7 +1231,10 @@ def run_guided_episode(
             )
             operations.start_rl_runtime()
             rl_runtime_started = True
-            episode_target_m = operations.run_rl_preposition()
+            if rl_target_id is None:
+                episode_target_m = operations.run_rl_preposition()
+            else:
+                episode_target_m = operations.run_rl_preposition(rl_target_id)
             operations.stop_rl_runtime_and_wait_for_serial()
             rl_runtime_started = False
             output(
@@ -1061,7 +1259,7 @@ def run_guided_episode(
             teleop_started = False
             output(
                 "预定位结束：已确认 deadman 释放并停止预定位 teleop。"
-                "请保持双杆居中，开始正式 Recorder 门禁。"
+                "请保持双杆 X/Y/Z 全部回中，开始正式 Recorder 门禁。"
             )
         operations.start_episode(episode_target_m)
         episode_active = True
@@ -1071,13 +1269,13 @@ def run_guided_episode(
         while True:
             emit_stage(GuidedEpisodeStage.RECORDER_STANDBY)
             output(
-                "Recorder 已进入待命。保持双杆居中；按下 deadman 后可立即操纵 XY。"
+                "Recorder 已进入待命。保持双杆 X/Y/Z 全部回中；按下 deadman 后可立即操纵 XY。"
             )
             operations.wait_for_deadman_pressed()
             deadman_started = True
             emit_stage(GuidedEpisodeStage.RECORDING)
             output(
-                "记录已开始：按住 deadman 完成动作；双杆回中后松开 deadman 结束。"
+                "记录已开始：按住 deadman 完成动作；记录阶段只执行 XY，完成后将 X/Y/Z 全部回中并松开 deadman。"
             )
             operations.wait_for_deadman_released()
             completed_path = operations.seal_episode()
@@ -1106,7 +1304,7 @@ def run_guided_episode(
                 path for path in retained_paths if path != completed_path
             )
             output(
-                f"本次已删除：{completed_path}。双杆居中后可再次按 deadman 重录，"
+                f"本次已删除：{completed_path}。双杆 X/Y/Z 全部回中后可再次按 deadman 重录，"
                 "Episode 编号保持不变。"
             )
             operations.start_episode(episode_target_m)
@@ -1230,7 +1428,7 @@ def _wait_for_preposition_complete(
 ) -> None:
     while True:
         value = input_fn(
-            "预定位完成后，将双杆回中并松开 deadman，再输入 完成/c："
+            "预定位完成后，将双杆 X/Y/Z 全部回中并松开 deadman，再输入 完成/c："
         ).strip().lower()
         if value in {"完成", "c", "complete"}:
             return

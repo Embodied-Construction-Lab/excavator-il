@@ -15,7 +15,9 @@ from excavator_il.guided_episode import (
     SystemGuidedEpisodeOperations,
     _LineProcess,
     _read_positioning_choice,
+    load_rl_dig_targets,
     run_guided_episode,
+    run_standalone_teleop,
 )
 
 
@@ -83,6 +85,38 @@ class _FakeOperations:
 
     def build_and_validate(self, episode_path):
         self.events.append(("build_and_validate", episode_path))
+
+
+def test_standalone_teleop_never_creates_episode_and_cleans_up_on_interrupt(tmp_path):
+    operations = _FakeOperations()
+    stages = []
+
+    def wait_until_stopped():
+        operations.events.append("operator_wait")
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        run_standalone_teleop(
+            _guided_config(tmp_path),
+            operations,
+            wait_fn=wait_until_stopped,
+            stage_callback=stages.append,
+        )
+
+    assert operations.events == [
+        "preflight",
+        "start_collector",
+        "start_teleop",
+        ("wait_for_ack", 8),
+        "operator_wait",
+        "stop_teleop",
+        "stop_collector",
+    ]
+    assert stages == [
+        GuidedEpisodeStage.PREFLIGHT,
+        GuidedEpisodeStage.COLLECTOR_STARTING,
+        GuidedEpisodeStage.TELEOPERATION,
+    ]
 
 
 def test_guided_episode_config_resolves_pc_paths_and_validates_contract(tmp_path):
@@ -228,6 +262,33 @@ def _guided_config(tmp_path):
     )
 
 
+def test_guided_episode_loads_selectable_demo_dig_targets(tmp_path):
+    config = _guided_config(tmp_path)
+    demo_path = tmp_path / "AiryLidar/mission/config/excavation_demo.json"
+    demo_path.parent.mkdir(parents=True, exist_ok=True)
+    demo_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavation_demo.v1",
+                "demo_id": "field_demo_001",
+                "dig_points": [
+                    {"point_id": "dig_01", "position_m": [1.0, 0.2, 0.0]},
+                    {"point_id": "dig_02", "position_m": [1.0, 0.0, 0.0]},
+                    {"point_id": "dig_03", "position_m": [1.0, -0.2, 0.0]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    object.__setattr__(config, "rl_demo_config", demo_path)
+
+    assert load_rl_dig_targets(config) == (
+        ("dig_01", (1.0, 0.2, 0.0)),
+        ("dig_02", (1.0, 0.0, 0.0)),
+        ("dig_03", (1.0, -0.2, 0.0)),
+    )
+
+
 def test_guided_episode_stands_by_before_deadman_and_seals_immediately_on_release(
     tmp_path,
 ):
@@ -359,6 +420,27 @@ def test_rl_positioning_finishes_and_releases_serial_before_collector_starts(tmp
     assert operations.episode_targets == [(1.0, 0.0, 0.0)]
 
 
+def test_selected_rl_target_is_persisted_as_episode_target(tmp_path):
+    class SelectedTargetOperations(_FakeOperations):
+        def run_rl_preposition(self, target_id=None):
+            self.events.append(("run_rl_preposition", target_id))
+            return (1.0, -0.2, 0.0)
+
+    operations = SelectedTargetOperations()
+
+    run_guided_episode(
+        _guided_config(tmp_path),
+        operations,
+        positioning_mode=PositioningMode.RL,
+        rl_target_id="dig_03",
+        input_fn=lambda _prompt: "成功",
+        output=lambda _message: None,
+    )
+
+    assert ("run_rl_preposition", "dig_03") in operations.events
+    assert operations.episode_targets == [(1.0, -0.2, 0.0)]
+
+
 def test_guided_episode_reports_operator_relevant_stages_through_one_callback(tmp_path):
     stages = []
     answers = iter(("c", "s"))
@@ -452,6 +534,116 @@ def test_system_rl_positioning_uses_mission_target_and_live_plan_follow(tmp_path
     assert str(config.rl_mission_config) in command[2]
 
 
+def test_system_rl_positioning_uses_selected_demo_dig_target(tmp_path, monkeypatch):
+    config = _guided_config(tmp_path)
+    config.rl_airy_repo.mkdir()
+    config.rl_workspace_setup.parent.mkdir(parents=True)
+    config.rl_workspace_setup.touch()
+    config.rl_mission_config.parent.mkdir(parents=True)
+    config.rl_mission_config.touch()
+    demo_path = config.rl_airy_repo / "mission/config/excavation_demo.json"
+    demo_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavation_demo.v1",
+                "demo_id": "field_demo_001",
+                "dig_points": [
+                    {"point_id": "dig_03", "position_m": [1.0, -0.2, 0.0]}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    object.__setattr__(config, "rl_demo_config", demo_path)
+    process_calls = []
+
+    class FakeLineProcess:
+        returncode = 0
+
+        def __init__(self, argv, **kwargs):
+            process_calls.append((argv, kwargs))
+
+        def wait(self, timeout_s=5.0):
+            assert timeout_s == 90
+
+    monkeypatch.setattr("excavator_il.guided_episode._LineProcess", FakeLineProcess)
+    operations = SystemGuidedEpisodeOperations(config, output=lambda _message: None)
+
+    target = operations.run_rl_preposition("dig_03")
+
+    assert target == (1.0, -0.2, 0.0)
+    command = process_calls[0][0][2]
+    assert f"--demo {demo_path}" in command
+    assert "--dig-point dig_03" in command
+
+
+def test_system_rl_follow_supports_dump_phase_without_demo_target(tmp_path, monkeypatch):
+    config = _guided_config(tmp_path)
+    config.rl_airy_repo.mkdir()
+    config.rl_workspace_setup.parent.mkdir(parents=True)
+    config.rl_workspace_setup.touch()
+    config.rl_mission_config.parent.mkdir(parents=True)
+    config.rl_mission_config.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavation_mission.v1",
+                "targets": {
+                    "dig": {"position_m": [1.0, 0.0, 0.0]},
+                    "dump": {"position_m": [0.0, -1.0, 0.0]},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    process_calls = []
+
+    class FakeLineProcess:
+        returncode = 0
+
+        def __init__(self, argv, **kwargs):
+            process_calls.append((argv, kwargs))
+
+        def wait(self, timeout_s=5.0):
+            assert timeout_s == 90
+
+    monkeypatch.setattr("excavator_il.guided_episode._LineProcess", FakeLineProcess)
+    operations = SystemGuidedEpisodeOperations(config, output=lambda _message: None)
+
+    target = operations.run_rl_follow("dump")
+
+    assert target == (0.0, -1.0, 0.0)
+    command = process_calls[0][0][2]
+    assert "run_plan_follow_live dump" in command
+    assert "--dig-point" not in command
+
+
+def test_system_runs_existing_orin_fixed_dump_client(tmp_path, monkeypatch):
+    config = _guided_config(tmp_path)
+    config.rl_airy_repo.mkdir()
+    config.rl_workspace_setup.parent.mkdir(parents=True)
+    config.rl_workspace_setup.touch()
+    process_calls = []
+
+    class FakeLineProcess:
+        returncode = 0
+
+        def __init__(self, argv, **kwargs):
+            process_calls.append((argv, kwargs))
+
+        def wait(self, timeout_s=5.0):
+            assert timeout_s == 90
+
+    monkeypatch.setattr("excavator_il.guided_episode._LineProcess", FakeLineProcess)
+    operations = SystemGuidedEpisodeOperations(config, output=lambda _message: None)
+
+    operations.run_rl_fixed_action("ExecuteDump", behavior_port=18083)
+
+    command = process_calls[0][0][2]
+    assert "runtime_bridge.apps.run_orin_fixed_action ExecuteDump" in command
+    assert "--host 192.0.2.10" in command
+    assert "--port 18083" in command
+
+
 def test_system_starts_owned_rl_runtime_and_waits_for_ready(tmp_path, monkeypatch):
     config = _guided_config(tmp_path)
     process_calls = []
@@ -462,7 +654,11 @@ def test_system_starts_owned_rl_runtime_and_waits_for_ready(tmp_path, monkeypatc
             process_calls.append((argv, kwargs))
 
         def wait_for(self, predicate, timeout_s, *, after_index=-1):
-            candidates = ("GUIDED_RL_PID=4242", "REMOTE EDGE CONTROL ARMED IDLE")
+            candidates = (
+                "GUIDED_RL_PID=4242",
+                "REMOTE EDGE CONTROL ARMED IDLE",
+                "sent seq=0 stm32_t=100 sensor_valid=True",
+            )
             line = next(candidate for candidate in candidates if predicate(candidate))
             return candidates.index(line), line
 

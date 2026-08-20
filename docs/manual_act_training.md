@@ -336,6 +336,51 @@ train 数据集。历史上用全量数据训练的 checkpoint 会被拒绝，�
 然后才在安全候选中选择最低 L1。若没有候选，命令退出码为 3。选中的 checkpoint 后续仍必须通过
 完整样本范围扫描、Orin GPU 延迟验证和真机上线前安全审查；validation loss 不能替代这些门禁。
 
+### 5.2 派生 Swing=0 数据集并进行 200k 训练
+
+当当前实验明确不要求 ACT 控制回转时，可从已经物化的 parent-Episode split 派生一份独立数据集，
+把权威动作顺序 `[boom, stick, bucket, swing]` 中第 4 维标签固定为 0。该操作不会改写原始 split，
+并会重新生成统计量、数据指纹与转换 provenance：
+
+```bash
+excavator-il derive-zero-swing-split \
+  --source-root data/lerobot/excavator_dig_20260819_54ep_v1_split \
+  --output-root data/lerobot/excavator_dig_20260819_54ep_v1_split_swing_zero \
+  --repo-suffix swing_zero
+```
+
+本次长训练的权威入口是：
+
+```bash
+bash scripts/train_act_swing_zero_200k.sh
+```
+
+脚本会验证 train/validation 指纹、43/11 个 parent Episode、11 维状态、4 维动作顺序，以及所有
+6904 帧的 `action_swing == 0`，然后运行标准 52M 参数 ACT：batch 2、200000 steps、seed 2026、
+chunk size 20、线上消费 10 steps、每 20000 steps 保存一次 checkpoint。训练图像增强保持关闭，
+因为当前固定相机数据首先验证精确的视觉—状态—动作对应关系。按 5440 个 train frame 计算，
+200000 steps 约等于 73.5 个有效 epoch。
+
+需要无人值守运行时，可交给当前用户的 systemd：
+
+```bash
+systemd-run --user \
+  --unit=act-swing-zero-200k \
+  --description='ACT swing-zero 200k training' \
+  --property=WorkingDirectory="$PWD" \
+  --property=StandardOutput=append:"$PWD/logs/act_excavator_dig_54ep_swing_zero_seed2026_200k_pipeline.log" \
+  --property=StandardError=append:"$PWD/logs/act_excavator_dig_54ep_swing_zero_seed2026_200k_pipeline.log" \
+  /usr/bin/bash "$PWD/scripts/train_act_swing_zero_200k.sh"
+
+systemctl --user status act-swing-zero-200k.service
+tail -f logs/act_excavator_dig_54ep_swing_zero_seed2026_200k.log
+```
+
+Swing 统计量的 mean/std 都为 0，因此 LeRobot postprocessor 会把该模型的反归一化 Swing 输出严格
+恢复为 0；这不是修改 STM32 动作顺序，也不是把 4 维模型改成 3 维。训练完成后仍须对 Swing=0 的
+validation split 运行第 5.1 节的 checkpoint 选择，再生成新 deployment manifest；不能直接覆盖
+Orin 当前已验收模型。
+
 ## 6. 断点续训
 
 假设 `last` 当前保存于 step 100，要继续训练到总 step 200：

@@ -36,8 +36,8 @@
     "dig_target_m": [0.8, 0.0, -0.2],
     "material_id": "soil_default",
     "provenance": {
-      "firmware_commit": "15be6ce36d8a26e87bf29f10f1bf92e81faa994d",
-      "urdf_hash": "c1dffdac1e460682c4d6c45187e0fbb6e5a8323a189ddbc4fd66e0696919ef62",
+      "firmware_commit": "ed2d8548bffe5e7a63973a69a8847f161d75ef31",
+      "urdf_hash": "8b2fdbeb63c909b4393e4a67783ad7ec0ab8731f853bf6b0ed847a4667fbdb9f",
       "machine_profile_hash": "4b8c94484389429c2c3871857d928e46ec93fa1b62c66df459336868b00d2f89",
       "valve_calibration_id": "data_celect_manual_open_loop_v1",
       "pump_setting": "JOYSTICK_FIXED_PUMP_PERCENT=-30.0f"

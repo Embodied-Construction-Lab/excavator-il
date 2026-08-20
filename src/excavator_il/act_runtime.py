@@ -14,11 +14,11 @@ import numpy as np
 import torch
 
 from .lerobot_conversion import STATE_FIELDS
+from .act_runtime_contract import REQUIRED_MOTION_AUTHORIZATION
 from .raw_episode import ACTION_FIELDS
 from .collector.camera import RgbCameraFrame
 from .stm32_protocol import Stm32TelemetryFrame
 
-REQUIRED_MOTION_AUTHORIZATION = "ALLOW_ACT_MACHINE_MOTION"
 _ZERO_ACTION = (0.0, 0.0, 0.0, 0.0)
 
 

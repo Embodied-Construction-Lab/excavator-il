@@ -9,6 +9,7 @@ from excavator_il.collection_ui_runtime import (
     run_collection_ui,
 )
 from excavator_il.guided_episode import GuidedEpisodeConfig
+from excavator_il.hybrid_mission import HybridMissionConfig
 
 
 def test_collection_ui_metadata_comes_from_authoritative_guided_config():
@@ -17,12 +18,14 @@ def test_collection_ui_metadata_comes_from_authoritative_guided_config():
     object.__setattr__(guided, "task", "ExecuteDig")
     object.__setattr__(guided, "dig_target_m", (0.8, 0.0, -0.2))
     object.__setattr__(guided, "orin_ssh_host", "jetson16@192.168.50.2")
+    object.__setattr__(guided, "rl_demo_config", None)
 
     assert metadata_from_guided_config(guided) == CollectionUiMetadata(
         operator_id="zhaoshuai",
         task="ExecuteDig",
         dig_target_m=(0.8, 0.0, -0.2),
         orin_host="192.168.50.2",
+        rl_dig_targets=(),
     )
 
 
@@ -39,6 +42,7 @@ def test_collection_ui_runtime_composes_config_supervisor_and_app(monkeypatch, t
     object.__setattr__(guided, "task", "ExecuteDig")
     object.__setattr__(guided, "dig_target_m", (0.8, 0.0, -0.2))
     object.__setattr__(guided, "orin_ssh_host", "jetson16@192.168.50.2")
+    object.__setattr__(guided, "rl_demo_config", None)
     supervisor = object()
     app = object()
 
@@ -61,6 +65,64 @@ def test_collection_ui_runtime_composes_config_supervisor_and_app(monkeypatch, t
 
     assert runtime.config is ui_config
     assert runtime.app is app
+
+
+def test_collection_ui_runtime_composes_optional_hybrid_supervisor(
+    monkeypatch, tmp_path
+):
+    guided_path = tmp_path / "guided.json"
+    hybrid_path = tmp_path / "hybrid.json"
+    ui_config = CollectionUiConfig(
+        guided_config=guided_path,
+        hybrid_mission_config=hybrid_path,
+        host="127.0.0.1",
+        port=8088,
+        camera_preview_url="http://192.168.50.2:18092/camera/front.mjpg",
+        visualization_url="",
+    )
+    hybrid_config = HybridMissionConfig(
+        guided_config=guided_path,
+        act_max_steps=130,
+        act_ready_timeout_s=60,
+        act_run_timeout_s=90,
+        act_remote_script="scripts/run_act_motion.sh",
+        rl_behavior_port=18083,
+    )
+    guided = object.__new__(GuidedEpisodeConfig)
+    object.__setattr__(guided, "operator_id", "zhaoshuai")
+    object.__setattr__(guided, "task", "ExecuteDig")
+    object.__setattr__(guided, "dig_target_m", (0.8, 0.0, -0.2))
+    object.__setattr__(guided, "orin_ssh_host", "jetson16@192.168.50.2")
+    object.__setattr__(guided, "rl_demo_config", None)
+    collection = object()
+    hybrid = object()
+    captured = {}
+
+    monkeypatch.setattr(
+        collection_ui_runtime, "load_collection_ui_config", lambda _path: ui_config
+    )
+    monkeypatch.setattr(GuidedEpisodeConfig, "load", lambda _path: guided)
+    monkeypatch.setattr(HybridMissionConfig, "load", lambda _path: hybrid_config)
+    monkeypatch.setattr(
+        collection_ui_runtime,
+        "GuidedCollectionSupervisor",
+        lambda **_kwargs: collection,
+    )
+    monkeypatch.setattr(
+        collection_ui_runtime,
+        "HybridMissionSupervisor",
+        lambda **_kwargs: hybrid,
+    )
+    monkeypatch.setattr(
+        collection_ui_runtime,
+        "create_collection_ui_app",
+        lambda **kwargs: captured.update(kwargs) or object(),
+    )
+
+    build_collection_ui_runtime(tmp_path / "ui.json")
+
+    assert captured["hybrid_supervisor"] is hybrid
+    assert captured["metadata"].hybrid_act_max_steps == 130
 
 
 def test_run_collection_ui_uses_loopback_config_without_browser(monkeypatch):

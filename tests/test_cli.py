@@ -141,8 +141,8 @@ def test_act_runtime_cli_defaults_to_shadow_and_passes_exact_motion_authorizatio
     monkeypatch.setattr(
         act_runtime_service,
         "run_act_runtime",
-        lambda path, motion_authorization=None: calls.append(
-            (path, motion_authorization)
+        lambda path, motion_authorization=None, max_steps=None: calls.append(
+            (path, motion_authorization, max_steps)
         ),
     )
 
@@ -157,8 +157,8 @@ def test_act_runtime_cli_defaults_to_shadow_and_passes_exact_motion_authorizatio
         ]
     ) == 0
     assert calls == [
-        ("runtime.json", None),
-        ("runtime.json", "ALLOW_ACT_MACHINE_MOTION"),
+        ("runtime.json", None, None),
+        ("runtime.json", "ALLOW_ACT_MACHINE_MOTION", None),
     ]
     assert all(call["force"] is True for call in logging_calls)
 
@@ -209,6 +209,7 @@ def test_teleop_handles_operator_interrupt_without_traceback(monkeypatch, capsys
 def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
     pytest.importorskip("lerobot")
     from excavator_il import (
+        action_dataset_transform,
         act_smoke,
         checkpoint_evaluation,
         lerobot_conversion,
@@ -227,6 +228,9 @@ def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
     monkeypatch.setattr(training_split, "prepare_training_split", lambda **k: _Result())
     monkeypatch.setattr(training_split, "materialize_training_split", lambda **k: _Result())
     monkeypatch.setattr(
+        action_dataset_transform, "derive_zero_swing_split", lambda **k: _Result()
+    )
+    monkeypatch.setattr(
         checkpoint_evaluation, "evaluate_act_checkpoints", lambda **k: _CheckpointResult()
     )
 
@@ -244,6 +248,17 @@ def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
             "0.8",
             "--seed",
             "7",
+        ]
+    ) == 0
+    assert main(
+        [
+            "derive-zero-swing-split",
+            "--source-root",
+            "data/lerobot/source_split",
+            "--output-root",
+            "data/lerobot/swing_zero_split",
+            "--repo-suffix",
+            "swing_zero",
         ]
     ) == 0
     assert main(
@@ -286,7 +301,7 @@ def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
     assert inference_arguments["warmup_runs"] == 2
     assert inference_arguments["timed_runs"] == 3
     assert inference_arguments["max_inference_ms"] == 100.0
-    assert capsys.readouterr().out.count('"value": "ok"') == 6
+    assert capsys.readouterr().out.count('"value": "ok"') == 7
 
 
 def test_cli_synthesizes_pipeline_validation_episodes(monkeypatch, capsys):

@@ -556,7 +556,12 @@ class ActRuntimeService:
         camera: UvcCamera,
         processor: ActRuntimeStepProcessor,
         command_channel: Stm32CommandChannel,
+        max_steps: int | None = None,
     ) -> None:
+        if max_steps is not None and (
+            isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps <= 0
+        ):
+            raise ValueError("max_steps must be a positive integer when provided")
         self._serial = serial_port
         self._camera = camera
         self._processor = processor
@@ -569,6 +574,12 @@ class ActRuntimeService:
         self._inference_ready = threading.Event()
         self._live_warmup_action: tuple[float, ...] | None = None
         self._error: BaseException | None = None
+        self._max_steps = max_steps
+        self._completed_step_count = 0
+
+    @property
+    def completed_step_count(self) -> int:
+        return self._completed_step_count
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -616,6 +627,16 @@ class ActRuntimeService:
                 state_generation=generation,
                 dropped_state_count=dropped,
             )
+            self._completed_step_count += 1
+            if (
+                self._max_steps is not None
+                and self._completed_step_count >= self._max_steps
+            ):
+                LOGGER.info(
+                    "ACT inference step budget reached: completed_steps=%d",
+                    self._completed_step_count,
+                )
+                self._stop.set()
 
     def run(self) -> None:
         camera_worker = threading.Thread(
@@ -673,7 +694,10 @@ class ActRuntimeService:
 
 
 def run_act_runtime(
-    config_path: str | Path, *, motion_authorization: str | None = None
+    config_path: str | Path,
+    *,
+    motion_authorization: str | None = None,
+    max_steps: int | None = None,
 ) -> None:
     config = load_act_runtime_config(config_path)
     _verify_checkpoint(config)
@@ -765,6 +789,7 @@ def run_act_runtime(
         camera=camera,
         processor=processor,
         command_channel=command_channel,
+        max_steps=max_steps,
     )
     previous: dict[int, Any] = {}
 

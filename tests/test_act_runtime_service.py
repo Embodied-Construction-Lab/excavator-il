@@ -261,6 +261,81 @@ def test_runtime_service_warms_up_on_the_inference_worker(monkeypatch):
     assert thread_ids["warmup"] != threading.get_ident()
 
 
+def test_runtime_service_stops_after_configured_inference_step_budget(monkeypatch):
+    processed = []
+
+    class _Observations:
+        def add_camera(self, _frame):
+            pass
+
+        def wait_ready(self, _timeout_s):
+            return True
+
+    class _Camera:
+        def read_rgb(self):
+            time.sleep(0.001)
+            return object()
+
+    class _SerialSource:
+        def __init__(self):
+            self._sensor_seq = 0
+
+        def readline(self):
+            time.sleep(0.001)
+            self._sensor_seq += 1
+            return _telemetry_line(sensor_seq=self._sensor_seq)
+
+    class _Processor:
+        _observations = _Observations()
+
+        def warmup_live(self, _frame, *, dropped_state_count=0):
+            return (0.0, 0.0, 0.0, 0.0)
+
+        def process(self, frame, *, state_generation=None, dropped_state_count=0):
+            processed.append(int(frame.values["sensor_seq"]))
+
+    class _Channel:
+        mode = RuntimeMode.SHADOW
+
+        def update_state(self, frame):
+            return int(frame.values["sensor_seq"])
+
+        def enforce_state_timeout(self, **_kwargs):
+            pass
+
+        def terminal_disarm(self, **_kwargs):
+            pass
+
+    monkeypatch.setattr(runtime_service_module, "_startup_stm32", lambda **_kwargs: 1)
+    service = ActRuntimeService(
+        serial_port=_SerialSource(),
+        camera=_Camera(),
+        processor=_Processor(),
+        command_channel=_Channel(),
+        max_steps=3,
+    )
+
+    service.run()
+
+    assert len(processed) == 3
+    assert service.completed_step_count == 3
+
+
+@pytest.mark.parametrize("invalid", [0, -1, True, 1.5])
+def test_runtime_service_rejects_invalid_step_budget(invalid):
+    class _Processor:
+        _observations = object()
+
+    with pytest.raises(ValueError, match="max_steps"):
+        ActRuntimeService(
+            serial_port=object(),
+            camera=object(),
+            processor=_Processor(),
+            command_channel=object(),
+            max_steps=invalid,
+        )
+
+
 def test_motion_startup_refuses_ready_without_zero_ack():
     serial = _StartupSerial(
         [_telemetry_line(command_rx_seq=41, command_valid=1)]

@@ -2,10 +2,12 @@
 
 const UI_HEADER = {"X-Excavator-UI": "1"};
 const terminalStages = new Set(["idle", "completed", "failed", "cancelled"]);
+const hybridTerminalStages = new Set(["idle", "completed", "failed", "cancelled"]);
 const stageLabels = {
   idle: "空闲", starting: "启动中", preflight: "环境检查",
   rl_positioning: "RL 定位", collector_starting: "Collector 启动",
-  manual_positioning: "手工预定位", recorder_standby: "等待 deadman",
+  manual_positioning: "手工预定位", teleoperation: "仅遥操作",
+  recorder_standby: "等待 deadman",
   recording: "记录中", review: "结果确认", finalizing: "保存中",
   validating: "校验中", completed: "已完成", stopping: "停止中",
   failed: "失败", cancelled: "已取消"
@@ -13,19 +15,32 @@ const stageLabels = {
 const progressOrder = ["position", "standby", "record", "review", "done"];
 const stageProgress = {
   rl_positioning: 0, collector_starting: 0, manual_positioning: 0,
+  teleoperation: 0,
   recorder_standby: 1, recording: 2, review: 3,
   finalizing: 4, validating: 4, completed: 4
 };
+const hybridStageLabels = {
+  idle: "空闲", starting: "启动中", running_rl_to_dig: "RL 到挖点",
+  awaiting_act_dig: "等待 ACT 挖掘", running_act_dig: "ACT 挖掘中",
+  awaiting_rl_to_dump: "等待前往倾倒点",
+  running_rl_to_dump_and_dump: "RL 到倾倒点并倾倒",
+  awaiting_rl_return: "等待返回挖点", running_rl_return_to_dig: "RL 返回挖点",
+  completed: "一轮完成", stopping: "安全停止中", failed: "失败", cancelled: "已取消"
+};
+const hybridSegments = ["rl_to_dig", "act_dig", "rl_to_dump_and_dump", "rl_return_to_dig"];
 
 const state = {
   selectedMode: "rl",
+  selectedTargetId: null,
   config: null,
   snapshot: null,
+  hybridSnapshot: null,
   cameraRetryTimer: null,
   cameraAttempt: 0
 };
 const $ = (id) => document.getElementById(id);
 const CAMERA_RETRY_MS = 1000;
+const CAMERA_REFRESH_MS = 100;
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
@@ -54,6 +69,11 @@ function renderConfig(config) {
   $("task-name").textContent = config.task;
   $("dig-target").textContent = config.dig_target_m.map(value => Number(value).toFixed(2)).join(", ");
   $("orin-host").textContent = config.orin_host;
+  renderTargets(config.rl_dig_targets || []);
+  if (config.hybrid_mission_enabled) {
+    $("hybrid-panel").classList.remove("hidden");
+    $("hybrid-act-steps").textContent = String(config.hybrid_act_max_steps);
+  }
   const image = $("camera-preview");
   image.addEventListener("load", () => {
     if (state.cameraRetryTimer !== null) {
@@ -62,13 +82,14 @@ function renderConfig(config) {
     }
     image.classList.add("ready");
     $("camera-placeholder").classList.add("hidden");
-    $("camera-state").textContent = "实时";
+    $("camera-state").textContent = `实时 · 帧 ${state.cameraAttempt}`;
+    scheduleCameraRefresh(CAMERA_REFRESH_MS);
   });
   image.addEventListener("error", () => {
     image.classList.remove("ready");
     $("camera-placeholder").classList.remove("hidden");
     $("camera-state").textContent = "等待 Collector";
-    scheduleCameraRetry();
+    scheduleCameraRefresh(CAMERA_RETRY_MS);
   });
   loadCameraPreview();
   if (config.visualization_url) {
@@ -79,30 +100,87 @@ function renderConfig(config) {
   }
 }
 
+function renderTargets(targets) {
+  const grid = $("target-grid");
+  if (!grid) return;
+  grid.replaceChildren();
+  state.selectedTargetId = targets[0]?.target_id || null;
+  $("target-count").textContent = `${targets.length} 个可选点`;
+  targets.forEach((target, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `target-card${index === 0 ? " selected" : ""}`;
+    button.dataset.targetId = target.target_id;
+    const coordinates = target.position_m.map(value => Number(value).toFixed(2)).join(", ");
+    const label = document.createElement("strong");
+    label.textContent = target.target_id;
+    const detail = document.createElement("small");
+    detail.textContent = `${coordinates} m`;
+    button.append(label, detail);
+    button.addEventListener("click", () => selectTarget(target));
+    grid.appendChild(button);
+  });
+  if (targets[0]) selectTarget(targets[0]);
+}
+
+function selectTarget(target) {
+  state.selectedTargetId = target.target_id;
+  document.querySelectorAll(".target-card").forEach(card => {
+    card.classList.toggle("selected", card.dataset.targetId === target.target_id);
+  });
+  $("dig-target").textContent = target.position_m
+    .map(value => Number(value).toFixed(2)).join(", ");
+  if ($("hybrid-target")) $("hybrid-target").textContent = target.target_id;
+}
+
+function renderSelectedMode() {
+  const isRl = state.selectedMode === "rl";
+  const isTeleop = state.selectedMode === "teleop";
+  $("rl-target-section").classList.toggle("hidden", !isRl);
+  $("collection-timeline").classList.toggle("hidden", isTeleop);
+  $("start-button").textContent = isTeleop ? "启动仅遥操作" : "开始采集流程";
+  $("batch-hint").textContent = isTeleop
+    ? "仅遥操作不会启动 Recorder 或创建 Episode；点击安全停止后释放串口和相机。"
+    : "每条完成后可直接选择下一点并再次开始；计数只统计本次 UI 运行期间成功完成校验的 Episode。";
+  if (!isRl) {
+    $("dig-target").textContent = state.config.dig_target_m
+      .map(value => Number(value).toFixed(2)).join(", ");
+    return;
+  }
+  const selected = (state.config.rl_dig_targets || [])
+    .find(target => target.target_id === state.selectedTargetId);
+  if (selected) selectTarget(selected);
+}
+
 function loadCameraPreview() {
   if (!state.config?.camera_preview_url) return;
   state.cameraAttempt += 1;
   const separator = state.config.camera_preview_url.includes("?") ? "&" : "?";
-  $("camera-preview").src = `${state.config.camera_preview_url}${separator}attempt=${state.cameraAttempt}`;
+  $("camera-preview").src = `${state.config.camera_preview_url}${separator}frame=${state.cameraAttempt}`;
 }
 
-function scheduleCameraRetry() {
+function scheduleCameraRefresh(delayMs) {
   if (state.cameraRetryTimer !== null) return;
   state.cameraRetryTimer = window.setTimeout(() => {
     state.cameraRetryTimer = null;
     loadCameraPreview();
-  }, CAMERA_RETRY_MS);
+  }, delayMs);
 }
 
 function renderSnapshot(snapshot) {
   state.snapshot = snapshot;
   const stage = snapshot.stage || "idle";
   const active = !terminalStages.has(stage);
+  if (active && snapshot.positioning_mode) {
+    state.selectedMode = snapshot.positioning_mode;
+    document.querySelectorAll(".mode-card").forEach(card => {
+      card.classList.toggle("selected", card.dataset.mode === state.selectedMode);
+    });
+    renderSelectedMode();
+  }
   $("stage-label").textContent = stageLabels[stage] || stage;
+  $("completed-count").textContent = String(snapshot.completed_count || 0);
   $("status-dot").className = `status-dot${active ? " active" : ""}${stage === "failed" ? " error" : ""}`;
-  $("start-button").disabled = active;
-  $("stop-button").disabled = !active || stage === "stopping";
-  document.querySelectorAll(".mode-card").forEach(card => { card.disabled = active; });
 
   const manual = stage === "manual_positioning";
   const review = stage === "review";
@@ -118,6 +196,57 @@ function renderSnapshot(snapshot) {
   $("error-banner").textContent = snapshot.error || "";
   $("error-banner").classList.toggle("hidden", !snapshot.error);
   renderProgress(stage);
+  updateOwnershipControls();
+}
+
+function renderHybridSnapshot(snapshot) {
+  state.hybridSnapshot = snapshot;
+  const stage = snapshot.stage || "idle";
+  $("hybrid-stage").textContent = hybridStageLabels[stage] || stage;
+  $("hybrid-target").textContent = snapshot.dig_target_id || state.selectedTargetId || "—";
+  $("hybrid-cycles").textContent = String(snapshot.completed_cycles || 0);
+  const logs = Array.isArray(snapshot.logs) ? snapshot.logs : [];
+  $("hybrid-log").textContent = logs.length ? logs.join("\n") : "等待混合 Mission…";
+  $("hybrid-log").scrollTop = $("hybrid-log").scrollHeight;
+  $("hybrid-error").textContent = snapshot.error || "";
+  $("hybrid-error").classList.toggle("hidden", !snapshot.error);
+  const runningSegment = stage.startsWith("running_") ? stage.slice("running_".length) : "";
+  const nextSegment = snapshot.next_segment || "";
+  const currentIndex = hybridSegments.indexOf(runningSegment || nextSegment);
+  document.querySelectorAll("[data-hybrid-segment]").forEach(node => {
+    const index = hybridSegments.indexOf(node.dataset.hybridSegment);
+    node.classList.toggle("active", index === currentIndex && stage !== "completed");
+    node.classList.toggle("done", stage === "completed" || (currentIndex >= 0 && index < currentIndex));
+  });
+  $("hybrid-advance").textContent = nextSegment === "act_dig"
+    ? "执行 ACT 挖掘"
+    : nextSegment === "rl_to_dump_and_dump"
+      ? "前往倾倒并倾倒"
+      : nextSegment === "rl_return_to_dig" ? "RL 返回挖点" : "执行下一段";
+  updateOwnershipControls();
+}
+
+function updateOwnershipControls() {
+  const collectionStage = state.snapshot?.stage || "idle";
+  const hybridStage = state.hybridSnapshot?.stage || "idle";
+  const collectionActive = !terminalStages.has(collectionStage);
+  const hybridActive = !hybridTerminalStages.has(hybridStage);
+  if (hybridActive) {
+    $("stage-label").textContent = `闭环 · ${hybridStageLabels[hybridStage] || hybridStage}`;
+    $("status-dot").className = `status-dot active${hybridStage === "failed" ? " error" : ""}`;
+  } else {
+    $("stage-label").textContent = stageLabels[collectionStage] || collectionStage;
+    $("status-dot").className = `status-dot${collectionActive ? " active" : ""}${collectionStage === "failed" ? " error" : ""}`;
+  }
+  $("start-button").disabled = collectionActive || hybridActive;
+  $("stop-button").disabled = !collectionActive || collectionStage === "stopping";
+  document.querySelectorAll(".mode-card").forEach(card => { card.disabled = collectionActive || hybridActive; });
+  document.querySelectorAll(".target-card").forEach(card => { card.disabled = collectionActive || hybridActive; });
+  if (!state.config?.hybrid_mission_enabled) return;
+  $("hybrid-segmented-start").disabled = collectionActive || hybridActive;
+  $("hybrid-auto-start").disabled = collectionActive || hybridActive;
+  $("hybrid-advance").disabled = collectionActive || !hybridStage.startsWith("awaiting_");
+  $("hybrid-stop").disabled = !hybridActive || hybridStage === "stopping";
 }
 
 function renderProgress(stage) {
@@ -142,19 +271,109 @@ function toast(message, isError = false) {
 function bindActions() {
   document.querySelectorAll(".mode-card").forEach(card => card.addEventListener("click", () => {
     state.selectedMode = card.dataset.mode;
+    renderSelectedMode();
     document.querySelectorAll(".mode-card").forEach(node => node.classList.toggle("selected", node === card));
   }));
-  $("start-button").addEventListener("click", () => command("/api/collection/start", {positioning_mode: state.selectedMode}));
+  $("start-button").addEventListener("click", () => command("/api/collection/start", {
+    positioning_mode: state.selectedMode,
+    dig_target_id: state.selectedMode === "rl" ? state.selectedTargetId : null
+  }));
   $("stop-button").addEventListener("click", () => command("/api/collection/stop"));
   $("manual-complete-button").addEventListener("click", () => command("/api/collection/manual-complete"));
   document.querySelectorAll("[data-outcome]").forEach(button => button.addEventListener("click", () => {
     command("/api/collection/outcome", {outcome: button.dataset.outcome});
   }));
+  $("hybrid-segmented-start").addEventListener("click", () => commandHybrid("/api/hybrid/start", {
+    dig_target_id: state.selectedTargetId,
+    automatic: false,
+    motion_authorization: null
+  }));
+  $("hybrid-auto-start").addEventListener("click", () => {
+    const authorization = requestHybridAuthorization("自动一轮将依次执行 RL、ACT 与固定倾倒。");
+    if (authorization === null) return;
+    commandHybrid("/api/hybrid/start", {
+      dig_target_id: state.selectedTargetId,
+      automatic: true,
+      motion_authorization: authorization
+    });
+  });
+  $("hybrid-advance").addEventListener("click", () => {
+    const needsAuthorization = state.hybridSnapshot?.next_segment === "act_dig";
+    const authorization = needsAuthorization
+      ? requestHybridAuthorization("下一段 ACT 将获得 STM32 写权限并自动运行。")
+      : null;
+    if (needsAuthorization && authorization === null) return;
+    commandHybrid("/api/hybrid/advance", {motion_authorization: authorization});
+  });
+  $("hybrid-stop").addEventListener("click", () => commandHybrid("/api/hybrid/stop"));
+}
+
+function requestHybridAuthorization(message) {
+  return window.prompt(`${message}\n请输入 ALLOW_HYBRID_MACHINE_MOTION 继续：`);
+}
+
+async function commandHybrid(path, body) {
+  const headers = {...UI_HEADER};
+  const options = {method: "POST", headers};
+  if (body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(body);
+  }
+  try { renderHybridSnapshot(await api(path, options)); }
+  catch (error) { toast(error.message, true); }
+}
+
+function setMetric(id, value, digits = 1) {
+  const node = $(id);
+  if (node) node.textContent = Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : "—";
+}
+
+function renderTelemetry(payload) {
+  const ageMs = Number(payload.age_ms);
+  const fresh = Number.isFinite(ageMs) && ageMs <= 250;
+  const hardwareFaults = Number(payload.fault_flags || 0) & ~16;
+  const healthy = payload.sensor_valid === true && hardwareFaults === 0;
+  const badge = $("telemetry-state");
+  badge.textContent = !fresh
+    ? "遥测过期"
+    : !healthy ? "传感器 / 硬件故障"
+    : payload.control_enabled === true
+      ? `实时 · ${ageMs.toFixed(0)} ms`
+      : "实时 · 安全零位";
+  badge.classList.toggle("waiting", !fresh || !healthy);
+  const angles = payload.joint_angles_deg || {};
+  const cylinders = payload.cylinders_mm || {};
+  setMetric("angle-boom", angles.boom);
+  setMetric("angle-arm", angles.arm);
+  setMetric("angle-bucket", angles.bucket);
+  setMetric("angle-swing", angles.swing);
+  setMetric("cylinder-boom", cylinders.boom);
+  setMetric("cylinder-stick", cylinders.stick);
+  setMetric("cylinder-bucket", cylinders.bucket);
+}
+
+function renderTelemetryUnavailable() {
+  const badge = $("telemetry-state");
+  if (badge) {
+    badge.textContent = "等待 Collector";
+    badge.classList.add("waiting");
+  }
+}
+
+async function refreshTelemetry() {
+  try { renderTelemetry(await api("/api/telemetry")); }
+  catch (_error) { renderTelemetryUnavailable(); }
 }
 
 async function refreshStatus() {
   try { renderSnapshot(await api("/api/status")); }
   catch (error) { toast(`状态连接失败：${error.message}`, true); }
+}
+
+async function refreshHybridStatus() {
+  if (!state.config?.hybrid_mission_enabled) return;
+  try { renderHybridSnapshot(await api("/api/hybrid/status")); }
+  catch (error) { toast(`混合 Mission 状态失败：${error.message}`, true); }
 }
 
 async function boot() {
@@ -163,6 +382,10 @@ async function boot() {
     renderConfig(await api("/api/config"));
     await refreshStatus();
     window.setInterval(refreshStatus, 500);
+    await refreshHybridStatus();
+    window.setInterval(refreshHybridStatus, 500);
+    await refreshTelemetry();
+    window.setInterval(refreshTelemetry, 500);
   } catch (error) {
     toast(`UI 初始化失败：${error.message}`, true);
   }

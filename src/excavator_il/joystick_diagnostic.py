@@ -135,7 +135,7 @@ def evaluate_joystick_mapping(
         for result in results
         if result.valid and result.detected_axis is not None
     }
-    ordered_names = (("X1", "Y1"), ("X2", "Y2"))
+    ordered_names = (("X1", "Y1", "Z1"), ("X2", "Y2", "Z2"))
     detected_indices = tuple(
         tuple(by_name[name].detected_axis for name in names if name in by_name)
         for names in ordered_names
@@ -145,11 +145,11 @@ def evaluate_joystick_mapping(
     repeated = tuple(identity for identity, count in counts.items() if count >= 2)
     detected_deadman = repeated[0] if len(repeated) == 1 and len(counts) == 1 else None
 
-    configured_xy_indices = config.axis_indices
-    complete = all(len(indices) == 2 for indices in detected_indices)
+    configured_axis_indices = config.axis_indices
+    complete = all(len(indices) == 3 for indices in detected_indices)
     matches_config = (
         complete
-        and detected_indices == configured_xy_indices
+        and detected_indices == configured_axis_indices
         and detected_deadman == (config.deadman_slot, config.deadman_button)
         and all(result.valid for result in results)
     )
@@ -255,8 +255,10 @@ def run_joystick_diagnostic(
     prompts = (
         _AxisPrompt("X1", 1, "左手柄主杆向左到底", "左手柄主杆向右到底"),
         _AxisPrompt("Y1", 1, "左手柄主杆向前到底", "左手柄主杆向后到底"),
+        _AxisPrompt("Z1", 1, "左履带控制轴推到一端", "左履带控制轴推到另一端"),
         _AxisPrompt("X2", 2, "右手柄主杆向左到底", "右手柄主杆向右到底"),
         _AxisPrompt("Y2", 2, "右手柄主杆向前到底", "右手柄主杆向后到底"),
+        _AxisPrompt("Z2", 2, "右履带控制轴推到一端", "右履带控制轴推到另一端"),
     )
     try:
         devices = _open_configured_devices(pygame, config)
@@ -315,9 +317,9 @@ def run_joystick_diagnostic(
                 f"second={result.second_value} return={result.returned_value} "
                 f"reason={result.reason}"
             )
-        output_fn(f"  detected_xy_indices={report.detected_axis_indices}")
+        output_fn(f"  detected_axis_indices={report.detected_axis_indices}")
         output_fn(
-            f"  configured_xy_indices={config.axis_indices}"
+            f"  configured_axis_indices={config.axis_indices}"
         )
         output_fn(f"  detected_deadman={report.detected_deadman}")
         output_fn(

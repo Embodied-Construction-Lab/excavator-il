@@ -60,11 +60,12 @@ vm.runInContext(`renderConfig({
   task: "ExecuteDig",
   dig_target_m: [0.8, 0.0, -0.2],
   orin_host: "192.168.50.2",
-  camera_preview_url: "http://192.168.50.2:18092/camera/front.mjpg",
+  camera_preview_url: "/api/camera/frame.jpg",
   visualization_url: ""
 })`, context);
 
 assert.equal(image.assignments.length, 1);
+assert.match(image.assignments[0], /^\/api\/camera\/frame\.jpg\?frame=1$/);
 image.dispatch("error");
 assert.equal(cameraState.textContent, "等待 Collector");
 assert.equal(timers.length, 1, "a failed preview should schedule reconnection");
@@ -74,6 +75,11 @@ assert.equal(image.assignments.length, 2, "reconnection should reload the previe
 assert.notEqual(image.assignments[1], image.assignments[0], "retry URL should bypass caches");
 
 image.dispatch("load");
-assert.equal(cameraState.textContent, "实时");
+assert.equal(cameraState.textContent, "实时 · 帧 2");
 assert.equal(image.classList.contains("ready"), true);
 assert.equal(placeholder.classList.contains("hidden"), true);
+assert.equal(timers.length, 1, "each loaded snapshot should schedule the next frame");
+
+timers.shift()();
+assert.equal(image.assignments.length, 3, "the browser should keep refreshing snapshots");
+assert.match(image.assignments[2], /^\/api\/camera\/frame\.jpg\?frame=3$/);

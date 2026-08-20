@@ -41,3 +41,16 @@ def test_act_motion_requires_local_authorization_without_pc_runtime_input():
     assert "fuser /dev/ttyTHS1 /dev/video0" in script
     assert "--cap-drop=ALL" in script
     assert "--privileged" not in script
+
+
+def test_act_motion_supports_bounded_noninteractive_hybrid_segment():
+    script = (
+        Path(__file__).resolve().parents[1] / "scripts" / "run_act_motion.sh"
+    ).read_text(encoding="utf-8")
+
+    assert '"--authorization"' in script
+    assert '"--max-steps"' in script
+    assert 'runtime_args+=(--max-steps "${max_steps}")' in script
+    assert "sudo -n docker" not in script
+    assert "非交互 ACT 启动需要 jetson16 直接访问 Docker" in script
+    assert "docker group" in script

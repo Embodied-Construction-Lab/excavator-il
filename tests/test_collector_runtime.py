@@ -9,7 +9,7 @@ from excavator_il.collector.config import (
     SerialConfig,
 )
 from excavator_il.collector.core import CollectorCore
-from excavator_il.collector.preview import LatestJpegFrame
+from excavator_il.collector.preview import LatestJpegFrame, LatestTelemetryFrame
 from excavator_il.collector.recorder import EpisodeRecorder, EpisodeStart
 from excavator_il.collector.runtime import CollectorRuntime
 from excavator_il.joystick_protocol import (
@@ -17,6 +17,7 @@ from excavator_il.joystick_protocol import (
     JoystickPacket,
     encode_joystick_packet,
 )
+from excavator_il.stm32_protocol import STM32_TELEMETRY_FIELDS
 
 
 class _Serial:
@@ -155,3 +156,51 @@ def test_runtime_rejects_unexpected_pc_without_touching_serial(tmp_path):
 
     assert json.loads(ack)["reason"] == "source_not_allowed"
     assert serial.writes == []
+
+
+def test_runtime_publishes_valid_stm32_telemetry_for_read_only_ui(tmp_path):
+    recorder = EpisodeRecorder(tmp_path)
+    core = CollectorCore(
+        recorder=recorder,
+        expected_device_ids=("left-guid", "right-guid"),
+        mapping_id="dual_stick.v1",
+        calibration_id="raw.v1",
+        deadzone=0.15,
+    )
+    latest = LatestTelemetryFrame()
+    runtime = CollectorRuntime(
+        core=core,
+        recorder=recorder,
+        serial_port=_Serial(),
+        camera=_Camera(),
+        allowed_pc_host="192.168.50.1",
+        joystick_timeout_ms=150,
+        telemetry_preview=latest,
+    )
+    header = ",".join(STM32_TELEMETRY_FIELDS).encode("ascii")
+    values = {field: "0" for field in STM32_TELEMETRY_FIELDS}
+    values.update(
+        schema_version="stm32_control_telemetry.v2",
+        control_seq="12",
+        sensor_seq="6",
+        sensor_is_new="1",
+        boom_pos_mm="101.5",
+        stick_pos_mm="202.5",
+        bucket_pos_mm="303.5",
+        boom_angle_deg="11.0",
+        arm_angle_deg="22.0",
+        bucket_angle_deg="33.0",
+        swing_angle_deg="-4.0",
+        rs485_ok="1",
+        dwj_ok="1",
+        imu_ok="1",
+    )
+    row = ",".join(values[field] for field in STM32_TELEMETRY_FIELDS).encode("ascii")
+
+    runtime.accept_stm32(header, receive_monotonic_ns=100, receive_wall_ns=200)
+    runtime.accept_stm32(row, receive_monotonic_ns=300, receive_wall_ns=400)
+
+    frame = latest.snapshot()
+    assert frame is not None
+    assert frame.receive_monotonic_ns == 300
+    assert frame.values["boom_pos_mm"] == 101.5

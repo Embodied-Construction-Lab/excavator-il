@@ -12,10 +12,12 @@ def test_collection_ui_config_is_local_only_and_resolves_guided_config(tmp_path)
             {
                 "schema_version": "excavator_collection_ui_config.v1",
                 "guided_config": "guided.json",
+                "hybrid_mission_config": "hybrid.json",
                 "server": {"host": "127.0.0.1", "port": 8088},
                 "camera_preview_url": (
                     "http://192.168.50.2:18092/camera/front.mjpg"
                 ),
+                "telemetry_url": "http://192.168.50.2:18092/telemetry/latest.json",
                 "visualization_url": "",
             }
         ),
@@ -25,9 +27,11 @@ def test_collection_ui_config_is_local_only_and_resolves_guided_config(tmp_path)
     config = load_collection_ui_config(path)
 
     assert config.guided_config == tmp_path / "guided.json"
+    assert config.hybrid_mission_config == tmp_path / "hybrid.json"
     assert config.host == "127.0.0.1"
     assert config.port == 8088
     assert config.camera_preview_url.endswith("/camera/front.mjpg")
+    assert config.telemetry_url.endswith("/telemetry/latest.json")
     assert config.visualization_url == ""
 
 
@@ -42,6 +46,7 @@ def test_collection_ui_config_rejects_non_loopback_server(tmp_path):
                 "camera_preview_url": (
                     "http://192.168.50.2:18092/camera/front.mjpg"
                 ),
+                "telemetry_url": "http://192.168.50.2:18092/telemetry/latest.json",
                 "visualization_url": "",
             }
         ),

@@ -68,7 +68,7 @@ excavator-il list-joysticks
 `config/collection.orin.json`。PC 配置还必须为每个手柄写入带 USB 序列号的绝对
 `/dev/input/by-id/*-event-joystick` 路径；同型号设备 GUID 可以相同，但路径必须不同并固定左右槽。
 PC 上 Pygame 实际加载的 SDL 必须为 2.24 或更新版本。
-`teleop.pc.json` 的 `startup_gate` 默认要求四个 XY 在 `±0.15` 内且 deadman 释放，连续稳定
+`teleop.pc.json` 的 `startup_gate` 默认要求六个 X/Y/Z 在 `±0.15` 内且 deadman 释放，连续稳定
 10 个 20 Hz 样本后才创建 UDP socket；5 秒仍不满足时失败关闭。该门只决定何时允许首包，
 不修改、不取反或缩放专家动作。
 同时核对 PC/Orin IP、串口、相机设备和 provenance 字段。
@@ -83,13 +83,13 @@ excavator-il diagnose-joysticks --config config/teleop.pc.json
 ```
 
 该命令只读取 Pygame 手柄事件，不创建 socket、不访问 Orin/STM32。按终端提示依次保持中位、
-移动 `X1/Y1/X2/Y2` 到两个端点并回中，再在 6 秒窗口内只按放计划作为 deadman 的按钮 3 次。
-Z1/Z2 不参与权威动作映射，因此不采样、不配置物理轴、不作为通过条件。PC 在线包仍保留这两个
-字段但固定为零，Collector 在 STM32 串口边界再次清零，防止触发固件的左右行走输出。四个 XY
-不取反、不缩放，并保持 `[boom,stick,bucket,swing]=[Y2,Y1,X2,X1]`。最终必须满足：
+移动 `X1/Y1/Z1/X2/Y2/Z2` 到两个端点并回中，再在 6 秒窗口内只按放计划作为 deadman 的按钮
+3 次。Z1/Z2 不参与权威动作映射，只在 Recorder 外用于左右履带；正式记录期间 Collector 会在
+STM32 串口边界清零。四个 XY 不取反、不缩放，并保持
+`[boom,stick,bucket,swing]=[Y2,Y1,X2,X1]`。最终必须满足：
 
-- 四个 XY 轴均为 `PASS`，且每段只检测到预期手柄上的一个大幅活动轴；
-- `detected_xy_indices` 与 `configured_xy_indices` 完全一致；
+- 六个 X/Y/Z 轴均为 `PASS`，且每段只检测到预期手柄上的一个大幅活动轴；
+- `detected_axis_indices` 与 `configured_axis_indices` 完全一致；
 - `detected_deadman` 与 `configured_deadman` 完全一致；
 - `matches_config=True`，进程退出码为 0。
 
@@ -243,7 +243,8 @@ python scripts/collect_guided_episode.py
 `RL定位/l`、`人工预定位/y` 或 `直接采集/n`：
 
 - `人工预定位/y`：Collector 先运行一个不创建 Episode 的 teleop。按住 deadman 用双杆调整到 RL
-  Follow 的交接位姿附近；调整完成后双杆回中、松开 deadman，再输入 `完成/c`。脚本确认释放后
+  Follow 的交接位姿附近；X/Y 调整工作装置，Z1/Z2 调整左右履带。完成后六轴全部回中、松开
+  deadman，再输入 `完成/c`。脚本确认释放后
   停止该 teleop，预定位过程不落盘、不占 Episode 编号；
 - `RL定位/l`：脚本启动配置中指定的唯一 Orin RL Runtime，调用 AiryLidar live
   `Plan DIG → Follow`，Follow 成功并确认终态归零后安全退出 RL Runtime、等待串口释放，再启动
@@ -283,8 +284,8 @@ velocity zero → 向本轮脚本启动的精确 RL PID 发送 `SIGTERM` → 等
 3. 创建正式 Episode，使 Recorder 进入待命，再启动新的 teleop；teleop 先通过 0.5 秒本地手柄中位
    稳定门，然后确认 ACK 已接受、无拒绝且 deadman 初始释放；稳定门通过前不创建 UDP socket；
 4. Recorder、teleop 和 ACK 门禁全部就绪后才提示等待 deadman；按下后终端显示“记录已开始”，
-   此时再操纵双杆 XY；
-5. 双杆回中并松开 deadman 后，先关闭原始流并把 Episode 原子标记为 `pending_review`，再提示
+   此时再操纵双杆 XY；Z1/Z2 在 Recorder 激活期间由 Collector 强制为零；
+5. 六轴全部回中并松开 deadman 后，先关闭原始流并把 Episode 原子标记为 `pending_review`，再提示
    输入 `成功/s`、`失败/f` 或 `重录/r`。因此人工分类耗时不会产生尾部 `action_stale`；脚本
    不显示或限制采集时长。`重录`仅删除本轮刚封存的 Episode，随后等待下一次 deadman，并复用
    同一个 Episode 编号；异常或人工 `Ctrl+C` 中止不会删除已产生的动作证据；
@@ -303,7 +304,8 @@ Collector 或 teleop 的本地日志保存在 `logs/`，该目录不进入 Git�
 ### 3.2 PC 本地采集 UI
 
 UI 是终端引导脚本的本地浏览器 Adapter，不是另一套采集实现。它调用同一个
-`GuidedCollectionSupervisor → run_guided_episode()`，所以 RL/Collector/teleop 串口互斥、deadman
+`GuidedCollectionSupervisor`，再按模式进入 `run_guided_episode()` 或 `run_standalone_teleop()`，
+所以 RL/Collector/teleop 串口互斥、deadman
 门禁、Episode 封存、重录、校验和异常归零语义与 3.1 完全一致。服务强制只监听 loopback，浏览器
 之外的页面没有 UI 请求头时不能触发状态改变。
 
@@ -322,9 +324,26 @@ python scripts/run_collection_ui.py
 python scripts/run_collection_ui.py --no-browser
 ```
 
-访问 `http://127.0.0.1:8088/`，选择 `RL 到目标点`、`手工预定位` 或 `直接采集` 后点击开始。RL
-模式仍要求先按 3.1 启动 AiryLidar Operator。手工模式完成预定位后必须双杆回中、释放 deadman，
+访问 `http://127.0.0.1:8088/`，选择 `RL 到目标点`、`手工预定位`、`直接采集` 或`仅遥操作`后点击开始。RL
+模式还必须选择 `dig_01/02/03` 中的一个点；点位来自
+`AiryLidar/mission/config/excavation_demo.json`，所选坐标会写入本条 Episode 的 `dig_target_m`。
+RL 模式仍要求先按 3.1 启动 AiryLidar Operator。手工模式完成预定位后必须六轴全部回中、释放 deadman，
 再点击页面中的完成按钮。正式记录仍由 deadman 按下开始、释放结束；页面只替代终端中的结果输入。
+每条校验完成后可直接开始下一条，页面计数用于跟踪本次 UI 会话内完成数量；正式批次仍以 Orin
+数据目录中的完整 Episode 和 quality report 为最终依据。
+
+`仅遥操作`不进入 Recorder 状态，不创建 Episode，也不增加页面 Episode 计数。它只复用 Collector
+的串口/相机所有权与 PC teleop 的 deadman 门禁。按住 deadman 操纵，释放立即回零；点击“安全停止”
+后依次停止 teleop 和 Collector。相同功能的终端入口为：
+
+```bash
+cd /home/zhaoshuai/workspace_uinty/RL_prj/excavator-il
+conda activate excavator-il
+python scripts/run_guided_teleop.py
+```
+
+终端中按 `Ctrl+C` 安全退出。启动前必须停止 RL Runtime、ACT Runtime 和其他 Collector，避免
+`/dev/ttyTHS1`、相机与 STM32 命令源竞争。
 
 相机预览由 Orin Collector 进程内部提供：同一 UVC 相机帧同时交给 Recorder 和容量为 1 的只读
 JPEG 缓冲区（Recorder 未激活时只更新预览），UI 不会第二次打开 `/dev/video0`。
@@ -338,6 +357,29 @@ sudo ufw allow in on enP8p1s0 \
 ```
 
 Collector 启动前、RL 定位期间和 Collector 退出后，前视区域显示“等待 Collector”属于正常状态。
+Collector 运行时，同一只读 HTTP 服务还提供最新 STM32 遥测。UI 显示 4 个关节角（deg）和 3 个
+活塞杆伸缩量（mm），并显示接收新鲜度；它不参与训练标签，也不额外占用 `/dev/ttyTHS1`。
+
+### 3.3 RL + ACT 混合 Mission 分段验证
+
+闭环入口仍是 `python scripts/run_collection_ui.py`。开始前：
+
+1. PC 启动 AiryLidar `live_commissioning` Operator，保持地图、Plan Action 和 Orin Gateway 可用；
+2. Orin 不手工启动 `orin_state_sender.py`、Collector 或 ACT Runtime；
+3. `jetson16` 执行 `docker info` 不应要求密码；
+4. 首次逐段验收保持发动机关闭，确认每个 owner 切换后的串口释放和终态零。
+
+页面选择 DIG 点后点击“开始分段验证”，按顺序检查：
+
+- `RL 到挖点` 完成后进入 `等待 ACT 挖掘`；
+- 点击 ACT 段并输入 `ALLOW_HYBRID_MACHINE_MOTION`，默认完成 130 个 10 Hz step 后自动回零；
+- 点击“前往倾倒并倾倒”，同一 RL Runtime 先 Follow DUMP，再调用现有 `ExecuteDump`；
+- 点击“RL 返回挖点”，返回本轮选择的同一 DIG 点，完成一轮。
+
+每一段都重新建立唯一 Runtime owner，结束时执行 terminal zero，并在下一 owner 启动前确认
+`/dev/ttyTHS1` 已释放。分段全部通过后才能使用“自动执行一轮”。ACT step 上限集中在
+`config/hybrid_mission.pc.json`，不得通过页面临时随意扩大。该有界 step 规则只是当前实验的
+最小完成条件，不代表任务成功识别；真实土壤验收仍记录是否完成挖掘、是否带土和最终交接位姿。
 原生 RViz 不作为 iframe 嵌入；`config/collection_ui.pc.json.visualization_url` 仅保留未来
 Foxglove Web 三维视图入口，当前留空。
 

@@ -87,6 +87,101 @@ def test_collector_accepts_new_session_action_and_rejects_duplicate_sequence(tmp
     )] == [-0.6, 0.4, 0.2, -0.8]
 
 
+def test_collector_passes_drive_axes_only_when_episode_is_not_recording(tmp_path):
+    recorder = EpisodeRecorder(tmp_path)
+    core = CollectorCore(
+        recorder=recorder,
+        expected_device_ids=("left-guid", "right-guid"),
+        mapping_id="dual_stick.v1",
+        calibration_id="raw.v1",
+        deadzone=0.15,
+    )
+    packet = JoystickPacket(
+        session_id="teleop-only",
+        sample_seq=0,
+        pc_sample_monotonic_ns=100,
+        pc_sample_wall_ns=200,
+        axes=(-0.8, 0.4, 0.75, 0.2, -0.6, -0.65),
+        controllers=(
+            ControllerIdentity(1, "left-guid", "left", (True,)),
+            ControllerIdentity(2, "right-guid", "right", (False,)),
+        ),
+        deadman_pressed=True,
+        mapping_id="dual_stick.v1",
+        calibration_id="raw.v1",
+    )
+
+    decision = core.accept_joystick(
+        encode_joystick_packet(packet),
+        source_addr="192.168.50.1:40000",
+        receive_monotonic_ns=1_000_000_000,
+        receive_wall_ns=2_000_000_000,
+    )
+
+    assert decision.accepted is True
+    serial_command = json.loads(decision.serial_payload.decode("ascii"))
+    assert [serial_command[name] for name in ("Z1", "Z2")] == [0.75, -0.65]
+
+
+def test_collector_keeps_drive_axes_disabled_after_episode_has_started(tmp_path):
+    recorder = EpisodeRecorder(tmp_path)
+    core = CollectorCore(
+        recorder=recorder,
+        expected_device_ids=("left-guid", "right-guid"),
+        mapping_id="dual_stick.v1",
+        calibration_id="raw.v1",
+        deadzone=0.15,
+    )
+    recorder.start(
+        EpisodeStart(
+            task="ExecuteDig",
+            operator_id="operator_01",
+            dig_target_m=(0.8, 0.1, -0.2),
+            material_id="dry_soil_01",
+            provenance={},
+            camera_front={"device_id": "/dev/video0"},
+        ),
+        start_wall_ns=1,
+        start_monotonic_ns=2,
+    )
+
+    def accept(sample_seq):
+        packet = JoystickPacket(
+            session_id="collection",
+            sample_seq=sample_seq,
+            pc_sample_monotonic_ns=100 + sample_seq,
+            pc_sample_wall_ns=200 + sample_seq,
+            axes=(0.0, 0.0, 0.75, 0.0, 0.0, -0.65),
+            controllers=(
+                ControllerIdentity(1, "left-guid", "left", (True,)),
+                ControllerIdentity(2, "right-guid", "right", (False,)),
+            ),
+            deadman_pressed=True,
+            mapping_id="dual_stick.v1",
+            calibration_id="raw.v1",
+        )
+        return core.accept_joystick(
+            encode_joystick_packet(packet),
+            source_addr="192.168.50.1:40000",
+            receive_monotonic_ns=1_000_000_000 + sample_seq,
+            receive_wall_ns=2_000_000_000 + sample_seq,
+        )
+
+    during_recording = accept(0)
+    recorder.stop(
+        success=True,
+        failure_reason="",
+        intervention=False,
+        end_wall_ns=3,
+        end_monotonic_ns=4,
+    )
+    after_seal = accept(1)
+
+    for decision in (during_recording, after_seal):
+        serial_command = json.loads(decision.serial_payload.decode("ascii"))
+        assert [serial_command[name] for name in ("Z1", "Z2")] == [0.0, 0.0]
+
+
 def test_collector_records_restart_safe_stm32_raw_and_control_rows(tmp_path):
     recorder = EpisodeRecorder(tmp_path)
     episode = recorder.start(
