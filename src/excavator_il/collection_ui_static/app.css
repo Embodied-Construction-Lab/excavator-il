@@ -138,6 +138,11 @@ h1 { margin: 0; font-size: clamp(28px, 3vw, 43px); letter-spacing: -.045em; }
 .episode-path { max-width: 60%; overflow: hidden; color: var(--green); font: 11px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
 pre { min-height: 110px; max-height: 210px; overflow: auto; margin: 0; padding: 16px; border-radius: 13px; color: #dce8e2; background: #10211c; font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
 .error-banner { margin-top: 10px; padding: 11px 13px; border-radius: 10px; color: #8d221f; background: #f7dfdc; font-size: 12px; }
+.operator-control { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 10px; margin-bottom: 14px; padding: 12px 13px; border: 1px solid #c8d7cd; border-radius: 13px; background: #edf4ee; }
+.operator-control small, .operator-control strong, .operator-control span { display: block; }
+.operator-control small { color: var(--green); font-size: 9px; font-weight: 900; letter-spacing: .12em; }
+.operator-control strong { margin-top: 3px; font-size: 13px; }
+.operator-control span { margin-top: 3px; color: var(--muted); font-size: 10px; }
 .hybrid-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; overflow: hidden; margin-bottom: 14px; border: 1px solid var(--line); border-radius: 13px; background: var(--line); }
 .hybrid-summary > div { padding: 11px 13px; background: #fafbf8; }
 .hybrid-summary small { display: block; color: var(--muted); font-size: 10px; }
@@ -146,7 +151,11 @@ pre { min-height: 110px; max-height: 210px; overflow: auto; margin: 0; padding: 
 .hybrid-flow span { padding: 11px 10px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); background: #f7f9f5; font-size: 11px; font-weight: 800; text-align: center; }
 .hybrid-flow span.active { color: white; border-color: var(--green); background: var(--green); }
 .hybrid-flow span.done { color: var(--green-dark); border-color: #aac7b5; background: #e4f0e8; }
-.hybrid-actions { display: grid; grid-template-columns: 1.3fr 1.3fr 1fr auto; gap: 10px; margin-bottom: 9px; }
+.hybrid-actions { display: grid; grid-template-columns: 1.15fr auto 1.25fr 1fr auto; gap: 10px; margin-bottom: 9px; }
+.cycle-picker { display: flex; align-items: center; gap: 9px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 11px; background: #f7f9f5; }
+.cycle-picker span { color: var(--muted); font-size: 10px; font-weight: 800; white-space: nowrap; }
+.cycle-picker select { min-width: 68px; border: 0; outline: 0; color: var(--ink); background: transparent; font-weight: 900; }
+.cycle-picker:has(select:disabled) { opacity: .45; }
 .hybrid-panel pre { margin-top: 14px; }
 .toast { position: fixed; right: 24px; bottom: 24px; max-width: 380px; padding: 12px 16px; border-radius: 12px; color: white; background: #18362d; box-shadow: var(--shadow); opacity: 0; pointer-events: none; transform: translateY(10px); transition: .2s ease; }
 .toast.visible { opacity: 1; transform: translateY(0); }
@@ -165,7 +174,7 @@ pre { min-height: 110px; max-height: 210px; overflow: auto; margin: 0; padding: 
   .mode-card { min-height: 112px; }
   .machine-strip { grid-template-columns: repeat(2, 1fr); }
   .target-grid, .telemetry-groups { grid-template-columns: 1fr; }
-  .hybrid-summary, .hybrid-flow, .hybrid-actions { grid-template-columns: 1fr; }
+  .hybrid-summary, .hybrid-flow, .hybrid-actions, .operator-control { grid-template-columns: 1fr; }
   .section-heading { display: block; }
   .section-heading p { margin-top: 8px; text-align: left; }
 }

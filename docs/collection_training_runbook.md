@@ -315,8 +315,12 @@ PC 安装并启动：
 cd /home/zhaoshuai/workspace_uinty/RL_prj/excavator-il
 conda activate excavator-il
 python -m pip install -e '.[teleop,training,test,ui]'
+python scripts/check_site_config.py
 python scripts/run_collection_ui.py
 ```
+
+现场配置检查是只读的；应输出当前 `orin_host`、`pc_host`、Joystick/预览/Machine State 端口和
+`/dev/ttyTHS1`。任何不一致都应先修正权威 JSON，再启动 UI，不要在命令行临时覆盖成另一套拓扑。
 
 若不希望自动打开浏览器：
 
@@ -342,8 +346,14 @@ conda activate excavator-il
 python scripts/run_guided_teleop.py
 ```
 
-终端中按 `Ctrl+C` 安全退出。启动前必须停止 RL Runtime、ACT Runtime 和其他 Collector，避免
-`/dev/ttyTHS1`、相机与 STM32 命令源竞争。
+终端中按 `Ctrl+C` 安全退出。新采集、仅遥操作或混合 Mission 开始申请串口前，会自动回收完整
+argv 精确匹配当前配置的遗留 Collector/`orin_state_sender.py`，并等待 `/dev/ttyTHS1` 释放。未知
+owner 或独立 ACT Runtime 不会被盲目 `pkill`，仍应先安全停止，避免相机与 STM32 命令源竞争。
+
+若同时启动 AiryLidar live Operator/RViz，Collector 会复用同一条已解析的 STM32 telemetry，按
+`config/collection.orin.json.machine_state_udp` 向 PC `18081/UDP` 输出 `machine_state_v1`；PC
+状态桥据此继续发布 `/joint_states`。不要为 RViz 另启 `orin_state_sender.py`，它会与 Collector
+争抢 `/dev/ttyTHS1`。该只读输出在采集和仅遥操作两种 Collector 工作流中均生效。
 
 相机预览由 Orin Collector 进程内部提供：同一 UVC 相机帧同时交给 Recorder 和容量为 1 的只读
 JPEG 缓冲区（Recorder 未激活时只更新预览），UI 不会第二次打开 `/dev/video0`。
@@ -364,7 +374,8 @@ Collector 运行时，同一只读 HTTP 服务还提供最新 STM32 遥测。UI 
 
 闭环入口仍是 `python scripts/run_collection_ui.py`。开始前：
 
-1. PC 启动 AiryLidar `live_commissioning` Operator，保持地图、Plan Action 和 Orin Gateway 可用；
+1. 如需提前录屏，可在 Web UI 点击“启动 RL + RViz”并等待 AiryLidar `live_commissioning` Operator 就绪；直接启动分段/自动 Mission 时，后端也会在 Operator 未就绪时先自动启动。也可沿用
+   已经手工启动的 Operator，但两种方式只能选择一种；
 2. Orin 不手工启动 `orin_state_sender.py`、Collector 或 ACT Runtime；
 3. `jetson16` 执行 `docker info` 不应要求密码；
 4. 首次逐段验收保持发动机关闭，确认每个 owner 切换后的串口释放和终态零。
@@ -382,7 +393,11 @@ Collector 运行时，同一只读 HTTP 服务还提供最新 STM32 遥测。UI 
 整个分段流程由一个后台 worker 保存预热/热待命状态，但任何时刻仍只有一个硬件 owner。RL→ACT
 交接必须先执行 terminal zero 并确认串口释放；ACT 预热本身不持有硬件。倾倒→返回不切换 owner，
 RL Runtime 保持零动作待命；等待阶段点击“安全停止”会停止当前 Runtime 并释放串口。分段全部通过
-后才能使用“自动执行一轮”。ACT step 上限集中在
+后才能使用“自动装车”。自动模式可选择 1～5 铲；页面选中的 DIG 点是第一铲，后续按 Mission
+配置中的 DIG 顺序循环。例如从 `dig_02` 开始的 5 铲依次为
+`dig_02 → dig_03 → dig_01 → dig_02 → dig_03`。RL 返回阶段直接去下一铲的交接位姿，并在途中
+预热下一铲 ACT，以减少静止等待；最后一铲仍返回该铲使用的挖点。任一阶段失败即停止，不会跳过
+故障继续下一铲。ACT step 上限集中在
 `config/hybrid_mission.pc.json`，不得通过页面临时随意扩大。该有界 step 规则只是当前实验的
 最小完成条件，不代表任务成功识别；真实土壤验收仍记录是否完成挖掘、是否带土和最终交接位姿。
 原生 RViz 不作为 iframe 嵌入；`config/collection_ui.pc.json.visualization_url` 仅保留未来

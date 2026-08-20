@@ -112,6 +112,48 @@ def test_hybrid_system_adapter_prewarms_act_and_reuses_rl_for_dump_return(
     assert any("hybrid_" in command and "touch" in command for command in remote_commands)
 
 
+def test_act_prewarm_reclaims_stale_hardware_gated_runtime_before_spawn(
+    tmp_path, monkeypatch
+):
+    events = []
+
+    class _PrewarmProcess:
+        returncode = None
+
+        def __init__(self, _argv, **_kwargs):
+            events.append("spawn")
+
+        def wait_for(self, predicate, _timeout_s, *, after_index=-1):
+            del after_index
+            lines = (
+                "HYBRID_ACT_PID=4242",
+                "ACT 预热等待模式：CUDA 预热期间不打开串口和相机。",
+            )
+            line = next(candidate for candidate in lines if predicate(candidate))
+            return lines.index(line), line
+
+    operations = SystemHybridMissionOperations(
+        _config(tmp_path),
+        guided_config=_guided(tmp_path),
+        rl_operations=_RlOperations(),
+        line_process_factory=_PrewarmProcess,
+        output=lambda _message: None,
+    )
+
+    def run_remote(command):
+        events.append(("remote", command))
+        return "reclaimed\n"
+
+    monkeypatch.setattr(operations, "_run_remote", run_remote)
+
+    operations._start_act_prewarm(130)
+
+    assert events[0][0] == "remote"
+    assert "--hardware-start-gate" in events[0][1]
+    assert "/dev/ttyTHS1" in events[0][1]
+    assert events[1] == "spawn"
+
+
 def test_hybrid_system_adapter_releases_rl_and_prewarm_after_follow_failure(
     tmp_path, monkeypatch
 ):

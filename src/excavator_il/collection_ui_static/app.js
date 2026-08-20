@@ -26,7 +26,7 @@ const hybridStageLabels = {
   awaiting_rl_to_dump: "等待前往倾倒点",
   running_rl_to_dump_and_dump: "RL 到倾倒点并倾倒",
   awaiting_rl_return: "等待返回挖点", running_rl_return_to_dig: "RL 返回挖点",
-  completed: "一轮完成", stopping: "安全停止中", failed: "失败", cancelled: "已取消"
+  completed: "装车任务完成", stopping: "安全停止中", failed: "失败", cancelled: "已取消"
 };
 const hybridSegments = ["rl_to_dig", "act_dig", "rl_to_dump_and_dump", "rl_return_to_dig"];
 
@@ -36,6 +36,7 @@ const state = {
   config: null,
   snapshot: null,
   hybridSnapshot: null,
+  operatorSnapshot: null,
   cameraRetryTimer: null,
   cameraAttempt: 0
 };
@@ -74,6 +75,9 @@ function renderConfig(config) {
   if (config.hybrid_mission_enabled) {
     $("hybrid-panel").classList.remove("hidden");
     $("hybrid-act-steps").textContent = String(config.hybrid_act_max_steps);
+  }
+  if (config.operator_control_enabled) {
+    $("operator-control").classList.remove("hidden");
   }
   const image = $("camera-preview");
   image.addEventListener("load", () => {
@@ -205,7 +209,8 @@ function renderHybridSnapshot(snapshot) {
   const stage = snapshot.stage || "idle";
   $("hybrid-stage").textContent = hybridStageLabels[stage] || stage;
   $("hybrid-target").textContent = snapshot.dig_target_id || state.selectedTargetId || "—";
-  $("hybrid-cycles").textContent = String(snapshot.completed_cycles || 0);
+  const requestedCycles = Number(snapshot.requested_cycles || 1);
+  $("hybrid-cycles").textContent = `${snapshot.run_completed_cycles || 0} / ${requestedCycles} 铲`;
   const logs = Array.isArray(snapshot.logs) ? snapshot.logs : [];
   $("hybrid-log").textContent = logs.length ? logs.join("\n") : "等待混合 Mission…";
   $("hybrid-log").scrollTop = $("hybrid-log").scrollHeight;
@@ -224,6 +229,15 @@ function renderHybridSnapshot(snapshot) {
     : nextSegment === "rl_to_dump_and_dump"
       ? "前往倾倒并倾倒"
       : nextSegment === "rl_return_to_dig" ? "RL 返回挖点" : "执行下一段";
+  updateOwnershipControls();
+}
+
+function renderOperatorSnapshot(snapshot) {
+  state.operatorSnapshot = snapshot;
+  const labels = {
+    stopped: "未启动", starting: "启动中", ready: "已就绪", failed: "启动失败"
+  };
+  $("operator-stage").textContent = labels[snapshot.stage] || snapshot.stage;
   updateOwnershipControls();
 }
 
@@ -246,8 +260,15 @@ function updateOwnershipControls() {
   if (!state.config?.hybrid_mission_enabled) return;
   $("hybrid-segmented-start").disabled = collectionActive || hybridActive;
   $("hybrid-auto-start").disabled = collectionActive || hybridActive;
+  $("hybrid-cycle-count").disabled = collectionActive || hybridActive;
   $("hybrid-advance").disabled = collectionActive || !hybridStage.startsWith("awaiting_");
   $("hybrid-stop").disabled = !hybridActive || hybridStage === "stopping";
+  if (state.config.operator_control_enabled) {
+    const operatorStage = state.operatorSnapshot?.stage || "stopped";
+    const operatorActive = operatorStage === "starting" || operatorStage === "ready";
+    $("operator-start").disabled = collectionActive || hybridActive || operatorActive;
+    $("operator-stop").disabled = collectionActive || hybridActive || operatorStage === "stopped";
+  }
 }
 
 function renderProgress(stage) {
@@ -287,12 +308,15 @@ function bindActions() {
   $("hybrid-segmented-start").addEventListener("click", () => commandHybrid("/api/hybrid/start", {
     dig_target_id: state.selectedTargetId,
     automatic: false,
+    cycle_count: 1,
     motion_authorization: null
   }));
+  $("hybrid-cycle-count").addEventListener("change", renderHybridCycleButton);
   $("hybrid-auto-start").addEventListener("click", () => {
     commandHybrid("/api/hybrid/start", {
       dig_target_id: state.selectedTargetId,
       automatic: true,
+      cycle_count: selectedHybridCycleCount(),
       motion_authorization: hybridMotionAuthorization()
     });
   });
@@ -304,10 +328,21 @@ function bindActions() {
     commandHybrid("/api/hybrid/advance", {motion_authorization: authorization});
   });
   $("hybrid-stop").addEventListener("click", () => commandHybrid("/api/hybrid/stop"));
+  $("operator-start").addEventListener("click", () => commandOperator("/api/operator/start"));
+  $("operator-stop").addEventListener("click", () => commandOperator("/api/operator/stop"));
 }
 
 function hybridMotionAuthorization() {
   return HYBRID_MOTION_AUTHORIZATION;
+}
+
+function selectedHybridCycleCount() {
+  const value = Number.parseInt($("hybrid-cycle-count")?.value || "4", 10);
+  return Number.isInteger(value) && value >= 1 && value <= 5 ? value : 4;
+}
+
+function renderHybridCycleButton() {
+  $("hybrid-auto-start").textContent = `自动装车 ${selectedHybridCycleCount()} 铲`;
 }
 
 async function commandHybrid(path, body) {
@@ -319,6 +354,15 @@ async function commandHybrid(path, body) {
   }
   try { renderHybridSnapshot(await api(path, options)); }
   catch (error) { toast(error.message, true); }
+}
+
+async function commandOperator(path) {
+  try {
+    renderOperatorSnapshot(await api(path, {method: "POST", headers: UI_HEADER}));
+  } catch (error) {
+    toast(error.message, true);
+    await refreshOperatorStatus();
+  }
 }
 
 function setMetric(id, value, digits = 1) {
@@ -374,14 +418,23 @@ async function refreshHybridStatus() {
   catch (error) { toast(`混合 Mission 状态失败：${error.message}`, true); }
 }
 
+async function refreshOperatorStatus() {
+  if (!state.config?.operator_control_enabled) return;
+  try { renderOperatorSnapshot(await api("/api/operator/status")); }
+  catch (error) { toast(`RL/RViz 状态失败：${error.message}`, true); }
+}
+
 async function boot() {
   bindActions();
+  renderHybridCycleButton();
   try {
     renderConfig(await api("/api/config"));
     await refreshStatus();
     window.setInterval(refreshStatus, 500);
     await refreshHybridStatus();
     window.setInterval(refreshHybridStatus, 500);
+    await refreshOperatorStatus();
+    window.setInterval(refreshOperatorStatus, 1000);
     await refreshTelemetry();
     window.setInterval(refreshTelemetry, 500);
   } catch (error) {

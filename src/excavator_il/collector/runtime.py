@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from typing import Any
 
 from .core import CollectorCore, CollectorDecision
+from .machine_state import MachineStateUdpPublisher
 from .preview import LatestJpegFrame, LatestTelemetryFrame
 from .recorder import EpisodeRecorder
+
+
+LOGGER = logging.getLogger("excavator_il.collector")
 
 
 class CollectorRuntime:
@@ -24,6 +29,7 @@ class CollectorRuntime:
         joystick_timeout_ms: int,
         camera_preview: LatestJpegFrame | None = None,
         telemetry_preview: LatestTelemetryFrame | None = None,
+        machine_state_publisher: MachineStateUdpPublisher | None = None,
     ) -> None:
         self._core = core
         self._recorder = recorder
@@ -36,6 +42,8 @@ class CollectorRuntime:
         self._serial_write_lock = threading.Lock()
         self._camera_preview = camera_preview
         self._telemetry_preview = telemetry_preview
+        self._machine_state_publisher = machine_state_publisher
+        self._machine_state_send_failed = False
 
     @staticmethod
     def _rejection_ack(*, receive_monotonic_ns: int, reason: str) -> bytes:
@@ -131,6 +139,19 @@ class CollectorRuntime:
                 values,
                 receive_monotonic_ns=receive_monotonic_ns,
             )
+        if frame is not None and self._machine_state_publisher is not None:
+            try:
+                self._machine_state_publisher.publish(
+                    frame, receive_wall_ns=receive_wall_ns
+                )
+            except OSError as exc:
+                if not self._machine_state_send_failed:
+                    LOGGER.warning("AiryLidar machine-state UDP unavailable: %s", exc)
+                self._machine_state_send_failed = True
+            else:
+                if self._machine_state_send_failed:
+                    LOGGER.info("AiryLidar machine-state UDP recovered")
+                self._machine_state_send_failed = False
 
     def capture_once(self) -> str | None:
         frame = self._camera.read_encoded()

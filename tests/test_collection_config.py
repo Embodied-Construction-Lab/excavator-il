@@ -36,6 +36,11 @@ def test_collection_config_loads_single_authoritative_hardware_contract(tmp_path
                     "bind_host": "0.0.0.0",
                     "port": 18092,
                 },
+                "machine_state_udp": {
+                    "host": "192.168.0.220",
+                    "port": 18081,
+                    "machine_id": "scale_excavator_v1",
+                },
                 "episode_control_socket": "/run/user/1000/excavator-il.sock",
                 "episode_defaults": {
                     "dig_target_m": [0.8, 0.1, -0.2],
@@ -55,6 +60,9 @@ def test_collection_config_loads_single_authoritative_hardware_contract(tmp_path
     assert config.camera.nominal_fps == 30
     assert config.camera_preview.bind_host == "0.0.0.0"
     assert config.camera_preview.port == 18092
+    assert config.machine_state_udp.host == "192.168.0.220"
+    assert config.machine_state_udp.port == 18081
+    assert config.machine_state_udp.machine_id == "scale_excavator_v1"
     assert config.episode_defaults.dig_target_m == (0.8, 0.1, -0.2)
 
 

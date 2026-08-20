@@ -15,9 +15,9 @@ from .act_runtime_contract import REQUIRED_MOTION_AUTHORIZATION
 from .guided_episode import (
     GuidedEpisodeConfig,
     SystemGuidedEpisodeOperations,
-    _LineProcess,
 )
 from .hybrid_mission import HybridMissionConfig
+from .remote_runtime import LineProcess, SshRuntimeHost
 
 
 class SystemHybridMissionOperations:
@@ -29,12 +29,15 @@ class SystemHybridMissionOperations:
         *,
         guided_config: GuidedEpisodeConfig | None = None,
         rl_operations: SystemGuidedEpisodeOperations | None = None,
-        line_process_factory: Callable[..., Any] = _LineProcess,
+        line_process_factory: Callable[..., Any] = LineProcess,
         output: Callable[[str], None] = print,
         timestamp: str | None = None,
     ) -> None:
         self._config = config
         self._guided = guided_config or GuidedEpisodeConfig.load(config.guided_config)
+        self._remote_host = SshRuntimeHost(
+            self._guided.orin_ssh_host, run_command=subprocess.run
+        )
         self._output = output
         self._timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
         self._rl = rl_operations or SystemGuidedEpisodeOperations(
@@ -86,6 +89,11 @@ class SystemHybridMissionOperations:
         finally:
             self._stop_rl_runtime()
 
+    def prewarm_next_act(self, max_steps: int) -> None:
+        """Load the next ACT policy while RL still owns the physical interface."""
+
+        self._start_act_prewarm(max_steps)
+
     def _start_rl_runtime(self) -> None:
         if self._rl_runtime_active:
             return
@@ -103,6 +111,7 @@ class SystemHybridMissionOperations:
     def _start_act_prewarm(self, max_steps: int) -> None:
         if self._act_process is not None:
             raise RuntimeError("an ACT prewarm is already active")
+        self._reclaim_stale_act_prewarm()
         remote_command = self._act_remote_command(
             max_steps=max_steps,
             hardware_start_gate=self._act_gate_name,
@@ -131,6 +140,107 @@ class SystemHybridMissionOperations:
         except BaseException:
             self._stop_act_and_wait_for_serial(require_serial_release=False)
             raise
+
+    def _reclaim_stale_act_prewarm(self) -> None:
+        """Stop an abandoned hardware-gated ACT process before a new Mission.
+
+        A prewarm has no serial or camera ownership while it waits for its
+        one-shot gate.  If the PC UI exits in that state, the container can
+        remain alive and make every later prewarm reject itself as a competing
+        ACT Runtime.  Reclaim only the exact hybrid gate argv shape, and refuse
+        to signal it if it has already acquired either physical device.
+        """
+
+        program = r'''import os
+import pathlib
+import signal
+import subprocess
+import sys
+import time
+
+serial, camera = sys.argv[1:3]
+timeout_s = float(sys.argv[3])
+
+def process_argv(pid):
+    try:
+        raw = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes()
+    except (FileNotFoundError, PermissionError):
+        return ()
+    return tuple(os.fsdecode(value) for value in raw.split(b"\0") if value)
+
+def hardware_gate(argv):
+    if "act-runtime" not in argv:
+        return None
+    try:
+        index = argv.index("--hardware-start-gate")
+        gate = argv[index + 1]
+    except (ValueError, IndexError):
+        return None
+    if not gate.startswith("/opt/act-control/hybrid_") or not gate.endswith(".start"):
+        return None
+    return gate
+
+def candidates():
+    found = []
+    for entry in pathlib.Path("/proc").iterdir():
+        if entry.name.isdigit() and hardware_gate(process_argv(int(entry.name))):
+            found.append(int(entry.name))
+    return tuple(found)
+
+def owners(device):
+    result = subprocess.run(
+        ["fuser", device],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    return {int(value) for value in result.stdout.split()}
+
+matched = candidates()
+if not matched:
+    print("idle")
+    raise SystemExit(0)
+
+physical_owners = owners(serial) | owners(camera)
+unsafe = physical_owners.intersection(matched)
+if unsafe:
+    raise SystemExit(
+        "hardware-gated ACT Runtime already owns a physical device; "
+        f"refusing stale reclaim: pids={sorted(unsafe)}"
+    )
+
+for pid in sorted(matched, reverse=True):
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+deadline = time.monotonic() + timeout_s
+while time.monotonic() < deadline:
+    if not candidates():
+        print("reclaimed")
+        raise SystemExit(0)
+    time.sleep(0.1)
+
+raise SystemExit(
+    "stale hardware-gated ACT Runtime did not exit: "
+    + ",".join(str(pid) for pid in candidates())
+)
+'''
+        command = shlex.join(
+            [
+                "/usr/bin/python3",
+                "-c",
+                program,
+                str(self._guided.rl_serial_port),
+                "/dev/video0",
+                str(self._guided.rl_serial_release_timeout_s),
+            ]
+        )
+        result = self._run_remote(command).strip()
+        if result == "reclaimed":
+            self._output("已回收上一轮遗留的 ACT 预热进程。")
 
     def _act_remote_command(
         self, *, max_steps: int, hardware_start_gate: str | None
@@ -231,27 +341,10 @@ class SystemHybridMissionOperations:
             raise RuntimeError("; ".join(errors))
 
     def _ssh_argv(self, command: str) -> list[str]:
-        return [
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5",
-            self._guided.orin_ssh_host,
-            command,
-        ]
+        return self._remote_host.argv(command)
 
     def _run_remote(self, command: str) -> str:
-        result = subprocess.run(
-            self._ssh_argv(command),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout).strip()
-            raise RuntimeError(f"remote command failed: {detail}")
-        return result.stdout
+        return self._remote_host.run(command)
 
     def _confirm_act_serial_release(self) -> None:
         serial = shlex.quote(str(self._guided.rl_serial_port))
@@ -277,42 +370,21 @@ class SystemHybridMissionOperations:
             process.stop(signal.SIGTERM, timeout_s=2.0)
             self._act_process = None
             raise RuntimeError("ACT Runtime PID was not observed; serial release is unknown")
-        serial = shlex.quote(str(self._guided.rl_serial_port))
-        attempts = max(4, int(self._guided.rl_serial_release_timeout_s) * 4)
-        act_identity_pattern = shlex.quote(
+        act_identity_pattern = (
             "(act-runtime|run_act_motion\\.sh.*--hardware-start-gate[ =]+"
             + re.escape(self._act_gate_name)
             + ")"
         )
-        serial_release_check = ""
-        if require_serial_release:
-            serial_release_check = f"""if fuser -s {serial}; then
-  echo "serial is still owned: {serial}" >&2
-  exit 14
-fi
-"""
-        script = f"""set -eu
-pid={remote_pid}
-if kill -0 "$pid" 2>/dev/null; then
-  tr '\\000' ' ' < "/proc/$pid/cmdline" | grep -Eq {act_identity_pattern}
-  kill -TERM "$pid"
-fi
-attempt=0
-while kill -0 "$pid" 2>/dev/null; do
-  attempt=$((attempt + 1))
-  if [ "$attempt" -ge {attempts} ]; then
-    echo "ACT Runtime did not exit after SIGTERM" >&2
-    exit 13
-  fi
-  sleep 0.25
-done
-{serial_release_check}rm -f -- {shlex.quote(str(self._act_gate_path))}
-echo released
-"""
         try:
-            output = self._run_remote(f"/bin/sh -c {shlex.quote(script)}")
-            if output.strip() != "released":
-                raise RuntimeError("ACT stop did not confirm serial release")
+            self._remote_host.stop_owned_process(
+                pid=remote_pid,
+                identity_ere=act_identity_pattern,
+                serial_path=self._guided.rl_serial_port,
+                timeout_s=self._guided.rl_serial_release_timeout_s,
+                require_serial_release=require_serial_release,
+                cleanup_paths=(self._act_gate_path,),
+                execute=self._run_remote,
+            )
             try:
                 process.wait(timeout_s=2.0)
             except Exception:

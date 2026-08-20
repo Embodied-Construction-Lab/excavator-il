@@ -5,6 +5,7 @@ import pytest
 
 import excavator_il.guided_episode as guided_episode
 from excavator_il.guided_episode import SystemGuidedEpisodeOperations
+from excavator_il.remote_runtime import LineWaitTimeout
 from excavator_il.stm32_protocol import STM32_TELEMETRY_FIELDS
 from excavator_il.zero_soak import inspect_zero_command_episode, run_zero_command_soak
 
@@ -287,7 +288,7 @@ def test_zero_soak_monitor_accepts_timeout_at_completed_deadline(
         def wait_for(self, predicate, timeout_s, after_index=-1):
             if self.sample_count == 450:
                 clock[0] = 30.0
-                raise guided_episode._LineWaitTimeout(
+                raise LineWaitTimeout(
                     "timed out waiting for teleop readiness"
                 )
             self.sample_count += 1
@@ -314,7 +315,7 @@ def test_zero_soak_monitor_rejects_timeout_before_deadline(tmp_path, monkeypatch
     class TeleopLines:
         def wait_for(self, predicate, timeout_s, after_index=-1):
             clock[0] = 1.0
-            raise guided_episode._LineWaitTimeout(
+            raise LineWaitTimeout(
                 "timed out waiting for teleop readiness"
             )
 

@@ -7,6 +7,7 @@ import webbrowser
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .airy_operator import AiryOperatorSupervisor
 from .collection_ui_app import CollectionUiMetadata, create_collection_ui_app
 from .collection_ui_config import CollectionUiConfig, load_collection_ui_config
 from .collection_ui_session import GuidedCollectionSupervisor
@@ -41,6 +42,7 @@ def build_collection_ui_runtime(
     guided_config = GuidedEpisodeConfig.load(ui_config.guided_config)
     supervisor = GuidedCollectionSupervisor(config_path=ui_config.guided_config)
     hybrid_supervisor = None
+    operator_supervisor = None
     metadata = metadata_from_guided_config(guided_config)
     if ui_config.hybrid_mission_config is not None:
         hybrid_config = HybridMissionConfig.load(ui_config.hybrid_mission_config)
@@ -49,7 +51,12 @@ def build_collection_ui_runtime(
                 "collection UI and hybrid Mission must reference the same guided config"
             )
         hybrid_supervisor = HybridMissionSupervisor(
-            config_path=ui_config.hybrid_mission_config
+            config_path=ui_config.hybrid_mission_config,
+            dig_target_ids=tuple(target_id for target_id, _ in metadata.rl_dig_targets),
+        )
+        operator_supervisor = AiryOperatorSupervisor(
+            guided_config=guided_config,
+            behavior_port=hybrid_config.rl_behavior_port,
         )
         metadata = replace(
             metadata,
@@ -60,6 +67,7 @@ def build_collection_ui_runtime(
         metadata=metadata,
         supervisor=supervisor,
         hybrid_supervisor=hybrid_supervisor,
+        operator_supervisor=operator_supervisor,
     )
     return CollectionUiRuntime(config=ui_config, app=app)
 

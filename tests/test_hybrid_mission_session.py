@@ -30,6 +30,8 @@ def _scripted_segment(
     _authorization,
     events,
     commands,
+    _cycle_count=1,
+    _dig_target_ids=(),
 ):
     assert target_id == "dig_02"
     assert automatic is False
@@ -62,6 +64,34 @@ def _scripted_segment(
         current = next_segment
 
 
+def _target_reporting_worker(
+    _config_path,
+    _target_id,
+    _start_segment,
+    _automatic,
+    _authorization,
+    events,
+    _commands,
+    _cycle_count=1,
+    _dig_target_ids=(),
+):
+    events.put(
+        {
+            "kind": "stage",
+            "stage": "running_act_dig",
+            "dig_target_id": "dig_03",
+        }
+    )
+    events.put(
+        {
+            "kind": "terminal",
+            "stage": "completed",
+            "next_segment": "",
+            "completed_cycles": 1,
+        }
+    )
+
+
 def test_segmented_hybrid_supervisor_advances_only_in_contract_order(tmp_path):
     supervisor = HybridMissionSupervisor(
         config_path=tmp_path / "hybrid.json",
@@ -87,7 +117,25 @@ def test_segmented_hybrid_supervisor_advances_only_in_contract_order(tmp_path):
         completed = _wait_for_stage(supervisor, "completed")
 
         assert completed.completed_cycles == 1
+        assert completed.run_completed_cycles == 1
         assert completed.next_segment == ""
+    finally:
+        supervisor.close()
+
+
+def test_hybrid_snapshot_reports_the_current_cycle_target(tmp_path):
+    supervisor = HybridMissionSupervisor(
+        config_path=tmp_path / "hybrid.json",
+        dig_target_ids=("dig_01", "dig_02", "dig_03"),
+        worker_target=_target_reporting_worker,
+        process_context=multiprocessing.get_context("spawn"),
+    )
+    try:
+        supervisor.start("dig_01", automatic=False, motion_authorization=None)
+
+        completed = _wait_for_stage(supervisor, "completed")
+
+        assert completed.dig_target_id == "dig_03"
     finally:
         supervisor.close()
 
@@ -145,6 +193,9 @@ def test_hybrid_worker_runs_all_segments_and_emits_completion(monkeypatch):
         def run_rl_return_to_dig(self, target):
             calls.append(("return", target))
 
+        def prewarm_next_act(self, steps):
+            calls.append(("prewarm", steps))
+
         def safe_stop(self):
             calls.append(("stop",))
 
@@ -180,6 +231,146 @@ def test_hybrid_worker_runs_all_segments_and_emits_completion(monkeypatch):
         "kind": "terminal",
         "stage": "completed",
         "next_segment": "",
+        "completed_cycles": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    ("selected_target", "cycle_count", "expected_calls", "expected_act_targets"),
+    [
+        (
+            "dig_01",
+            3,
+            [
+                ("dig", "dig_01"),
+                ("act", 130),
+                ("dump",),
+                ("prewarm", 130),
+                ("return", "dig_02"),
+                ("act", 130),
+                ("dump",),
+                ("prewarm", 130),
+                ("return", "dig_03"),
+                ("act", 130),
+                ("dump",),
+                ("return", "dig_03"),
+            ],
+            ["dig_01", "dig_02", "dig_03"],
+        ),
+        (
+            "dig_02",
+            4,
+            [
+                ("dig", "dig_02"),
+                ("act", 130),
+                ("dump",),
+                ("prewarm", 130),
+                ("return", "dig_03"),
+                ("act", 130),
+                ("dump",),
+                ("prewarm", 130),
+                ("return", "dig_01"),
+                ("act", 130),
+                ("dump",),
+                ("prewarm", 130),
+                ("return", "dig_02"),
+                ("act", 130),
+                ("dump",),
+                ("return", "dig_02"),
+            ],
+            ["dig_02", "dig_03", "dig_01", "dig_02"],
+        ),
+        (
+            "dig_03",
+            1,
+            [
+                ("dig", "dig_03"),
+                ("act", 130),
+                ("dump",),
+                ("return", "dig_03"),
+            ],
+            ["dig_03"],
+        ),
+    ],
+)
+def test_automatic_worker_cycles_targets_from_selected_point_without_restarting_adapter(
+    monkeypatch,
+    selected_target,
+    cycle_count,
+    expected_calls,
+    expected_act_targets,
+):
+    events = queue.Queue()
+    calls = []
+    instances = []
+
+    class _Config:
+        act_max_steps = 130
+
+    class _Operations:
+        def __init__(self, _config, output):
+            instances.append(self)
+            self.output = output
+
+        def run_rl_to_dig(self, target):
+            calls.append(("dig", target))
+
+        def run_act_dig(self, steps):
+            calls.append(("act", steps))
+
+        def run_rl_to_dump_and_dump(self):
+            calls.append(("dump",))
+
+        def run_rl_return_to_dig(self, target):
+            calls.append(("return", target))
+
+        def prewarm_next_act(self, steps):
+            calls.append(("prewarm", steps))
+
+        def safe_stop(self):
+            calls.append(("stop",))
+
+    monkeypatch.setattr(
+        "excavator_il.hybrid_mission_session.HybridMissionConfig.load",
+        lambda _path: _Config(),
+    )
+    monkeypatch.setattr(
+        "excavator_il.hybrid_mission_session.SystemHybridMissionOperations",
+        _Operations,
+    )
+
+    run_hybrid_mission_worker(
+        "hybrid.json",
+        selected_target,
+        "rl_to_dig",
+        True,
+        REQUIRED_HYBRID_MOTION_AUTHORIZATION,
+        events,
+        queue.Queue(),
+        cycle_count=cycle_count,
+        dig_target_ids=("dig_01", "dig_02", "dig_03"),
+    )
+
+    assert len(instances) == 1
+    assert calls == expected_calls
+    emitted = []
+    while not events.empty():
+        emitted.append(events.get_nowait())
+    assert [
+        event["dig_target_id"]
+        for event in emitted
+        if event.get("stage") == "running_act_dig"
+    ] == expected_act_targets
+    assert [
+        event["completed_cycles"]
+        for event in emitted
+        if event["kind"] == "progress"
+    ] == list(range(1, cycle_count + 1))
+    assert emitted[-1] == {
+        "kind": "terminal",
+        "stage": "completed",
+        "next_segment": "",
+        "completed_cycles": cycle_count,
     }
 
 

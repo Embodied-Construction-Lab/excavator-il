@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from excavator_il.airy_operator import AiryOperatorSnapshot
 from excavator_il.collection_ui_app import (
     CollectionUiMetadata,
     create_collection_ui_app,
@@ -50,8 +51,10 @@ class _HybridSupervisor:
     def snapshot(self):
         return self.state
 
-    def start(self, target_id, *, automatic, motion_authorization):
-        self.calls.append(("start", target_id, automatic, motion_authorization))
+    def start(self, target_id, *, automatic, motion_authorization, cycle_count=1):
+        self.calls.append(
+            ("start", target_id, automatic, motion_authorization, cycle_count)
+        )
         self.state = HybridMissionSnapshot(
             stage="starting",
             dig_target_id=target_id,
@@ -67,6 +70,105 @@ class _HybridSupervisor:
 
     def close(self):
         self.calls.append(("close",))
+
+
+class _OperatorSupervisor:
+    def __init__(self):
+        self.state = AiryOperatorSnapshot()
+        self.calls = []
+
+    def snapshot(self):
+        return self.state
+
+    def start(self):
+        self.calls.append(("start",))
+        self.state = AiryOperatorSnapshot(stage="ready")
+
+    def stop(self):
+        self.calls.append(("stop",))
+        self.state = AiryOperatorSnapshot(stage="stopped")
+
+    def close(self):
+        self.calls.append(("close",))
+
+
+def test_collection_ui_can_start_and_stop_airy_operator(tmp_path):
+    operator = _OperatorSupervisor()
+    app = create_collection_ui_app(
+        config=CollectionUiConfig(
+            guided_config=tmp_path / "guided.json",
+            host="127.0.0.1",
+            port=8088,
+            camera_preview_url="http://192.168.50.2:18092/camera/front.mjpg",
+            visualization_url="",
+        ),
+        metadata=CollectionUiMetadata(
+            operator_id="zhaoshuai",
+            task="ExecuteDig",
+            dig_target_m=(1.0, 0.0, 0.0),
+            orin_host="192.168.50.2",
+            rl_dig_targets=(),
+        ),
+        supervisor=_Supervisor(),
+        operator_supervisor=operator,
+    )
+
+    with TestClient(app) as client:
+        config = client.get("/api/config").json()
+        started = client.post(
+            "/api/operator/start", headers={"X-Excavator-UI": "1"}
+        )
+        stopped = client.post(
+            "/api/operator/stop", headers={"X-Excavator-UI": "1"}
+        )
+
+    assert config["operator_control_enabled"] is True
+    assert started.json()["stage"] == "ready"
+    assert stopped.json()["stage"] == "stopped"
+    assert operator.calls == [("start",), ("stop",), ("close",)]
+
+
+def test_hybrid_start_automatically_starts_airy_operator_when_stopped(tmp_path):
+    collection = _Supervisor()
+    hybrid = _HybridSupervisor()
+    operator = _OperatorSupervisor()
+    app = create_collection_ui_app(
+        config=CollectionUiConfig(
+            guided_config=tmp_path / "guided.json",
+            hybrid_mission_config=tmp_path / "hybrid.json",
+            host="127.0.0.1",
+            port=8088,
+            camera_preview_url="http://192.168.50.2:18092/camera/front.mjpg",
+            visualization_url="",
+        ),
+        metadata=CollectionUiMetadata(
+            operator_id="zhaoshuai",
+            task="ExecuteDig",
+            dig_target_m=(1.0, 0.0, 0.0),
+            orin_host="192.168.50.2",
+            rl_dig_targets=(("dig_01", (1.0, 0.2, 0.0)),),
+            hybrid_act_max_steps=130,
+        ),
+        supervisor=collection,
+        hybrid_supervisor=hybrid,
+        operator_supervisor=operator,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/hybrid/start",
+            json={
+                "dig_target_id": "dig_01",
+                "automatic": False,
+                "cycle_count": 1,
+                "motion_authorization": None,
+            },
+            headers={"X-Excavator-UI": "1"},
+        )
+
+    assert response.status_code == 200
+    assert operator.calls[0] == ("start",)
+    assert hybrid.calls[0] == ("start", "dig_01", False, None, 1)
 
 
 def test_collection_ui_exposes_segmented_and_automatic_hybrid_mission_actions(
@@ -124,11 +226,56 @@ def test_collection_ui_exposes_segmented_and_automatic_hybrid_mission_actions(
     assert advanced.status_code == 200
     assert stopped.status_code == 200
     assert hybrid.calls[:3] == [
-        ("start", "dig_01", False, None),
+        ("start", "dig_01", False, None, 1),
         ("advance", "ALLOW_HYBRID_MACHINE_MOTION"),
         ("stop",),
     ]
     assert hybrid.calls[-1] == ("close",)
+
+
+def test_collection_ui_starts_four_cycle_truck_loading_mission(tmp_path):
+    collection = _Supervisor()
+    hybrid = _HybridSupervisor()
+    app = create_collection_ui_app(
+        config=CollectionUiConfig(
+            guided_config=tmp_path / "guided.json",
+            host="127.0.0.1",
+            port=8088,
+            camera_preview_url="http://192.168.50.2:18092/camera/front.mjpg",
+            visualization_url="",
+        ),
+        metadata=CollectionUiMetadata(
+            operator_id="zhaoshuai",
+            task="ExecuteDig",
+            dig_target_m=(1.0, 0.0, 0.0),
+            orin_host="192.168.50.2",
+            rl_dig_targets=(("dig_01", (1.0, 0.2, 0.0)),),
+            hybrid_act_max_steps=130,
+        ),
+        supervisor=collection,
+        hybrid_supervisor=hybrid,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/hybrid/start",
+            json={
+                "dig_target_id": "dig_01",
+                "automatic": True,
+                "cycle_count": 4,
+                "motion_authorization": "ALLOW_HYBRID_MACHINE_MOTION",
+            },
+            headers={"X-Excavator-UI": "1"},
+        )
+
+    assert response.status_code == 200
+    assert hybrid.calls[0] == (
+        "start",
+        "dig_01",
+        True,
+        "ALLOW_HYBRID_MACHINE_MOTION",
+        4,
+    )
 
 
 def test_collection_and_hybrid_workflows_are_mutually_exclusive(tmp_path):
@@ -217,7 +364,7 @@ def test_collection_ui_exposes_config_status_and_guided_collection_actions(tmp_p
     assert 'data-app="excavator-collection-ui"' in page.text
     assert "选择工作模式" in page.text
     assert "仅遥操作" in page.text
-    assert '/static/app.js?v=20260819-hybrid-mission' in page.text
+    assert '/static/app.js?v=20260820-target-cycle' in page.text
     assert stylesheet.status_code == 200
     assert "collection-grid" in stylesheet.text
     assert script.status_code == 200

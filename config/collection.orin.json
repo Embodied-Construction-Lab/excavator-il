@@ -31,6 +31,11 @@
     "bind_host": "0.0.0.0",
     "port": 18092
   },
+  "machine_state_udp": {
+    "host": "192.168.50.1",
+    "port": 18081,
+    "machine_id": "scale_excavator_v1"
+  },
   "episode_control_socket": "/home/jetson16/.local/run/excavator-il/collector.sock",
   "episode_defaults": {
     "dig_target_m": [0.8, 0.0, -0.2],

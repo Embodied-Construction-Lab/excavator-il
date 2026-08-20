@@ -17,6 +17,7 @@ from .camera import UvcCamera
 from .config import CollectionConfig, load_collection_config
 from .control import EpisodeController
 from .core import CollectorCore
+from .machine_state import MachineStateUdpPublisher
 from .preview import LatestJpegFrame, LatestTelemetryFrame, MjpegPreviewServer
 from .recorder import EpisodeRecorder
 from .runtime import CollectorRuntime
@@ -42,6 +43,15 @@ class CollectorService:
         self._camera_preview = LatestJpegFrame()
         self._telemetry_preview = LatestTelemetryFrame()
         self._preview_server: MjpegPreviewServer | None = None
+        self._machine_state_publisher = (
+            None
+            if config.machine_state_udp is None
+            else MachineStateUdpPublisher(
+                host=config.machine_state_udp.host,
+                port=config.machine_state_udp.port,
+                machine_id=config.machine_state_udp.machine_id,
+            )
+        )
         self._core = CollectorCore(
             recorder=self._recorder,
             expected_device_ids=config.controllers.device_ids,
@@ -58,6 +68,7 @@ class CollectorService:
             joystick_timeout_ms=config.joystick.timeout_ms,
             camera_preview=self._camera_preview,
             telemetry_preview=self._telemetry_preview,
+            machine_state_publisher=self._machine_state_publisher,
         )
         self._episode_controller = EpisodeController(
             recorder=self._recorder,
@@ -237,6 +248,13 @@ class CollectorService:
                 self._preview_server.port,
                 self._config.joystick.allowed_pc_host,
             )
+        if self._config.machine_state_udp is not None:
+            LOGGER.info(
+                "AiryLidar machine-state ready: udp=%s:%d machine_id=%s",
+                self._config.machine_state_udp.host,
+                self._config.machine_state_udp.port,
+                self._config.machine_state_udp.machine_id,
+            )
         try:
             while not self._stop.is_set():
                 try:
@@ -268,6 +286,8 @@ class CollectorService:
                 self._preview_server.close()
             for thread in self._threads:
                 thread.join(timeout=1.0)
+            if self._machine_state_publisher is not None:
+                self._machine_state_publisher.close()
             self._abort_active_episode("collector_shutdown")
 
 

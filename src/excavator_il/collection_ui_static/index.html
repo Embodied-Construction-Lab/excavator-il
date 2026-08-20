@@ -3,14 +3,14 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>挖掘机示教采集台</title>
+    <title>挖掘机实验与演示台</title>
     <link rel="stylesheet" href="/static/app.css">
   </head>
   <body data-app="excavator-collection-ui">
     <header class="topbar">
       <div>
-        <p class="eyebrow">EXCAVATOR · IMITATION LEARNING</p>
-        <h1>真机示教采集台</h1>
+        <p class="eyebrow">EXCAVATOR · RL + ACT</p>
+        <h1>真机实验与演示台</h1>
       </div>
       <div class="runtime-chip">
         <span id="status-dot" class="status-dot"></span>
@@ -148,13 +148,22 @@
       <section id="hybrid-panel" class="panel hybrid-panel hidden">
         <div class="section-heading">
           <div><span class="step-number">03</span><h2>RL + ACT 混合 Mission</h2></div>
-          <p>分段验证或自动执行一轮：RL 到挖点 → ACT 挖掘 → RL 到倾倒点并倾倒 → RL 返回挖点。</p>
+          <p>分段拍摄单个动作，或连续自动完成 1～5 铲装车循环。</p>
+        </div>
+        <div id="operator-control" class="operator-control hidden">
+          <div>
+            <small>RL / RViz 基础服务</small>
+            <strong id="operator-stage">未启动</strong>
+            <span>可提前启动用于纯 RL 演示；分段或自动 Mission 也会在未就绪时自动启动 Operator 与 RViz。</span>
+          </div>
+          <button id="operator-start" class="button primary" type="button">启动 RL + RViz</button>
+          <button id="operator-stop" class="button ghost" type="button" disabled>停止</button>
         </div>
         <div class="hybrid-summary">
           <div><small>当前阶段</small><strong id="hybrid-stage">空闲</strong></div>
           <div><small>ACT 上限</small><strong><span id="hybrid-act-steps">—</span> steps · 10 Hz</strong></div>
           <div><small>目标点</small><strong id="hybrid-target">—</strong></div>
-          <div><small>完成循环</small><strong id="hybrid-cycles">0</strong></div>
+          <div><small>本次进度</small><strong id="hybrid-cycles">0 / 1 铲</strong></div>
         </div>
         <div class="hybrid-flow" aria-label="RL ACT 闭环步骤">
           <span data-hybrid-segment="rl_to_dig">1 · RL 到挖点</span>
@@ -164,16 +173,26 @@
         </div>
         <div class="hybrid-actions">
           <button id="hybrid-segmented-start" class="button primary" type="button">开始分段验证</button>
-          <button id="hybrid-auto-start" class="button accent" type="button">自动执行一轮</button>
+          <label class="cycle-picker" for="hybrid-cycle-count">
+            <span>自动装车铲数</span>
+            <select id="hybrid-cycle-count">
+              <option value="1">1 铲</option>
+              <option value="2">2 铲</option>
+              <option value="3">3 铲</option>
+              <option value="4" selected>4 铲</option>
+              <option value="5">5 铲</option>
+            </select>
+          </label>
+          <button id="hybrid-auto-start" class="button accent" type="button">自动装车 4 铲</button>
           <button id="hybrid-advance" class="button success" type="button" disabled>执行下一段</button>
           <button id="hybrid-stop" class="button danger" type="button" disabled>安全停止</button>
         </div>
-        <p class="batch-hint">需要 AiryLidar live operator 保持运行。ACT 段按有效推理 step 计数，任何故障提前回零失败；固定倾倒继续使用 Orin ExecuteDump。</p>
+        <p class="batch-hint">自动装车从当前选中点开始，随后按 dig_01 → dig_02 → dig_03 循环；RL 返回会直接前往下一铲点位。任何阶段失败都会停止，不会跳过故障继续。</p>
         <pre id="hybrid-log">等待混合 Mission…</pre>
         <div id="hybrid-error" class="error-banner hidden"></div>
       </section>
     </main>
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20260819-hybrid-mission" defer></script>
+    <script src="/static/app.js?v=20260820-target-cycle" defer></script>
   </body>
 </html>

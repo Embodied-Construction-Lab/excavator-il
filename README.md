@@ -149,8 +149,12 @@ python -m pip install -e '.[teleop,training,test,ui]'
 ```bash
 cd /home/zhaoshuai/workspace_uinty/RL_prj/excavator-il
 conda activate excavator-il
+python scripts/check_site_config.py
 python scripts/run_collection_ui.py
 ```
+
+`check_site_config.py` 只读核对当前 PC/Orin IP、Collector/teleop/预览端口与串口引用；它不会
+修改网络或生成配置。换网、换电脑或改端口后应先让该检查通过。
 
 浏览器默认打开 `http://127.0.0.1:8088/`。页面可选择：
 
@@ -162,6 +166,8 @@ python scripts/run_collection_ui.py
   deadman 可用 X/Y 控制工作装置、Z1/Z2 控制左右履带，释放即六轴回零，点击“安全停止”退出；
 - Episode 结束后点击“成功”“失败”或“重录”；完成后可以直接选择下一点继续，页面显示本次
   UI 运行期间的完成计数，适合连续采集 Pilot/正式批次。
+- `启动 RL + RViz`：从页面启动既有 AiryLidar `live_commissioning` Operator；不会复制规划、
+  策略或可视化实现。录制演示视频时保留弹出的原生 RViz 窗口即可。
 
 配置集中在 `config/collection_ui.pc.json`，其中 `guided_config` 继续指向权威的
 `guided_episode.pc.json`。前视画面由 Collector 已经拥有的相机线程维护一个最新 JPEG，并通过
@@ -195,19 +201,23 @@ RL Plan/Follow DIG + 并行 ACT 模型/CUDA 预热（ACT 不打开硬件）
 遥测、相机、推理、串口或资源交接错误都会提前失败并归零。后续真实数据足够时再评估 learned
 success detector。
 
-使用前 PC 必须已经运行 AiryLidar `live_commissioning` Operator；Orin 不要手工启动
-`orin_state_sender.py`、Collector 或 ACT Runtime。Web UI 提供：
+可先在页面点击“启动 RL + RViz”并等待“已就绪”，用于纯 RL 演示或提前录屏；若直接启动分段/自动 Mission，后端会在 Operator 未就绪时先自动启动并等待就绪。若已经在外部终端运行 Operator，则继续
+沿用该窗口，不要重复启动。Orin 不要手工启动 `orin_state_sender.py`、Collector 或 ACT Runtime。
+Web UI 提供：
 
 - `开始分段验证`：每完成一段后停在明确的等待阶段，由操作者点击下一段；点击执行 ACT 段本身
   作为本地显式运动授权，页面自动发送固定授权值，不再要求手工输入口令；
-- `自动执行一轮`：点击按钮即显式授权这一轮并连续执行完整闭环；只有四段分别通过后才使用；
+- `自动装车 1～5 铲`：选择铲数后点击一次即连续执行；以页面选中的 DIG 点为第一铲，后续按
+  Mission 配置顺序循环 `dig_01 → dig_02 → dig_03 → dig_01`。RL 返回阶段直接去下一铲点位，
+  到达后从交接位姿开始 ACT，不额外增加一次策略冷启动；
 - `安全停止`：中断当前精确 owner，执行终态零并检查 `/dev/ttyTHS1` 释放。
 
 为减少分段演示中的静止冷启动，分段 Mission 从开始到完成由同一个后台 worker 持有：第一段 RL
 运行时并行加载 ACT checkpoint 并完成 synthetic CUDA warmup，但 ACT 在内部交接门放行前不打开
 `/dev/ttyTHS1` 或 `/dev/video0`；只有 RL 已终态回零并确认串口释放后才放行。倾倒完成后同一个 RL
-Runtime 保持零动作待命，点击返回时直接复用。等待阶段点击“安全停止”会清理预热 ACT 或热待命
-RL 并释放设备。该优化只隐藏进程冷启动，不缩短轨迹跟踪、ACT 130 step、固定倾倒或安全回零。
+Runtime 保持零动作待命，返回时直接复用；多铲模式还会在 RL 返回期间预热下一铲 ACT。等待阶段
+点击“安全停止”会清理预热 ACT 或热待命 RL 并释放设备。该优化只隐藏进程冷启动，不缩短轨迹
+跟踪、ACT 130 step、固定倾倒或安全回零。
 
 Web UI 通过 SSH 非交互启动 ACT Docker。Orin 的 `jetson16` 必须能直接运行 Docker；实验机可一次性
 加入 `docker` 组并重新登录，之后先验证 `docker info`：
@@ -237,6 +247,13 @@ python scripts/run_guided_teleop.py
 脚本通过 SSH 启动唯一的 Orin Collector，完成安全 ACK 后即可按住 deadman 操纵双杆；`Ctrl+C`
 会先停止 teleop、再停止 Collector 并释放串口。该入口与采集数据生命周期解耦，但仍复用 Collector
 作为串口、相机和安全回零网关，因此不得同时运行 RL Runtime、ACT Runtime 或另一个 Collector。
+每次从 Web UI 或对应引导脚本启动新的串口工作流时，PC 会先检查 Orin 的实际串口 owner。若 owner
+的完整 argv 精确匹配本配置启动的遗留 Collector 或 `orin_state_sender.py`，则先发送 `SIGTERM` 并
+确认 `/dev/ttyTHS1` 已释放后再接管；未知程序仍拒绝启动并显示 PID/命令，不使用全局 `pkill`。
+Collector 还会把自己已解析的 STM32 状态按 `machine_state_v1` 发送到
+`config/collection.orin.json.machine_state_udp`。如果 AiryLidar live Operator/RViz 已启动，其现有
+PC 状态桥会继续发布 `/joint_states` 并实时显示挖掘机；该功能不启动第二个串口读取进程，也不参与
+动作控制。
 
 原始 Episode 保存在 Orin 的 `config/collection.orin.json` 中 `data_root` 指定的位置；当前为
 `/home/jetson16/workspace_excavator/data/excavator-data`。PC 的引导、teleop 和校验输出

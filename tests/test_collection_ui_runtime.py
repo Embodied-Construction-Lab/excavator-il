@@ -97,6 +97,7 @@ def test_collection_ui_runtime_composes_optional_hybrid_supervisor(
     collection = object()
     hybrid = object()
     captured = {}
+    hybrid_kwargs = {}
 
     monkeypatch.setattr(
         collection_ui_runtime, "load_collection_ui_config", lambda _path: ui_config
@@ -105,13 +106,22 @@ def test_collection_ui_runtime_composes_optional_hybrid_supervisor(
     monkeypatch.setattr(HybridMissionConfig, "load", lambda _path: hybrid_config)
     monkeypatch.setattr(
         collection_ui_runtime,
+        "load_rl_dig_targets",
+        lambda _config: (
+            ("dig_01", (1.0, 0.2, 0.0)),
+            ("dig_02", (1.0, 0.0, 0.0)),
+            ("dig_03", (1.0, -0.2, 0.0)),
+        ),
+    )
+    monkeypatch.setattr(
+        collection_ui_runtime,
         "GuidedCollectionSupervisor",
         lambda **_kwargs: collection,
     )
     monkeypatch.setattr(
         collection_ui_runtime,
         "HybridMissionSupervisor",
-        lambda **_kwargs: hybrid,
+        lambda **kwargs: hybrid_kwargs.update(kwargs) or hybrid,
     )
     monkeypatch.setattr(
         collection_ui_runtime,
@@ -123,6 +133,7 @@ def test_collection_ui_runtime_composes_optional_hybrid_supervisor(
 
     assert captured["hybrid_supervisor"] is hybrid
     assert captured["metadata"].hybrid_act_max_steps == 130
+    assert hybrid_kwargs["dig_target_ids"] == ("dig_01", "dig_02", "dig_03")
 
 
 def test_run_collection_ui_uses_loopback_config_without_browser(monkeypatch):

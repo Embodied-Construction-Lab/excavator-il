@@ -10,13 +10,14 @@ import shlex
 import signal
 import subprocess
 import sys
-import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping, Protocol
+
+from .remote_runtime import LineProcess, LineWaitTimeout, SshRuntimeHost
 
 
 GUIDED_EPISODE_CONFIG_SCHEMA_VERSION = "excavator_guided_episode_config.v3"
@@ -325,111 +326,6 @@ class GuidedEpisodeOperations(Protocol):
     def build_and_validate(self, episode_path: str) -> None: ...
 
 
-class _LineWaitTimeout(RuntimeError):
-    """A bounded line wait expired while the child process remained active."""
-
-
-class _LineProcess:
-    def __init__(
-        self,
-        argv: list[str],
-        *,
-        log_path: Path,
-        prefix: str,
-        output: Callable[[str], None],
-        echo_output: bool = True,
-    ) -> None:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._condition = threading.Condition()
-        self._lines: tuple[str, ...] = ()
-        self._done = False
-        self._prefix = prefix
-        self._output = output
-        self._echo_output = echo_output
-        self._log_path = log_path
-        self._process = subprocess.Popen(
-            argv,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            start_new_session=True,
-        )
-        self._reader = threading.Thread(target=self._read_output, daemon=True)
-        self._reader.start()
-
-    def _read_output(self) -> None:
-        assert self._process.stdout is not None
-        with self._log_path.open("a", encoding="utf-8") as log:
-            for raw_line in self._process.stdout:
-                line = raw_line.rstrip("\r\n")
-                log.write(line + "\n")
-                log.flush()
-                if self._echo_output:
-                    self._output(f"[{self._prefix}] {line}")
-                with self._condition:
-                    self._lines = (*self._lines, line)
-                    self._condition.notify_all()
-        with self._condition:
-            self._done = True
-            self._condition.notify_all()
-
-    def wait_for(
-        self,
-        predicate: Callable[[str], bool],
-        timeout_s: float | None,
-        *,
-        after_index: int = -1,
-    ) -> tuple[int, str]:
-        deadline = None if timeout_s is None else time.monotonic() + timeout_s
-        with self._condition:
-            while True:
-                for index, line in enumerate(self._lines):
-                    if index <= after_index:
-                        continue
-                    if predicate(line):
-                        return index, line
-                if self._done:
-                    raise RuntimeError(
-                        f"{self._prefix} exited before the expected readiness signal"
-                    )
-                if deadline is None:
-                    self._condition.wait()
-                else:
-                    remaining_s = deadline - time.monotonic()
-                    if remaining_s <= 0:
-                        raise _LineWaitTimeout(
-                            f"timed out waiting for {self._prefix} readiness"
-                        )
-                    self._condition.wait(remaining_s)
-
-    def stop(self, signum: int, *, timeout_s: float = 5.0) -> None:
-        if self._process.poll() is None:
-            self._process.send_signal(signum)
-        try:
-            self._process.wait(timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            self._process.terminate()
-            try:
-                self._process.wait(timeout=timeout_s)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-                self._process.wait(timeout=timeout_s)
-        self._reader.join(timeout=1.0)
-
-    def wait(self, timeout_s: float = 5.0) -> None:
-        self._process.wait(timeout=timeout_s)
-        self._reader.join(timeout=1.0)
-
-    @property
-    def returncode(self) -> int | None:
-        return self._process.poll()
-
-    @property
-    def running(self) -> bool:
-        return self._process.poll() is None
-
-
 class SystemGuidedEpisodeOperations:
     """Real PC/SSH boundary used by the guided Episode script."""
 
@@ -444,14 +340,17 @@ class SystemGuidedEpisodeOperations:
         *,
         output: Callable[[str], None] = print,
         timestamp: str | None = None,
+        line_process_factory: Callable[..., Any] = LineProcess,
     ) -> None:
         self._config = config
+        self._remote_host: SshRuntimeHost | None = None
         self._output = output
         self._timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._collector: _LineProcess | None = None
-        self._teleop: _LineProcess | None = None
+        self._line_process_factory = line_process_factory
+        self._collector: Any | None = None
+        self._teleop: Any | None = None
         self._collector_pid: int | None = None
-        self._rl_runtime: _LineProcess | None = None
+        self._rl_runtime: Any | None = None
         self._rl_runtime_pid: int | None = None
         self._teleop_cursor = -1
         self._started_episode_paths: tuple[str, ...] = ()
@@ -467,15 +366,7 @@ class SystemGuidedEpisodeOperations:
         )
 
     def _ssh_argv(self, remote_command: str) -> list[str]:
-        return [
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5",
-            self._config.orin_ssh_host,
-            remote_command,
-        ]
+        return self._ssh_host().argv(remote_command)
 
     def _in_repo(self, argv: list[str]) -> str:
         return (
@@ -495,16 +386,9 @@ class SystemGuidedEpisodeOperations:
         *,
         accepted_returncodes: tuple[int, ...] = (0,),
     ) -> str:
-        result = subprocess.run(
-            self._ssh_argv(remote_command),
-            capture_output=True,
-            text=True,
-            timeout=30,
+        return self._ssh_host().run(
+            remote_command, accepted_returncodes=accepted_returncodes
         )
-        if result.returncode not in accepted_returncodes:
-            detail = (result.stderr or result.stdout).strip()
-            raise RuntimeError(f"remote command failed: {detail}")
-        return result.stdout
 
     def _remote_cli(
         self,
@@ -517,6 +401,7 @@ class SystemGuidedEpisodeOperations:
             self._in_repo([executable, *argv]),
             accepted_returncodes=accepted_returncodes,
         )
+
         try:
             response = json.loads(output)
         except json.JSONDecodeError as exc:
@@ -524,6 +409,13 @@ class SystemGuidedEpisodeOperations:
         if not isinstance(response, Mapping):
             raise RuntimeError("remote CLI response must be an object")
         return response
+
+    def _ssh_host(self) -> SshRuntimeHost:
+        if self._remote_host is None:
+            self._remote_host = SshRuntimeHost(
+                self._config.orin_ssh_host, run_command=subprocess.run
+            )
+        return self._remote_host
 
     @staticmethod
     def _episode_path(response: Mapping[str, Any]) -> str:
@@ -545,6 +437,48 @@ class SystemGuidedEpisodeOperations:
             ]
         )
         self._run_ssh(remote_check)
+        self._reclaim_known_serial_owner()
+
+    def _known_serial_owner_argv(self) -> tuple[tuple[str, ...], ...]:
+        collector = (
+            str(self._config.orin_executable),
+            "collect",
+            "--config",
+            str(self._config.orin_collection_config),
+        )
+        rl_runtime = (
+            str(self._config.rl_orin_python),
+            "-u",
+            "orin_state_sender.py",
+            "--serial-port",
+            str(self._config.rl_serial_port),
+            "--control-enabled",
+            "--pc-host",
+            self._config.rl_pc_host,
+            "--edge-config",
+            str(self._config.rl_edge_config),
+            "--edge-motion-authorization",
+            "ALLOW_EDGE_MACHINE_MOTION",
+            "--print-every",
+            "100",
+        )
+        # A manually launched but otherwise identical Runtime may use the
+        # environment's ``python`` command instead of the configured absolute
+        # interpreter path.  Match the complete behavior argv from ``-u``
+        # onward so workflow takeover remains exact without depending on how
+        # that interpreter was named.
+        rl_runtime_interpreter_independent = rl_runtime[1:]
+        return collector, rl_runtime, rl_runtime_interpreter_independent
+
+    def _reclaim_known_serial_owner(self) -> None:
+        result = self._ssh_host().reclaim_serial_owner(
+            serial_path=self._config.rl_serial_port,
+            known_argv_suffixes=self._known_serial_owner_argv(),
+            timeout_s=self._config.rl_serial_release_timeout_s,
+            execute=self._run_ssh,
+        )
+        if result == "reclaimed":
+            self._output("检测到并释放了上一次遗留的 Orin 串口 Runtime。")
 
     def _rl_target(self, phase: str = "dig") -> tuple[float, float, float]:
         if phase not in {"dig", "dump"}:
@@ -574,6 +508,7 @@ class SystemGuidedEpisodeOperations:
         return values
 
     def start_rl_runtime(self) -> None:
+        self._reclaim_known_serial_owner()
         python = shlex.quote(str(self._config.rl_orin_python))
         edge_config = shlex.quote(str(self._config.rl_edge_config))
         pc_host = shlex.quote(self._config.rl_pc_host)
@@ -630,7 +565,7 @@ echo ready
         remote_command = remote_command.replace(
             "&& ", "&& echo GUIDED_RL_PID=$$ && exec ", 1
         )
-        self._rl_runtime = _LineProcess(
+        self._rl_runtime = self._line_process_factory(
             self._ssh_argv(remote_command),
             log_path=rl_log,
             prefix="rl-runtime",
@@ -717,7 +652,7 @@ echo ready
                 ),
             )
         )
-        process = _LineProcess(
+        process = self._line_process_factory(
             ["/bin/zsh", "-lc", shell_command],
             log_path=rl_log,
             prefix="rl-position",
@@ -773,7 +708,7 @@ echo ready
                 ),
             )
         )
-        process = _LineProcess(
+        process = self._line_process_factory(
             ["/bin/zsh", "-lc", shell_command],
             log_path=rl_log,
             prefix="rl-fixed-action",
@@ -800,34 +735,14 @@ echo ready
             runtime.stop(signal.SIGKILL, timeout_s=2.0)
             self._rl_runtime = None
             raise RuntimeError("RL Runtime PID was not observed; serial release is unknown")
-        serial = shlex.quote(str(self._config.rl_serial_port))
-        attempts = self._config.rl_serial_release_timeout_s * 4
-        script = f"""set -eu
-command -v fuser >/dev/null
-pid={runtime_pid}
-if kill -0 "$pid" 2>/dev/null; then
-  tr '\\000' ' ' < "/proc/$pid/cmdline" | grep -q '[o]rin_state_sender.py'
-  kill -TERM "$pid"
-fi
-attempt=0
-while kill -0 "$pid" 2>/dev/null; do
-  attempt=$((attempt + 1))
-  if [ "$attempt" -ge {attempts} ]; then
-    echo "orin_state_sender.py did not exit after SIGTERM" >&2
-    exit 13
-  fi
-  sleep 0.25
-done
-if fuser -s {serial}; then
-  echo "serial is still owned: {serial}" >&2
-  exit 14
-fi
-echo released
-"""
         try:
-            output = self._run_ssh(f"/bin/sh -c {shlex.quote(script)}")
-            if output.strip() != "released":
-                raise RuntimeError("RL Runtime exit did not confirm serial release")
+            self._ssh_host().stop_owned_process(
+                pid=runtime_pid,
+                identity_ere=r"[o]rin_state_sender\.py",
+                serial_path=self._config.rl_serial_port,
+                timeout_s=self._config.rl_serial_release_timeout_s,
+                execute=self._run_ssh,
+            )
             try:
                 runtime.wait(timeout_s=2.0)
             except subprocess.TimeoutExpired:
@@ -848,7 +763,7 @@ echo released
             ]
         )
         command = command.replace("&& ", "&& echo GUIDED_COLLECTOR_PID=$$ && exec ", 1)
-        self._collector = _LineProcess(
+        self._collector = self._line_process_factory(
             self._ssh_argv(command),
             log_path=collector_log,
             prefix="collector",
@@ -871,7 +786,7 @@ echo released
     def start_teleop(self) -> None:
         _, teleop_log, _ = self.log_paths
         self._teleop_cursor = -1
-        self._teleop = _LineProcess(
+        self._teleop = self._line_process_factory(
             [
                 sys.executable,
                 "-u",
@@ -949,7 +864,7 @@ echo released
                     min(1.0, remaining_s),
                     after_index=self._teleop_cursor,
                 )
-            except _LineWaitTimeout:
+            except LineWaitTimeout:
                 if time.monotonic() >= deadline:
                     break
                 raise

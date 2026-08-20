@@ -13,12 +13,12 @@ from excavator_il.guided_episode import (
     GuidedEpisodeStage,
     PositioningMode,
     SystemGuidedEpisodeOperations,
-    _LineProcess,
     _read_positioning_choice,
     load_rl_dig_targets,
     run_guided_episode,
     run_standalone_teleop,
 )
+from excavator_il.remote_runtime import LineProcess
 
 
 class _FakeOperations:
@@ -260,6 +260,52 @@ def _guided_config(tmp_path):
         rl_pc_host="192.0.2.20",
         rl_ready_timeout_s=15,
     )
+
+
+def test_preflight_reclaims_only_known_stale_serial_owner(tmp_path):
+    config = _guided_config(tmp_path)
+    config.teleop_config.write_text("{}", encoding="utf-8")
+    calls = []
+    messages = []
+
+    class FakeRemoteHost:
+        def run(self, command, *, accepted_returncodes=(0,)):
+            calls.append(("run", command, accepted_returncodes))
+            return ""
+
+        def reclaim_serial_owner(self, **kwargs):
+            calls.append(("reclaim", kwargs))
+            return "reclaimed"
+
+    operations = SystemGuidedEpisodeOperations(config, output=messages.append)
+    operations._remote_host = FakeRemoteHost()
+
+    operations.preflight()
+
+    reclaim = next(call for call in calls if call[0] == "reclaim")[1]
+    assert reclaim["serial_path"] == "/dev/ttyTHS1"
+    assert (
+        "/opt/excavator/bin/excavator-il",
+        "collect",
+        "--config",
+        "config/collection.orin.json",
+    ) in reclaim["known_argv_suffixes"]
+    assert (
+        "-u",
+        "orin_state_sender.py",
+        "--serial-port",
+        "/dev/ttyTHS1",
+        "--control-enabled",
+        "--pc-host",
+        "192.0.2.20",
+        "--edge-config",
+        "deploy/edge_runtime.remote.json",
+        "--edge-motion-authorization",
+        "ALLOW_EDGE_MACHINE_MOTION",
+        "--print-every",
+        "100",
+    ) in reclaim["known_argv_suffixes"]
+    assert messages == ["检测到并释放了上一次遗留的 Orin 串口 Runtime。"]
 
 
 def test_guided_episode_loads_selectable_demo_dig_targets(tmp_path):
@@ -522,8 +568,11 @@ def test_system_rl_positioning_uses_mission_target_and_live_plan_follow(tmp_path
         def stop(self, signum, *, timeout_s=5.0):
             raise AssertionError("successful RL positioning must not be stopped")
 
-    monkeypatch.setattr("excavator_il.guided_episode._LineProcess", FakeLineProcess)
-    operations = SystemGuidedEpisodeOperations(config, output=lambda message: None)
+    operations = SystemGuidedEpisodeOperations(
+        config,
+        output=lambda message: None,
+        line_process_factory=FakeLineProcess,
+    )
 
     target = operations.run_rl_preposition()
 
@@ -566,8 +615,11 @@ def test_system_rl_positioning_uses_selected_demo_dig_target(tmp_path, monkeypat
         def wait(self, timeout_s=5.0):
             assert timeout_s == 90
 
-    monkeypatch.setattr("excavator_il.guided_episode._LineProcess", FakeLineProcess)
-    operations = SystemGuidedEpisodeOperations(config, output=lambda _message: None)
+    operations = SystemGuidedEpisodeOperations(
+        config,
+        output=lambda _message: None,
+        line_process_factory=FakeLineProcess,
+    )
 
     target = operations.run_rl_preposition("dig_03")
 
@@ -606,8 +658,11 @@ def test_system_rl_follow_supports_dump_phase_without_demo_target(tmp_path, monk
         def wait(self, timeout_s=5.0):
             assert timeout_s == 90
 
-    monkeypatch.setattr("excavator_il.guided_episode._LineProcess", FakeLineProcess)
-    operations = SystemGuidedEpisodeOperations(config, output=lambda _message: None)
+    operations = SystemGuidedEpisodeOperations(
+        config,
+        output=lambda _message: None,
+        line_process_factory=FakeLineProcess,
+    )
 
     target = operations.run_rl_follow("dump")
 
@@ -633,8 +688,11 @@ def test_system_runs_existing_orin_fixed_dump_client(tmp_path, monkeypatch):
         def wait(self, timeout_s=5.0):
             assert timeout_s == 90
 
-    monkeypatch.setattr("excavator_il.guided_episode._LineProcess", FakeLineProcess)
-    operations = SystemGuidedEpisodeOperations(config, output=lambda _message: None)
+    operations = SystemGuidedEpisodeOperations(
+        config,
+        output=lambda _message: None,
+        line_process_factory=FakeLineProcess,
+    )
 
     operations.run_rl_fixed_action("ExecuteDump", behavior_port=18083)
 
@@ -662,13 +720,19 @@ def test_system_starts_owned_rl_runtime_and_waits_for_ready(tmp_path, monkeypatc
             line = next(candidate for candidate in candidates if predicate(candidate))
             return candidates.index(line), line
 
-    monkeypatch.setattr("excavator_il.guided_episode._LineProcess", FakeRuntimeProcess)
-    operations = SystemGuidedEpisodeOperations(config, output=lambda message: None)
-    monkeypatch.setattr(
-        operations,
-        "_run_ssh",
-        lambda command: preflight_commands.append(command) or "ready\n",
+    operations = SystemGuidedEpisodeOperations(
+        config,
+        output=lambda message: None,
+        line_process_factory=FakeRuntimeProcess,
     )
+
+    def fake_run_ssh(command):
+        preflight_commands.append(command)
+        if "serial owner is not reclaimable" in command:
+            return "idle\n"
+        return "ready\n"
+
+    monkeypatch.setattr(operations, "_run_ssh", fake_run_ssh)
 
     operations.start_rl_runtime()
 
@@ -677,10 +741,11 @@ def test_system_starts_owned_rl_runtime_and_waits_for_ready(tmp_path, monkeypatc
     assert "orin_state_sender.py" in rendered
     assert "--edge-motion-authorization ALLOW_EDGE_MACHINE_MOTION" in rendered
     assert "--pc-host 192.0.2.20" in rendered
-    assert len(preflight_commands) == 1
-    assert "allowed_client_host" in preflight_commands[0]
-    assert "192.0.2.20" in preflight_commands[0]
-    assert "fuser" in preflight_commands[0]
+    assert len(preflight_commands) == 2
+    assert "serial owner is not reclaimable" in preflight_commands[0]
+    assert "allowed_client_host" in preflight_commands[1]
+    assert "192.0.2.20" in preflight_commands[1]
+    assert "fuser" in preflight_commands[1]
 
 
 def test_system_rl_release_targets_one_runtime_and_waits_for_serial(tmp_path, monkeypatch):
@@ -705,7 +770,7 @@ def test_system_rl_release_targets_one_runtime_and_waits_for_serial(tmp_path, mo
 
     assert len(remote_commands) == 1
     assert "kill -TERM" in remote_commands[0]
-    assert "orin_state_sender" in remote_commands[0]
+    assert "[o]rin_state_sender" in remote_commands[0]
     assert "fuser" in remote_commands[0]
     assert "/dev/ttyTHS1" in remote_commands[0]
     assert "pid=4242" in remote_commands[0]
@@ -923,7 +988,9 @@ def test_system_operations_manage_exact_collector_and_episode_commands(
     def fake_run(argv, **kwargs):
         run_calls.append(argv)
         rendered = " ".join(argv)
-        if " episode " in rendered and " start" in rendered:
+        if "serial owner is not reclaimable" in rendered:
+            stdout = "idle\n"
+        elif " episode " in rendered and " start" in rendered:
             stdout = json.dumps(
                 {"ok": True, "active": True, "path": "/data/raw/episode_0001"}
             )
@@ -964,12 +1031,16 @@ def test_system_operations_manage_exact_collector_and_episode_commands(
             stdout = "{}"
         return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
 
-    monkeypatch.setattr("excavator_il.guided_episode.subprocess.Popen", FakePopen)
     monkeypatch.setattr("excavator_il.guided_episode.subprocess.run", fake_run)
     operations = SystemGuidedEpisodeOperations(
         config,
         output=lambda message: None,
         timestamp="20260811_200000",
+        line_process_factory=lambda argv, **kwargs: LineProcess(
+            argv,
+            popen_command=FakePopen,
+            **kwargs,
+        ),
     )
 
     operations.preflight()
@@ -1218,14 +1289,12 @@ def test_line_process_stop_escalates_to_kill_when_ssh_ignores_term(
                 raise subprocess.TimeoutExpired("ssh collector", timeout)
             return self.returncode
 
-    monkeypatch.setattr(
-        "excavator_il.guided_episode.subprocess.Popen", TermIgnoringPopen
-    )
-    process = _LineProcess(
+    process = LineProcess(
         ["ssh", "collector"],
         log_path=tmp_path / "collector.log",
         prefix="collector",
         output=lambda message: None,
+        popen_command=TermIgnoringPopen,
     )
 
     process.stop(signal.SIGTERM, timeout_s=0.01)
@@ -1235,6 +1304,40 @@ def test_line_process_stop_escalates_to_kill_when_ssh_ignores_term(
         ("terminate", signal.SIGTERM),
         ("kill", signal.SIGKILL),
     ]
+
+
+def test_line_process_stop_signals_owned_process_group_after_leader_exits(
+    tmp_path, monkeypatch
+):
+    calls = []
+
+    class ExitedLeaderPopen:
+        pid = 43210
+
+        def __init__(self, _argv, **_kwargs):
+            self.stdout = io.StringIO("")
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(
+        "excavator_il.remote_runtime.os.killpg",
+        lambda pgid, signum: calls.append((pgid, signum)),
+    )
+    process = LineProcess(
+        ["ros2", "launch"],
+        log_path=tmp_path / "operator.log",
+        prefix="airy-operator",
+        output=lambda _message: None,
+        popen_command=ExitedLeaderPopen,
+    )
+
+    process.stop(signal.SIGINT, timeout_s=0.01)
+
+    assert calls == [(43210, signal.SIGINT)]
 
 
 def test_collector_extra_includes_episode_image_validation_dependency():

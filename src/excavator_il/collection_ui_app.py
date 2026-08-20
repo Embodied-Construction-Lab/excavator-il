@@ -14,8 +14,9 @@ from urllib.request import urlopen
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from .airy_operator import AiryOperatorSnapshot
 from .collection_ui_config import CollectionUiConfig
 from .collection_ui_session import CollectionSessionSnapshot
 from .hybrid_mission_session import HybridMissionSnapshot
@@ -54,11 +55,22 @@ class HybridSupervisor(Protocol):
         *,
         automatic: bool,
         motion_authorization: str | None,
+        cycle_count: int = 1,
     ) -> None: ...
 
     def advance(self, *, motion_authorization: str | None) -> None: ...
 
     def stop(self) -> None: ...
+
+    def close(self) -> None: ...
+
+
+class OperatorSupervisor(Protocol):
+    def snapshot(self) -> AiryOperatorSnapshot: ...
+
+    def start(self) -> AiryOperatorSnapshot: ...
+
+    def stop(self) -> AiryOperatorSnapshot: ...
 
     def close(self) -> None: ...
 
@@ -75,6 +87,7 @@ class EpisodeOutcomeRequest(BaseModel):
 class StartHybridMissionRequest(BaseModel):
     dig_target_id: str
     automatic: bool = False
+    cycle_count: int = Field(default=1, ge=1, le=5)
     motion_authorization: str | None = None
 
 
@@ -132,6 +145,7 @@ def create_collection_ui_app(
     metadata: CollectionUiMetadata,
     supervisor: CollectionSupervisor,
     hybrid_supervisor: HybridSupervisor | None = None,
+    operator_supervisor: OperatorSupervisor | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -139,6 +153,8 @@ def create_collection_ui_app(
         supervisor.close()
         if hybrid_supervisor is not None:
             hybrid_supervisor.close()
+        if operator_supervisor is not None:
+            operator_supervisor.close()
 
     app = FastAPI(title="Excavator Guided Collection UI", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
@@ -158,6 +174,7 @@ def create_collection_ui_app(
             "visualization_url": config.visualization_url,
             "positioning_modes": ["rl", "manual", "direct", "teleop"],
             "hybrid_mission_enabled": hybrid_supervisor is not None,
+            "operator_control_enabled": operator_supervisor is not None,
             "hybrid_act_max_steps": metadata.hybrid_act_max_steps,
             "rl_dig_targets": [
                 {"target_id": target_id, "position_m": list(position)}
@@ -252,6 +269,30 @@ def create_collection_ui_app(
             raise HTTPException(status_code=503, detail="hybrid Mission is disabled")
         return asdict(hybrid_supervisor.snapshot())
 
+    @app.get("/api/operator/status")
+    def operator_status() -> dict[str, object]:
+        if operator_supervisor is None:
+            raise HTTPException(status_code=404, detail="operator control is disabled")
+        return asdict(operator_supervisor.snapshot())
+
+    @app.post("/api/operator/start")
+    def start_operator(
+        x_excavator_ui: str | None = Header(default=None),
+    ) -> dict[str, object]:
+        _require_ui_request(x_excavator_ui)
+        if operator_supervisor is None:
+            raise HTTPException(status_code=404, detail="operator control is disabled")
+        return _operator_action(operator_supervisor.start, operator_supervisor)
+
+    @app.post("/api/operator/stop")
+    def stop_operator(
+        x_excavator_ui: str | None = Header(default=None),
+    ) -> dict[str, object]:
+        _require_ui_request(x_excavator_ui)
+        if operator_supervisor is None:
+            raise HTTPException(status_code=404, detail="operator control is disabled")
+        return _operator_action(operator_supervisor.stop, operator_supervisor)
+
     @app.post("/api/hybrid/start")
     def start_hybrid_mission(
         request: StartHybridMissionRequest,
@@ -271,11 +312,22 @@ def create_collection_ui_app(
                 status_code=409,
                 detail="guided collection owns the machine workflow",
             )
+        if operator_supervisor is not None:
+            operator_snapshot = operator_supervisor.snapshot()
+            if operator_snapshot.stage != "ready":
+                _operator_action(operator_supervisor.start, operator_supervisor)
+                operator_snapshot = operator_supervisor.snapshot()
+            if operator_snapshot.stage != "ready":
+                raise HTTPException(
+                    status_code=409,
+                    detail="RL/RViz base service did not become ready",
+                )
         return _operator_action(
             lambda: hybrid_supervisor.start(
                 request.dig_target_id,
                 automatic=request.automatic,
                 motion_authorization=request.motion_authorization,
+                cycle_count=request.cycle_count,
             ),
             hybrid_supervisor,
         )

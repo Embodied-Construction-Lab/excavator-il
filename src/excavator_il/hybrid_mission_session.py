@@ -1,4 +1,4 @@
-"""Process-isolated stateful supervisor for one RL/ACT hybrid Mission cycle."""
+"""Process-isolated supervisor for segmented or repeated hybrid Missions."""
 
 from __future__ import annotations
 
@@ -38,7 +38,11 @@ class HybridMissionSnapshot:
     next_segment: str = ""
     error: str = ""
     logs: tuple[str, ...] = ()
+    # Lifetime total remains available for experiment bookkeeping.  The UI uses
+    # run_completed_cycles so a new 4-scoop run always starts at 0 / 4.
     completed_cycles: int = 0
+    run_completed_cycles: int = 0
+    requested_cycles: int = 1
 
 
 def run_hybrid_mission_worker(
@@ -49,7 +53,14 @@ def run_hybrid_mission_worker(
     motion_authorization: str | None,
     events: Any,
     commands: Any,
+    cycle_count: int = 1,
+    dig_target_ids: tuple[str, ...] = (),
 ) -> None:
+    if not isinstance(cycle_count, int) or isinstance(cycle_count, bool):
+        raise ValueError("cycle_count must be an integer")
+    if not 1 <= cycle_count <= 5:
+        raise ValueError("cycle_count must be within [1, 5]")
+    target_cycle = _rotated_target_cycle(dig_target_id, dig_target_ids)
     config = HybridMissionConfig.load(config_path)
     operations = SystemHybridMissionOperations(
         config,
@@ -57,13 +68,33 @@ def run_hybrid_mission_worker(
     )
     segment = HybridMissionSegment(start_segment)
     current_authorization = motion_authorization
+    completed_cycles = 0
+    current_target_id = dig_target_id
     try:
         while True:
-            events.put({"kind": "stage", "stage": f"running_{segment.value}"})
+            segment_target_id = current_target_id
+            prewarm_next_act = (
+                automatic
+                and segment is HybridMissionSegment.RL_RETURN_TO_DIG
+                and completed_cycles + 1 < cycle_count
+            )
+            if prewarm_next_act:
+                segment_target_id = target_cycle[
+                    (completed_cycles + 1) % len(target_cycle)
+                ]
+            events.put(
+                {
+                    "kind": "stage",
+                    "stage": f"running_{segment.value}",
+                    "dig_target_id": segment_target_id,
+                }
+            )
+            if prewarm_next_act:
+                operations.prewarm_next_act(config.act_max_steps)
             execute_hybrid_segment(
                 operations,
                 segment=segment,
-                dig_target_id=dig_target_id,
+                dig_target_id=segment_target_id,
                 act_max_steps=config.act_max_steps,
                 motion_authorization=current_authorization,
             )
@@ -75,11 +106,30 @@ def run_hybrid_mission_worker(
             )
             next_segment = next_hybrid_segment(segment)
             if next_segment is None:
+                completed_cycles += 1
+                events.put(
+                    {
+                        "kind": "progress",
+                        "completed_cycles": completed_cycles,
+                    }
+                )
+                events.put(
+                    {
+                        "kind": "log",
+                        "message": f"装车循环完成：{completed_cycles}/{cycle_count}",
+                    }
+                )
+                if automatic and completed_cycles < cycle_count:
+                    # Return-to-dig is already the next cycle's handoff pose.
+                    current_target_id = segment_target_id
+                    segment = HybridMissionSegment.ACT_DIG
+                    continue
                 events.put(
                     {
                         "kind": "terminal",
                         "stage": "completed",
                         "next_segment": "",
+                        "completed_cycles": completed_cycles,
                     }
                 )
                 return
@@ -139,6 +189,33 @@ def run_hybrid_mission_worker(
         return
 
 
+def _rotated_target_cycle(
+    selected_target_id: str,
+    available_target_ids: tuple[str, ...],
+) -> tuple[str, ...]:
+    targets = _validated_target_ids(available_target_ids)
+    if not targets:
+        return (selected_target_id,)
+    try:
+        start = targets.index(selected_target_id)
+    except ValueError as exc:
+        raise ValueError("selected dig_target_id is not in dig_target_ids") from exc
+    return targets[start:] + targets[:start]
+
+
+def _validated_target_ids(target_ids: tuple[str, ...]) -> tuple[str, ...]:
+    if not isinstance(target_ids, tuple):
+        raise ValueError("dig_target_ids must be a tuple")
+    if any(
+        not isinstance(target_id, str) or not target_id.strip()
+        for target_id in target_ids
+    ):
+        raise ValueError("dig_target_ids must contain non-empty strings")
+    if len(set(target_ids)) != len(target_ids):
+        raise ValueError("dig_target_ids must be unique")
+    return target_ids
+
+
 class HybridMissionSupervisor:
     """Expose the closed loop as ordered, interruptible operator segments."""
 
@@ -146,6 +223,7 @@ class HybridMissionSupervisor:
         self,
         *,
         config_path: str | Path,
+        dig_target_ids: tuple[str, ...] = (),
         worker_target: Callable[..., None] = run_hybrid_mission_worker,
         process_context: Any | None = None,
         log_capacity: int = 400,
@@ -153,6 +231,7 @@ class HybridMissionSupervisor:
         if log_capacity <= 0:
             raise ValueError("log_capacity must be positive")
         self._config_path = Path(config_path).expanduser().resolve()
+        self._dig_target_ids = _validated_target_ids(dig_target_ids)
         self._worker_target = worker_target
         self._context = process_context or multiprocessing.get_context("spawn")
         self._log_capacity = log_capacity
@@ -175,11 +254,18 @@ class HybridMissionSupervisor:
         *,
         automatic: bool,
         motion_authorization: str | None,
+        cycle_count: int = 1,
     ) -> None:
         if not isinstance(dig_target_id, str) or not dig_target_id.strip():
             raise ValueError("dig_target_id must be non-empty")
         if not isinstance(automatic, bool):
             raise ValueError("automatic must be boolean")
+        if not isinstance(cycle_count, int) or isinstance(cycle_count, bool):
+            raise ValueError("cycle_count must be an integer")
+        if not 1 <= cycle_count <= 5:
+            raise ValueError("cycle_count must be within [1, 5]")
+        if not automatic and cycle_count != 1:
+            raise ValueError("segmented Mission supports exactly one cycle")
         if automatic and motion_authorization != REQUIRED_HYBRID_MOTION_AUTHORIZATION:
             raise ValueError("automatic Mission requires exact motion authorization")
         with self._lock:
@@ -192,11 +278,14 @@ class HybridMissionSupervisor:
                 automatic=automatic,
                 next_segment=HybridMissionSegment.RL_TO_DIG.value,
                 completed_cycles=self._completed_cycles,
+                run_completed_cycles=0,
+                requested_cycles=cycle_count,
             )
         self._launch(
             segment=HybridMissionSegment.RL_TO_DIG,
             automatic=automatic,
             motion_authorization=motion_authorization,
+            cycle_count=cycle_count,
         )
 
     def advance(self, *, motion_authorization: str | None) -> None:
@@ -264,6 +353,7 @@ class HybridMissionSupervisor:
         segment: HybridMissionSegment,
         automatic: bool,
         motion_authorization: str | None,
+        cycle_count: int,
     ) -> None:
         with self._lock:
             prior_monitor = self._monitor
@@ -292,6 +382,8 @@ class HybridMissionSupervisor:
                     motion_authorization,
                     events,
                     commands,
+                    cycle_count,
+                    self._dig_target_ids,
                 ),
                 name=f"hybrid-mission-{segment.value}",
             )
@@ -348,7 +440,22 @@ class HybridMissionSupervisor:
             if event.get("kind") == "stage":
                 stage = event.get("stage")
                 if isinstance(stage, str) and stage:
-                    self._state = replace(self._state, stage=stage)
+                    target_id = event.get("dig_target_id")
+                    if (
+                        isinstance(target_id, str)
+                        and target_id.strip()
+                        and (
+                            not self._dig_target_ids
+                            or target_id in self._dig_target_ids
+                        )
+                    ):
+                        self._state = replace(
+                            self._state,
+                            stage=stage,
+                            dig_target_id=target_id,
+                        )
+                    else:
+                        self._state = replace(self._state, stage=stage)
                 return False
             if event.get("kind") == "waiting":
                 stage = event.get("stage")
@@ -364,6 +471,19 @@ class HybridMissionSupervisor:
                     error="",
                 )
                 return False
+            if event.get("kind") == "progress":
+                completed_cycles = event.get("completed_cycles")
+                if (
+                    not isinstance(completed_cycles, int)
+                    or isinstance(completed_cycles, bool)
+                    or not 0 <= completed_cycles <= self._state.requested_cycles
+                ):
+                    return False
+                self._state = replace(
+                    self._state,
+                    run_completed_cycles=completed_cycles,
+                )
+                return False
             if event.get("kind") != "terminal":
                 return False
             stage = event.get("stage")
@@ -373,13 +493,25 @@ class HybridMissionSupervisor:
             next_segment = event.get("next_segment", "")
             error = event.get("error", "")
             if stage == "completed":
-                self._completed_cycles += 1
+                completed_cycles = event.get("completed_cycles", 1)
+                if (
+                    not isinstance(completed_cycles, int)
+                    or isinstance(completed_cycles, bool)
+                    or completed_cycles < 1
+                ):
+                    completed_cycles = 1
+                self._completed_cycles += completed_cycles
             self._state = replace(
                 self._state,
                 stage=stage,
                 next_segment=next_segment if isinstance(next_segment, str) else "",
                 error=error if isinstance(error, str) else "",
                 completed_cycles=self._completed_cycles,
+                run_completed_cycles=(
+                    completed_cycles
+                    if stage == "completed"
+                    else self._state.run_completed_cycles
+                ),
             )
             return True
 
