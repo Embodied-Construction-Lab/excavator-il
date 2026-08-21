@@ -25,7 +25,12 @@ test -w "${deployment_root}/logs"
 echo "启动 ACT Shadow：不会传入 motion authorization，串口写边界保持禁用。"
 echo "看到 'ACT hardware ready: mode=shadow' 后保持运行至少 30 秒，再按 Ctrl+C。"
 
-exec sudo docker run --rm \
+docker_command=(docker)
+if ! docker info >/dev/null 2>&1; then
+  docker_command=(sudo docker)
+fi
+
+exec "${docker_command[@]}" run --rm \
   --runtime=nvidia --gpus all \
   --network=host \
   --read-only \

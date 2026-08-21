@@ -13,6 +13,10 @@ def test_act_shadow_runs_as_operator_with_hardware_device_groups():
     assert "/dev/video0" in script
     assert "/dev/video1" not in script
     assert "chmod 777" not in script
+    assert "docker_command=(docker)" in script
+    assert "docker info" in script
+    assert 'exec "${docker_command[@]}" run' in script
+    assert "exec sudo docker run" not in script
 
 
 def test_act_runtime_uses_the_verified_uvc_capture_node():
