@@ -1,0 +1,21 @@
+# Runtime-only LeRobot dataset and ACT dependencies. PyTorch and torchvision
+# are provided by the NVIDIA Jetson base image and must not be replaced by pip.
+av==15.1.0
+datasets==4.8.5
+draccus==0.10.0
+einops==0.8.2
+gymnasium==1.3.0
+huggingface-hub==1.27.0
+jsonlines==4.0.0
+numpy==2.2.6
+opencv-python-headless==4.13.0.92
+packaging==25.0
+pandas==2.3.3
+Pillow==12.3.0
+pyserial==3.5
+pyarrow==25.0.1
+requests==2.34.2
+safetensors==0.8.0
+setuptools==80.10.2
+termcolor==3.3.0
+tqdm==4.70.0

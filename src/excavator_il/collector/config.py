@@ -45,6 +45,19 @@ class CameraConfig:
 
 
 @dataclass(frozen=True)
+class CameraPreviewConfig:
+    bind_host: str
+    port: int
+
+
+@dataclass(frozen=True)
+class MachineStateUdpConfig:
+    host: str
+    port: int
+    machine_id: str
+
+
+@dataclass(frozen=True)
 class EpisodeDefaults:
     dig_target_m: tuple[float, float, float]
     material_id: str
@@ -60,6 +73,8 @@ class CollectionConfig:
     camera: CameraConfig
     episode_control_socket: Path
     episode_defaults: EpisodeDefaults
+    camera_preview: CameraPreviewConfig | None = None
+    machine_state_udp: MachineStateUdpConfig | None = None
 
 
 def _object(value: Any, field: str) -> dict[str, Any]:
@@ -98,6 +113,18 @@ def load_collection_config(path: str | Path) -> CollectionConfig:
     controllers = _object(root.get("controllers"), "controllers")
     serial = _object(root.get("stm32_serial"), "stm32_serial")
     camera = _object(root.get("camera_front"), "camera_front")
+    preview_value = root.get("camera_preview_http")
+    preview = (
+        None
+        if preview_value is None
+        else _object(preview_value, "camera_preview_http")
+    )
+    state_udp_value = root.get("machine_state_udp")
+    state_udp = (
+        None
+        if state_udp_value is None
+        else _object(state_udp_value, "machine_state_udp")
+    )
     defaults = _object(root.get("episode_defaults"), "episode_defaults")
 
     device_ids = controllers.get("device_ids")
@@ -178,5 +205,36 @@ def load_collection_config(path: str | Path) -> CollectionConfig:
             provenance=MappingProxyType(
                 dict(_object(defaults.get("provenance"), "episode_defaults.provenance"))
             ),
+        ),
+        camera_preview=(
+            None
+            if preview is None
+            else CameraPreviewConfig(
+                bind_host=_text(
+                    preview.get("bind_host"), "camera_preview_http.bind_host"
+                ),
+                port=_integer(
+                    preview.get("port"),
+                    "camera_preview_http.port",
+                    minimum=1,
+                    maximum=65535,
+                ),
+            )
+        ),
+        machine_state_udp=(
+            None
+            if state_udp is None
+            else MachineStateUdpConfig(
+                host=_text(state_udp.get("host"), "machine_state_udp.host"),
+                port=_integer(
+                    state_udp.get("port"),
+                    "machine_state_udp.port",
+                    minimum=1,
+                    maximum=65535,
+                ),
+                machine_id=_text(
+                    state_udp.get("machine_id"), "machine_state_udp.machine_id"
+                ),
+            )
         ),
     )

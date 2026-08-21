@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .raw_episode import STEP_FIELDS
+from .training_segments import (
+    DEFAULT_RECOVERY_JOYSTICK_SAMPLES,
+    build_training_segment_manifest,
+    locate_joystick_timeout_events,
+    state_is_quarantined,
+)
 
 
 @dataclass(frozen=True)
@@ -29,11 +35,14 @@ class StepBuildReport:
     duplicate_or_out_of_order_count: int
     serial_parse_failure_count: int
     command_write_failure_count: int
+    joystick_timeout_count: int
     sensor_invalid_count: int
     action_age_ms: Mapping[str, float]
     camera_age_ms: Mapping[str, float]
     camera_queue_drop_count: int
     disk_queue_drop_count: int
+    training_segment_count: int
+    excluded_training_step_count: int
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -69,6 +78,22 @@ def _read_camera_rows(path: Path) -> list[dict[str, str]]:
     if not rows or not required.issubset(rows[0]):
         raise ValueError("camera_front_timestamps.csv is empty or missing required columns")
     return rows
+
+
+def _read_episode_id(episode: Path) -> str:
+    metadata_path = episode / "episode.json"
+    if not metadata_path.is_file():
+        return episode.name
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"episode.json contains invalid JSON: {exc}") from exc
+    episode_id = metadata.get("episode_id") if isinstance(metadata, dict) else None
+    if not isinstance(episode_id, str) or not episode_id:
+        raise ValueError("episode.json episode_id must be non-empty text")
+    if episode_id != episode.name:
+        raise ValueError("episode.json episode_id does not match directory name")
+    return episode_id
 
 
 def _latest_causal(
@@ -182,8 +207,13 @@ def build_steps(
     camera_stamps = [int(item["camera_stamp_monotonic_ns"]) for item in cameras]
     joystick_records = _read_optional_jsonl(episode / "joystick_raw.jsonl")
     command_records = _read_optional_jsonl(episode / "command_tx.jsonl")
+    safety_events = locate_joystick_timeout_events(
+        command_records,
+        joystick_records,
+        recovery_sample_count=DEFAULT_RECOVERY_JOYSTICK_SAMPLES,
+    )
 
-    episode_id = str(stm32_records[0].get("episode_id", episode.name))
+    episode_id = _read_episode_id(episode)
     output_rows: list[dict[str, Any]] = []
     rejection_reasons: Counter[str] = Counter()
     action_ages_ms: list[float] = []
@@ -205,6 +235,9 @@ def build_steps(
         seen_sensor_sequences.add(sensor_seq)
 
         state_receive_ns = int(raw_record["orin_receive_monotonic_ns"])
+        if state_is_quarantined(state_receive_ns, safety_events):
+            rejection_reasons["safety_event_quarantine"] += 1
+            continue
         if not all(int(telemetry.get(field, 0)) == 1 for field in ("rs485_ok", "dwj_ok", "imu_ok")):
             rejection_reasons["sensor_invalid"] += 1
             continue
@@ -271,6 +304,17 @@ def build_steps(
         details = ", ".join(f"{key}={value}" for key, value in rejection_reasons.items())
         raise ValueError(f"episode contains no eligible training steps ({details})")
     _write_steps(episode / "steps.csv", output_rows)
+    segment_manifest = build_training_segment_manifest(
+        episode_id,
+        output_rows,
+        safety_events,
+        excluded_step_count=sum(rejection_reasons.values()),
+        recovery_sample_count=DEFAULT_RECOVERY_JOYSTICK_SAMPLES,
+    )
+    (episode / "training_segments.json").write_text(
+        json.dumps(segment_manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     report = StepBuildReport(
         episode_id=episode_id,
         raw_stm32_record_count=len(stm32_records),
@@ -332,11 +376,18 @@ def build_steps(
         command_write_failure_count=sum(
             1 for record in command_records if record.get("write_ok") is not True
         ),
+        joystick_timeout_count=sum(
+            1
+            for record in command_records
+            if record.get("command_kind") == "safe_zero:joystick_timeout"
+        ),
         sensor_invalid_count=int(rejection_reasons.get("sensor_invalid", 0)),
         action_age_ms=_age_statistics(action_ages_ms),
         camera_age_ms=_age_statistics(camera_ages_ms),
         camera_queue_drop_count=0,
         disk_queue_drop_count=0,
+        training_segment_count=len(segment_manifest["segments"]),
+        excluded_training_step_count=sum(rejection_reasons.values()),
     )
     (episode / "quality_report.json").write_text(
         json.dumps(asdict(report), ensure_ascii=False, indent=2) + "\n",

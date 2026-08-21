@@ -1,0 +1,74 @@
+{
+  "schema_version": "excavator_act_deployment.v3",
+  "checkpoint": {
+    "path_at_selection": "/home/zhaoshuai/workspace_uinty/RL_prj/excavator-il/outputs/act_excavator_dig_54ep_swing_zero_seed2026_200k/checkpoints/200000/pretrained_model",
+    "selected": true,
+    "selection_reason": "operator-authorized lowest saved training loss",
+    "files_sha256": {
+      "config.json": "93cb5ed474db2f1eda5b488be15e938e72d79c34dc04e9e997b7ac68730ee10b",
+      "model.safetensors": "cb69bb5251c393129fbef2db3917a879e7602c4d978e2bf446858e24f8336fd2",
+      "policy_postprocessor.json": "0e1790afcabc4ab149c95f833f8068f8470f6fa923e87734284e63d4d5eb0ee5",
+      "policy_postprocessor_step_0_unnormalizer_processor.safetensors": "5cb709ad90443b6967f2a33f3b5bc65c2b683ecb7c4100840e65bb6adf8b4bd7",
+      "policy_preprocessor.json": "5316da175aa491991d636a5e320392660bd49b1165cf8f763a4d0b79f3668b93",
+      "policy_preprocessor_step_3_normalizer_processor.safetensors": "5cb709ad90443b6967f2a33f3b5bc65c2b683ecb7c4100840e65bb6adf8b4bd7",
+      "train_config.json": "4868bac694e6dcd849d36a0c1c532677fe3051de0b9a2523d708756679a7f418"
+    }
+  },
+  "selection": {
+    "method": "training_loss",
+    "checkpoint_step": 200000,
+    "training_loss": 0.038,
+    "training_log_sha256": "b6b0407ed3d4c7f7d669db71194d6682d9a095c948024c1811588cece0910b7c",
+    "validation_performed": false
+  },
+  "data": {
+    "pipeline_validation_present": false,
+    "train_repo_id": "local/excavator_dig_20260819_54ep_v1_train_swing_zero",
+    "validation_repo_id": "local/excavator_dig_20260819_54ep_v1_validation_swing_zero",
+    "train_dataset_sha256": "b21a2255e0a71f2bb0c99f0cc767412e7dcd766814873199f8ca519971770ed8",
+    "validation_dataset_sha256": "dc9e5da39dbae6badb2a1efa96582a4023652884f00edc7f140e36fbf8a914ac",
+    "source_dataset_sha256": "885497b932bffa1981a8e8c785b0ffb422df64030c8f0253f033687a7635c645"
+  },
+  "contract": {
+    "action_order": [
+      "boom",
+      "stick",
+      "bucket",
+      "swing"
+    ],
+    "action_fields": [
+      "action_boom",
+      "action_stick",
+      "action_bucket",
+      "action_swing"
+    ],
+    "state_fields": [
+      "boom_pos_m",
+      "stick_pos_m",
+      "bucket_pos_m",
+      "boom_vel_mps",
+      "stick_vel_mps",
+      "bucket_vel_mps",
+      "boom_angle_rad",
+      "arm_angle_rad",
+      "bucket_angle_rad",
+      "swing_angle_rad",
+      "swing_vel_radps"
+    ],
+    "state_dim": 11,
+    "action_dim": 4,
+    "front_rgb_chw": [
+      3,
+      480,
+      640
+    ],
+    "chunk_size": 20,
+    "n_action_steps": 10,
+    "input_feature_keys": [
+      "observation.images.front",
+      "observation.state"
+    ],
+    "temporal_ensemble_coeff": null
+  },
+  "machine_profile_sha256": "4b8c94484389429c2c3871857d928e46ec93fa1b62c66df459336868b00d2f89"
+}

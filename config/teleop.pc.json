@@ -1,22 +1,29 @@
 {
-  "schema_version": "excavator_teleop_config.v1",
-  "orin_host": "192.168.0.55",
+  "schema_version": "excavator_teleop_config.v4",
+  "orin_host": "192.168.50.2",
   "orin_port": 18090,
   "rate_hz": 20,
   "mapping_id": "dual_stick.v1",
   "calibration_id": "raw.v1",
   "devices": [
     {
-      "device_id": "REPLACE_WITH_LEFT_JOYSTICK_GUID",
-      "axis_indices": [0, 1, 2]
+      "device_id": "03008bc34f0400001604000011010000",
+      "device_path": "/dev/input/by-id/usb-Thrustmaster_SimTask_FarmStick_Right_205C398C534B-event-joystick",
+      "axis_indices": [0, 1, 4]
     },
     {
-      "device_id": "REPLACE_WITH_RIGHT_JOYSTICK_GUID",
-      "axis_indices": [0, 1, 2]
+      "device_id": "03008bc34f0400001604000011010000",
+      "device_path": "/dev/input/by-id/usb-Thrustmaster_SimTask_FarmStick_Right_206E398D534B-event-joystick",
+      "axis_indices": [0, 1, 4]
     }
   ],
   "deadman": {
     "controller_slot": 1,
-    "button_index": 0
+    "button_index": 22
+  },
+  "startup_gate": {
+    "axis_abs_max": 0.15,
+    "stable_samples": 10,
+    "timeout_s": 5.0
   }
 }

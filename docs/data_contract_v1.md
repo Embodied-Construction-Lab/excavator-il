@@ -6,7 +6,9 @@
 
 正式数据不得直接由当前 `deploy_scale_model/doublestick_send.py` 的 `formatted_data` 生成：
 该联调发送器目前以 10 Hz 发送四舍五入到两位小数的文本轴值，且没有样本序号和单调时间。
-正式采集必须保留 Orin 接收的未舍入六轴原始值，并另存映射后的四维专家 Action。
+正式采集必须保留 Orin 接收的未舍入原始手柄包，并另存由四个 XY 映射得到的四维专家 Action。
+Z1/Z2 只用于独立遥操作和 Episode 开始前的人工预定位履带控制，不进入训练标签；Collector 一旦
+观察到本轮 Recorder 激活，直到该进程退出都必须将 STM32 命令中的 Z1/Z2 固定为零。
 
 ## 在线接口
 
@@ -15,13 +17,27 @@
 UDP 数值包固定包含：
 
 - `session_id`、`sample_seq`、PC 单调/墙钟时间；
-- 六轴 `X1/Y1/Z1/X2/Y2/Z2`，均为未舍入的 `[-1,1]` 数值；
+- 六轴 `X1/Y1/Z1/X2/Y2/Z2`：均为未舍入的 `[-1,1]` 数值；
 - 两个手柄的 slot、GUID、名称和按钮数组；
 - `deadman_pressed`、`mapping_id`、`calibration_id`。
 
 PC 以 20 Hz 发送。Orin 只接受配置的 PC 地址、设备 ID、映射和标定版本，并使用
 `(PC地址, session_id, sample_seq)` 检查重复和乱序。PC 的单调时间仅用于来源审计，不能与
 Orin/STM32 时钟直接相减。
+
+PC 本地使用带 USB 序列号的 `/dev/input/by-id/*-event-joystick` 稳定路径把物理手柄绑定到
+slot；该路径不进入 UDP 包。两个同型号手柄可以具有相同 GUID，但必须配置不同路径，且启动时
+同时校验路径、GUID 和 SDL 实例 ID，禁止依赖 SDL 枚举顺序猜测左右。此本地绑定要求 SDL 2.24
+或更新版本；`device_path` 必填的本地配置 schema 是 `excavator_teleop_config.v4`，每只手柄配置
+X/Y/Z 三个原始轴号。PC 构造的线上 `excavator_joystick.v1` 六轴包保留 Z1/Z2；Collector 仅在
+独立遥操作或 Episode 开始前的人工预定位阶段将它们转发为左右履带遥操作；Episode 一旦开始，
+直到 Collector 退出都必须在 STM32 串口边界清零，封存/结果选择不会重新开放履带。
+
+Pygame/SDL 打开手柄后的初始读数可能短暂包含错误轴值或按钮状态。PC 在创建 UDP socket 前
+必须通过本地启动稳定门：配置的六个 X/Y/Z 均在 `startup_gate.axis_abs_max` 内且 deadman 释放，
+连续满足 `startup_gate.stable_samples` 次后才允许发送首包；默认分别为 `0.15` 和 `10`，按
+20 Hz 等价于 0.5 秒。`startup_gate.timeout_s` 默认 5 秒，超时必须无网络输出地失败关闭，禁止
+把初始化瞬态当作人工动作发送。
 
 Orin 收包后以自身 `CLOCK_MONOTONIC` 同时生成专家标签：
 
@@ -34,9 +50,13 @@ Orin 收包后以自身 `CLOCK_MONOTONIC` 同时生成专家标签：
 
 ### Orin → STM32：`stm32_manual_command.v1`
 
-换行结尾 JSON 包含 schema、未改变方向的六轴、`command_seq` 和
-`command_source_stamp_ms`。STM32 才负责死区后的阀角、PWM、泵和硬件方向适配。未知 schema、
+换行结尾 JSON 包含 schema、未改变方向的六轴、`command_seq` 和 `command_source_stamp_ms`。
+manual 模式下 STM32 将 Z1/Z2 映射到左右履带；RL/ACT velocity/manual 编码以及正式 Recorder
+命令仍明确发送零 Z。STM32 负责死区后的阀角、PWM、泵和硬件方向适配。未知 schema、
 缺字段、重复/乱序帧不会更新控制目标；超过 300 ms 未收到有效命令时输出中位/零命令。
+Collector 每次启动都必须先读取一帧有效 STM32 遥测，以当前 `command_rx_seq` 恢复下一条
+`command_seq`，再发送启动零命令；2 秒内无法取得有效遥测时不得进入 ready 状态。这样既保留
+STM32 的重复/乱序拒绝，也避免 Collector 或 Orin 重启后从零计数导致合法命令被长时间拒绝。
 
 ### STM32 → Orin：`stm32_control_telemetry.v2`
 
@@ -66,6 +86,7 @@ episode_xxxx/
 ├── command_tx.jsonl
 ├── control.csv
 ├── steps.csv
+├── training_segments.json
 ├── camera_front/
 ├── camera_front_timestamps.csv
 └── quality_report.json
@@ -73,7 +94,26 @@ episode_xxxx/
 
 原始 JSONL 保留解析失败、重复/乱序和写失败事实。`command_tx.jsonl` 记录真实串口写结果，不能
 把“已生成命令”误当成“已写入 STM32”。相机编码完成后使用 Orin 单调时间打戳，并先原子落盘，
-再追加索引。正常完成、失败和中止分别写为 `complete`、`failed`、`aborted`。
+再追加索引。deadman 松开后必须先关闭全部原始流并把元数据写为 `pending_review`，再等待人工选择
+成功、失败或重录；分类只原子改写元数据，不得重新打开或继续追加原始流。正常完成、失败和中止
+最终分别写为 `complete`、`failed`、`aborted`，`pending_review` 不得进入构建、校验或转换。
+
+`quality_report.json` 必须记录 `joystick_timeout_count`。该值统计 Episode 内由于 PC 手柄包超过
+配置时限而触发的明确安全回零。运行时仍在 150 ms 后立即回零；离线流程不得插值或把旧手柄动作
+冒充为专家标签。若每个事件都有 Orin 单调时钟、串口写成功和连续 10 个有效手柄包的恢复证据，
+`build-steps` 排除故障至恢复之间的状态并在 `training_segments.json` 中建立边界；无法定位或
+确认恢复的事件仍使训练校验失败。局域网平均延迟不能用于放宽 fail-closed 超时。
+
+`training_segments.json` 的 schema 为 `excavator_training_segments.v1`。它记录 parent Episode、
+安全事件、恢复时刻、被排除的样本数和连续训练片段。每个片段使用 `steps.csv` 的半开 frame 范围
+`[start_frame_index, end_frame_index_exclusive)`；片段内部 `state_seq` 必须连续，片段不得跨安全
+事件或包含恢复隔离窗口。原始 JSONL 和 `episode.json` 不因切段而改写。旧 Episode 若没有该清单
+且 `steps.csv` 存在 `state_seq` 缺口，必须用当前版本重新执行 `build-steps`，禁止按单个连续片段转换。
+
+正式 deadman 动作前的零命令 soak 使用独立的 `inspect-zero-soak` 质量入口。它必须以
+`aborted: zero_command_soak_complete` 保留诊断原始流，并要求串口下发六轴和 STM32 回显四动作
+始终为零、`action_valid` 始终为假、无手柄超时/解析/写入/传感器/序号错误，同时满足约
+20 Hz STM32、10 Hz 新状态、20 Hz 手柄和 25～35 Hz 相机。该条不是失败训练样本，也不得转换。
 
 ## 最终训练接口
 
@@ -137,7 +177,13 @@ pump_percent,sensor_valid,control_mode
 ```
 
 第一版训练 episode 中 `sensor_valid` 必须为 `1`，`control_mode` 必须为
-`manual_joystick`。无效帧仍应留在 Orin 原始记录中，但不得写进供 ACT 转换的 `steps.csv`。
+`manual_joystick`。无效帧仍应留在 Orin 原始记录中，但不得写进供 ACT 转换的 `steps.csv`；若
+无效帧位于中间，相邻有效帧必须属于不同 Training Segment，不能压缩成看似连续的 10 Hz 序列。
+
+每个 Training Segment 转换为独立 LeRobot Episode。LeRobot 根据 Episode 边界限制 ACT 的未来
+action delta indices，并生成 `action_is_pad`；ACT loss 使用该 mask 忽略越界动作。转换后的帧额外
+保存 `source.episode_id`、`source.segment_id` 和 `source.frame_index`，用于回溯原始数据。来自同一
+parent Episode 的所有片段必须整体进入 train、validation 或 test，禁止跨集合分配。
 
 ## `episode.json`
 
@@ -151,6 +197,7 @@ pump_percent,sensor_valid,control_mode
   "operator_id": "operator_01",
   "dig_target_m": [0.8, 0.1, -0.2],
   "material_id": "dry_soil_01",
+  "status": "complete",
   "success": true,
   "intervention": false,
   "firmware_commit": "...",
@@ -168,6 +215,26 @@ pump_percent,sensor_valid,control_mode
   }
 }
 ```
+
+### 当前阀控配置基线
+
+`valve_calibration_id=data_celect_manual_open_loop_v1` 对应
+`F407/data_celect` 固件 `dda4a403aacb4ef770cd02898efcc42e03ae71b8` 中的以下开环配置：
+
+- 动作死区 `0.15`，映射保持 `[boom, stick, bucket, swing]=[Y2,Y1,X2,X1]`，四轴方向系数均为 `+1`；
+- bucket：中位 `90 deg`，正向从 `105` 到 `110 deg`，负向从 `76` 到 `71 deg`；
+- boom：中位 `90 deg`，正向从 `110` 到 `115 deg`，负向从 `78` 到 `73 deg`；
+- stick：中位 `90 deg`，正向从 `105` 到 `110 deg`，负向从 `75` 到 `69 deg`；
+- swing 最大绝对值 `20%`；任一直线轴越过死区时泵为 `-30%`，否则为 `0%`；
+- PCA9685 目标 `50 Hz`、振荡器参数 `26,540,000 Hz`；角度通道脉宽范围
+  `500..2500 us`，速度通道中位 `1500 us`、范围 `500..2500 us`；
+- `MANUAL_ACTION` 模式保持上述人工开环映射，不经过物理速度 PID；统一固件的
+  `VELOCITY_REFERENCE` 模式另行复用 RL 速度 PID，但其速度参考、PID 输出和阀量不得进入 ACT
+  专家标签。
+
+该 ID 只标识可由源码复现的阀/PWM 配置，不表示已经完成“归一化动作到实际速度、压力或流量”的
+现场物理响应标定。ACT 标签仍是死区后的归一化人工动作。上述任一参数变化时必须分配新的
+`valve_calibration_id`，不能继续使用 `v1`。
 
 相机内参和外参使用独立的、带版本号的标定文件保存，并在正式采集前给
 `episode.json` 增加对应 hash；当前尚未拿到相机型号与标定结果，因此 v1 验证器暂不强制该项。

@@ -17,12 +17,15 @@ from .camera import UvcCamera
 from .config import CollectionConfig, load_collection_config
 from .control import EpisodeController
 from .core import CollectorCore
+from .machine_state import MachineStateUdpPublisher
+from .preview import LatestJpegFrame, LatestTelemetryFrame, MjpegPreviewServer
 from .recorder import EpisodeRecorder
 from .runtime import CollectorRuntime
 
 
 LOGGER = logging.getLogger("excavator_il.collector")
 _MAX_CONTROL_REQUEST_BYTES = 16_384
+_STM32_SYNC_TIMEOUT_S = 2.0
 
 
 class CollectorService:
@@ -37,6 +40,18 @@ class CollectorService:
         self._serial = serial_port
         self._camera = camera
         self._recorder = EpisodeRecorder(config.data_root)
+        self._camera_preview = LatestJpegFrame()
+        self._telemetry_preview = LatestTelemetryFrame()
+        self._preview_server: MjpegPreviewServer | None = None
+        self._machine_state_publisher = (
+            None
+            if config.machine_state_udp is None
+            else MachineStateUdpPublisher(
+                host=config.machine_state_udp.host,
+                port=config.machine_state_udp.port,
+                machine_id=config.machine_state_udp.machine_id,
+            )
+        )
         self._core = CollectorCore(
             recorder=self._recorder,
             expected_device_ids=config.controllers.device_ids,
@@ -51,6 +66,9 @@ class CollectorService:
             camera=camera,
             allowed_pc_host=config.joystick.allowed_pc_host,
             joystick_timeout_ms=config.joystick.timeout_ms,
+            camera_preview=self._camera_preview,
+            telemetry_preview=self._telemetry_preview,
+            machine_state_publisher=self._machine_state_publisher,
         )
         self._episode_controller = EpisodeController(
             recorder=self._recorder,
@@ -151,15 +169,51 @@ class CollectorService:
                 self._control_socket = None
             path.unlink(missing_ok=True)
 
+    def _preview_loop(self) -> None:
+        assert self._preview_server is not None
+        try:
+            self._preview_server.serve_forever()
+        except BaseException as exc:
+            self._fail_worker("camera-preview", exc)
+
     def _start_workers(self) -> None:
-        for name, target in (
+        if self._config.camera_preview is not None:
+            self._preview_server = MjpegPreviewServer(
+                self._camera_preview,
+                telemetry=self._telemetry_preview,
+                bind_host=self._config.camera_preview.bind_host,
+                port=self._config.camera_preview.port,
+                allowed_client_host=self._config.joystick.allowed_pc_host,
+            )
+        workers = [
             ("stm32-telemetry", self._serial_loop),
             ("camera-front", self._camera_loop),
             ("episode-control", self._control_loop),
-        ):
+        ]
+        if self._preview_server is not None:
+            workers.append(("camera-preview", self._preview_loop))
+        for name, target in workers:
             thread = threading.Thread(name=name, target=target, daemon=True)
             thread.start()
             self._threads.append(thread)
+
+    def _synchronize_command_sequence(self) -> int:
+        deadline = time.monotonic() + _STM32_SYNC_TIMEOUT_S
+        while not self._stop.is_set() and time.monotonic() < deadline:
+            raw_line = self._serial.readline()
+            receive_monotonic_ns = time.monotonic_ns()
+            if not raw_line:
+                continue
+            frame = self._core.accept_stm32(
+                raw_line,
+                receive_monotonic_ns=receive_monotonic_ns,
+                receive_wall_ns=time.time_ns(),
+            )
+            if frame is not None:
+                return self._core.synchronize_command_sequence_from_stm32(frame)
+        raise RuntimeError(
+            "cannot synchronize command sequence: no valid STM32 telemetry"
+        )
 
     def _abort_active_episode(self, reason: str) -> None:
         if not self._recorder.active:
@@ -173,17 +227,34 @@ class CollectorService:
         udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp.bind((self._config.joystick.bind_host, self._config.joystick.port))
         udp.settimeout(0.02)
+        next_command_seq = self._synchronize_command_sequence()
+        self._runtime.send_safe_zero(reason="collector_startup")
+        self._start_workers()
         LOGGER.info(
-            "collector ready: joystick=%s:%d allowed_pc=%s serial=%s@%d camera=%s",
+            "collector ready: joystick=%s:%d allowed_pc=%s serial=%s@%d "
+            "camera=%s initial_command_seq=%d",
             self._config.joystick.bind_host,
             self._config.joystick.port,
             self._config.joystick.allowed_pc_host,
             self._config.serial.port,
             self._config.serial.baudrate,
             self._config.camera.device,
+            next_command_seq,
         )
-        self._runtime.send_safe_zero(reason="collector_startup")
-        self._start_workers()
+        if self._preview_server is not None:
+            LOGGER.info(
+                "camera preview ready: http=%s:%d allowed_pc=%s",
+                self._config.camera_preview.bind_host,
+                self._preview_server.port,
+                self._config.joystick.allowed_pc_host,
+            )
+        if self._config.machine_state_udp is not None:
+            LOGGER.info(
+                "AiryLidar machine-state ready: udp=%s:%d machine_id=%s",
+                self._config.machine_state_udp.host,
+                self._config.machine_state_udp.port,
+                self._config.machine_state_udp.machine_id,
+            )
         try:
             while not self._stop.is_set():
                 try:
@@ -211,8 +282,12 @@ class CollectorService:
             except Exception:
                 LOGGER.exception("failed to send shutdown safe-zero command")
             udp.close()
+            if self._preview_server is not None:
+                self._preview_server.close()
             for thread in self._threads:
                 thread.join(timeout=1.0)
+            if self._machine_state_publisher is not None:
+                self._machine_state_publisher.close()
             self._abort_active_episode("collector_shutdown")
 
 

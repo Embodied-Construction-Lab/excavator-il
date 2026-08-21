@@ -8,6 +8,8 @@ from pathlib import Path
 
 from PIL import Image
 
+from .training_segments import TRAINING_SEGMENTS_SCHEMA_VERSION
+
 
 STEP_FIELDS = (
     "episode_id",
@@ -55,6 +57,13 @@ class EpisodeValidationError(ValueError):
 
 
 @dataclass(frozen=True)
+class TrainingSegment:
+    segment_id: str
+    start_frame_index: int
+    end_frame_index_exclusive: int
+
+
+@dataclass(frozen=True)
 class EpisodeValidationReport:
     episode_id: str
     step_count: int
@@ -62,6 +71,8 @@ class EpisodeValidationReport:
     image_shape: tuple[int, int, int]
     max_camera_age_ms: float
     max_action_age_ms: float
+    training_segment_count: int
+    training_segments: tuple[TrainingSegment, ...]
 
 
 def _read_csv(path: Path, required_fields: tuple[str, ...]) -> list[dict[str, str]]:
@@ -93,6 +104,15 @@ def _load_metadata(path: Path) -> dict:
         raise EpisodeValidationError("episode.json schema_version must be excavator_demo_raw.v1")
     if metadata.get("task") != "ExecuteDig":
         raise EpisodeValidationError("episode.json task must be ExecuteDig")
+    status = metadata.get("status")
+    if status == "pending_review":
+        raise EpisodeValidationError(
+            "episode.json status pending_review must be classified before validation"
+        )
+    if status not in {"complete", "failed", "aborted"}:
+        raise EpisodeValidationError(
+            "episode.json status must be complete, failed, or aborted"
+        )
     camera = metadata.get("camera_front")
     if not isinstance(camera, dict):
         raise EpisodeValidationError("episode.json camera_front must be an object")
@@ -112,6 +132,170 @@ def _load_metadata(path: Path) -> dict:
     if camera["timestamp_clock"] != "CLOCK_MONOTONIC":
         raise EpisodeValidationError("camera_front timestamp_clock must be CLOCK_MONOTONIC")
     return metadata
+
+
+def _load_quality_report(path: Path) -> dict:
+    report_path = path / "quality_report.json"
+    if not report_path.is_file():
+        return {}
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise EpisodeValidationError(f"invalid quality_report.json: {exc}") from exc
+    if not isinstance(report, dict):
+        raise EpisodeValidationError("quality_report.json must be an object")
+    timeout_count = report.get("joystick_timeout_count", 0)
+    if (
+        isinstance(timeout_count, bool)
+        or not isinstance(timeout_count, int)
+        or timeout_count < 0
+    ):
+        raise EpisodeValidationError(
+            "quality_report joystick_timeout_count must be a non-negative integer"
+        )
+    return report
+
+
+def _validate_training_segments(
+    path: Path,
+    episode_id: str,
+    steps: list[dict[str, str]],
+    quality: dict,
+) -> tuple[TrainingSegment, ...]:
+    timeout_count = int(quality.get("joystick_timeout_count", 0))
+    manifest_path = path / "training_segments.json"
+    if not manifest_path.is_file():
+        if timeout_count:
+            raise EpisodeValidationError(
+                f"quality report contains {timeout_count} joystick timeout event(s) "
+                "without a recovered training segment manifest"
+            )
+        sequences = [_as_int(row["state_seq"], "state_seq") for row in steps]
+        if any(
+            right != left + 1
+            for left, right in zip(sequences, sequences[1:])
+        ):
+            raise EpisodeValidationError(
+                "legacy steps.csv has a state sequence gap; rerun build-steps "
+                "to create training_segments.json"
+            )
+        return (TrainingSegment(f"{episode_id}_segment_0000", 0, len(steps)),)
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise EpisodeValidationError(f"invalid training_segments.json: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise EpisodeValidationError("training_segments.json must be an object")
+    if manifest.get("schema_version") != TRAINING_SEGMENTS_SCHEMA_VERSION:
+        raise EpisodeValidationError(
+            f"training_segments.json schema_version must be "
+            f"{TRAINING_SEGMENTS_SCHEMA_VERSION}"
+        )
+    if manifest.get("parent_episode_id") != episode_id:
+        raise EpisodeValidationError(
+            "training_segments.json parent_episode_id does not match episode.json"
+        )
+    if manifest.get("strategy") != "lerobot_episode_boundaries":
+        raise EpisodeValidationError(
+            "training_segments.json strategy must be lerobot_episode_boundaries"
+        )
+    recovery_sample_count = manifest.get("recovery_joystick_sample_count")
+    if (
+        isinstance(recovery_sample_count, bool)
+        or not isinstance(recovery_sample_count, int)
+        or recovery_sample_count <= 0
+    ):
+        raise EpisodeValidationError(
+            "training segment recovery joystick sample count must be positive"
+        )
+    if manifest.get("unresolved_safety_event_count") != 0:
+        raise EpisodeValidationError("training segment manifest has unresolved safety events")
+    fault_events = manifest.get("fault_events")
+    if not isinstance(fault_events, list) or len(fault_events) != timeout_count:
+        raise EpisodeValidationError(
+            "training segment fault event count does not match joystick timeout count"
+        )
+    quarantine_intervals: list[tuple[int, int]] = []
+    for event in fault_events:
+        if not isinstance(event, dict) or event.get("recovered") is not True:
+            raise EpisodeValidationError("training segment safety event is not recovered")
+        if event.get("event_type") != "joystick_timeout":
+            raise EpisodeValidationError(
+                "training segment safety event type must be joystick_timeout"
+            )
+        fault = event.get("event_stamp_monotonic_ns")
+        recovery = event.get("recovery_stamp_monotonic_ns")
+        if (
+            isinstance(fault, bool)
+            or not isinstance(fault, int)
+            or isinstance(recovery, bool)
+            or not isinstance(recovery, int)
+            or recovery <= fault
+        ):
+            raise EpisodeValidationError("training segment safety event timestamps are invalid")
+        quarantine_intervals.append((fault, recovery))
+
+    raw_segments = manifest.get("segments")
+    if not isinstance(raw_segments, list) or not raw_segments:
+        raise EpisodeValidationError("training_segments.json contains no training segments")
+    segments: list[TrainingSegment] = []
+    segment_ids: set[str] = set()
+    expected_start = 0
+    for raw_segment in raw_segments:
+        if not isinstance(raw_segment, dict):
+            raise EpisodeValidationError("training segment must be an object")
+        segment_id = raw_segment.get("segment_id")
+        start = raw_segment.get("start_frame_index")
+        end = raw_segment.get("end_frame_index_exclusive")
+        if not isinstance(segment_id, str) or not segment_id:
+            raise EpisodeValidationError("training segment id must be non-empty text")
+        if segment_id in segment_ids:
+            raise EpisodeValidationError("training segment ids must be unique")
+        if (
+            isinstance(start, bool)
+            or not isinstance(start, int)
+            or isinstance(end, bool)
+            or not isinstance(end, int)
+            or start != expected_start
+            or end <= start
+            or end > len(steps)
+            or raw_segment.get("step_count") != end - start
+        ):
+            raise EpisodeValidationError("training segment frame range is invalid")
+        segment_rows = steps[start:end]
+        sequences = [_as_int(row["state_seq"], "state_seq") for row in segment_rows]
+        if any(right != left + 1 for left, right in zip(sequences, sequences[1:])):
+            raise EpisodeValidationError("training segment crosses a state sequence gap")
+        stamps = [int(row["state_receive_monotonic_ns"]) for row in segment_rows]
+        if (
+            raw_segment.get("start_state_receive_monotonic_ns") != stamps[0]
+            or raw_segment.get("end_state_receive_monotonic_ns") != stamps[-1]
+        ):
+            raise EpisodeValidationError(
+                "training segment timestamp provenance does not match steps.csv"
+            )
+        if any(
+            stamps[0] < fault <= stamps[-1]
+            for fault, _recovery in quarantine_intervals
+        ):
+            raise EpisodeValidationError("training segment crosses a safety event")
+        if any(
+            fault <= stamp <= recovery
+            for stamp in stamps
+            for fault, recovery in quarantine_intervals
+        ):
+            raise EpisodeValidationError("training segment contains a safety quarantine row")
+        segments.append(TrainingSegment(segment_id, start, end))
+        segment_ids.add(segment_id)
+        expected_start = end
+    if expected_start != len(steps):
+        raise EpisodeValidationError("training segments do not cover all training rows")
+    declared_count = quality.get("training_segment_count", len(segments))
+    if declared_count != len(segments):
+        raise EpisodeValidationError(
+            "quality report training segment count does not match manifest"
+        )
+    return tuple(segments)
 
 
 def _as_int(value: str, field: str) -> int:
@@ -140,8 +324,12 @@ def validate_episode(
     """Validate one timestamped RGB demonstration episode."""
     episode_path = Path(path)
     metadata = _load_metadata(episode_path)
+    quality = _load_quality_report(episode_path)
     episode_id = metadata["episode_id"]
     steps = _read_csv(episode_path / "steps.csv", STEP_FIELDS)
+    training_segments = _validate_training_segments(
+        episode_path, episode_id, steps, quality
+    )
     camera_rows = _read_csv(episode_path / "camera_front_timestamps.csv", CAMERA_FIELDS)
 
     frame_indices = [_as_int(row["frame_index"], "frame_index") for row in steps]
@@ -238,4 +426,6 @@ def validate_episode(
         image_shape=image_shape,
         max_camera_age_ms=oldest_camera_age_ms,
         max_action_age_ms=oldest_action_age_ms,
+        training_segment_count=len(training_segments),
+        training_segments=training_segments,
     )

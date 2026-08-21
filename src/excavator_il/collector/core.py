@@ -14,6 +14,7 @@ from ..joystick_protocol import (
 )
 from .recorder import EpisodeRecorder
 from ..stm32_protocol import (
+    Stm32ManualCommandEncoder,
     Stm32ProtocolError,
     Stm32TelemetryFrame,
     Stm32TelemetryParser,
@@ -51,9 +52,15 @@ class CollectorCore:
         self._deadzone = deadzone
         self._last_sequences: dict[tuple[str, str], int] = {}
         self._action_seq = 0
-        self._command_seq = 0
+        self._drive_axes_locked_out = False
+        self._command_encoder = Stm32ManualCommandEncoder()
         self._stm32_raw_frame_seq = 0
         self._stm32_parser = Stm32TelemetryParser()
+
+    def synchronize_command_sequence_from_stm32(
+        self, frame: Stm32TelemetryFrame
+    ) -> int:
+        return self._command_encoder.synchronize(frame)
 
     @staticmethod
     def _source_host(source_addr: str) -> str:
@@ -196,21 +203,24 @@ class CollectorCore:
             },
         )
 
-        command_axes = packet.axes if packet.deadman_pressed else (0.0,) * 6
-        command_seq = self._command_seq
+        if self._recorder.active:
+            self._drive_axes_locked_out = True
+
+        if packet.deadman_pressed:
+            x1, y1, z1, x2, y2, z2 = packet.axes
+            if self._drive_axes_locked_out:
+                command_axes = (x1, y1, 0.0, x2, y2, 0.0)
+            else:
+                command_axes = (x1, y1, z1, x2, y2, z2)
+        else:
+            command_axes = (0.0,) * 6
+        command_seq = self._command_encoder.next_sequence
         action_seq = self._action_seq
         command_kind = "manual" if packet.deadman_pressed else "safe_zero:deadman_released"
-        command = {
-            "schema_version": "stm32_manual_command.v1",
-            **dict(zip(AXIS_NAMES, command_axes, strict=True)),
-            "command_seq": command_seq,
-            "command_source_stamp_ms": (receive_monotonic_ns // 1_000_000) & 0xFFFFFFFF,
-        }
-        serial_payload = (
-            json.dumps(command, ensure_ascii=False, separators=(",", ":")) + "\n"
-        ).encode("ascii")
+        serial_payload = self._command_encoder.encode(
+            axes=command_axes, monotonic_ns=receive_monotonic_ns
+        )
         self._action_seq += 1
-        self._command_seq = (self._command_seq + 1) & 0xFFFFFFFF
         return CollectorDecision(
             accepted=True,
             reason="accepted",
@@ -230,17 +240,10 @@ class CollectorCore:
     def make_safe_zero(self, *, monotonic_ns: int, reason: str) -> CollectorDecision:
         if not reason:
             raise ValueError("safe-zero reason must be non-empty")
-        command_seq = self._command_seq
-        command = {
-            "schema_version": "stm32_manual_command.v1",
-            **dict.fromkeys(AXIS_NAMES, 0.0),
-            "command_seq": command_seq,
-            "command_source_stamp_ms": (monotonic_ns // 1_000_000) & 0xFFFFFFFF,
-        }
-        payload = (
-            json.dumps(command, ensure_ascii=False, separators=(",", ":")) + "\n"
-        ).encode("ascii")
-        self._command_seq = (self._command_seq + 1) & 0xFFFFFFFF
+        command_seq = self._command_encoder.next_sequence
+        payload = self._command_encoder.encode(
+            axes=(0.0,) * len(AXIS_NAMES), monotonic_ns=monotonic_ns
+        )
         return CollectorDecision(
             accepted=True,
             reason=reason,

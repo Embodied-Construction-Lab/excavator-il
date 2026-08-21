@@ -1,0 +1,11 @@
+**
+!pyproject.toml
+!README.md
+!src/
+!src/**
+!docker/
+!docker/act-inference.Dockerfile
+!docker/act-inference.incremental.Dockerfile
+!docker/act-inference.requirements.txt
+!docker/wheelhouse/
+!docker/wheelhouse/**

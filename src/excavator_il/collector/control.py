@@ -84,6 +84,39 @@ class EpisodeController:
             "status": "aborted" if aborted else ("complete" if success else "failed"),
         }
 
+    def _seal(self) -> dict[str, Any]:
+        path = self._recorder.seal(
+            end_wall_ns=self._wall_ns(),
+            end_monotonic_ns=self._monotonic_ns(),
+        )
+        return {
+            "ok": True,
+            "active": False,
+            "episode_id": path.name,
+            "path": str(path),
+            "status": "pending_review",
+        }
+
+    def _finalize(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        result = self._text(request, "result")
+        path = self._recorder.finalize_pending(
+            self._text(request, "path"),
+            result=result,
+            failure_reason=str(request.get("failure_reason", "")),
+        )
+        status = {
+            "success": "complete",
+            "failure": "failed",
+            "aborted": "aborted",
+        }[result]
+        return {
+            "ok": True,
+            "active": False,
+            "episode_id": path.name,
+            "path": str(path),
+            "status": status,
+        }
+
     def handle(self, request: Mapping[str, Any]) -> dict[str, Any]:
         command = self._text(request, "command")
         if command == "status":
@@ -94,6 +127,10 @@ class EpisodeController:
             }
         if command == "start":
             return self._start(request)
+        if command == "seal":
+            return self._seal()
+        if command == "finalize":
+            return self._finalize(request)
         if command == "stop":
             success = request.get("success")
             if not isinstance(success, bool):

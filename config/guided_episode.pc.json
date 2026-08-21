@@ -1,0 +1,40 @@
+{
+  "schema_version": "excavator_guided_episode_config.v3",
+  "teleop_config": "teleop.pc.json",
+  "orin": {
+    "ssh_host": "jetson16@192.168.50.2",
+    "repo": "/home/jetson16/workspace_excavator/excavator-il",
+    "executable": "/home/jetson16/apps/miniconda3/envs/excavator-il-collector/bin/excavator-il",
+    "collection_config": "config/collection.orin.json"
+  },
+  "rl_preposition": {
+    "airy_repo": "../../AiryLidar",
+    "ros_setup": "/opt/ros/jazzy/setup.zsh",
+    "workspace_setup": "ros2_ws/install/setup.zsh",
+    "mission_config": "mission/config/excavation_cycle.json",
+    "demo_config": "mission/config/excavation_demo.json",
+    "phase": "dig",
+    "timeout_s": 90,
+    "serial_port": "/dev/ttyTHS1",
+    "serial_release_timeout_s": 8,
+    "orin_repo": "/home/jetson16/workspace_excavator/excavator-orin-runtime",
+    "orin_python": "/home/jetson16/apps/miniconda3/envs/excavator-orin/bin/python",
+    "edge_config": "deploy/edge_runtime.remote.json",
+    "pc_host": "192.168.50.1",
+    "ready_timeout_s": 15
+  },
+  "episode": {
+    "task": "ExecuteDig",
+    "operator_id": "zhaoshuai",
+    "dig_target_m": [0.8, 0.0, -0.2],
+    "material_id": "soil_default",
+    "failure_reason": "diagnostic_task_failed"
+  },
+  "runtime": {
+    "collector_ready_timeout_s": 8,
+    "ack_timeout_s": 8,
+    "teleop_print_every": 1,
+    "zero_soak_duration_s": 30,
+    "log_dir": "../logs"
+  }
+}

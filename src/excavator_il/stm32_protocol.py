@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import csv
+import json
 import math
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
+
+from .joystick_protocol import AXIS_NAMES
 
 
 STM32_TELEMETRY_SCHEMA_VERSION = "stm32_control_telemetry.v2"
@@ -194,3 +197,48 @@ class Stm32TelemetryParser:
             receive_monotonic_ns=receive_monotonic_ns,
             values=MappingProxyType(parsed),
         )
+
+
+class Stm32ManualCommandEncoder:
+    """Encode the one authoritative manual-command wire contract."""
+
+    def __init__(self) -> None:
+        self._next_sequence = 0
+
+    @property
+    def next_sequence(self) -> int:
+        return self._next_sequence
+
+    def synchronize(self, frame: Stm32TelemetryFrame) -> int:
+        values = frame.values
+        command_received = bool(
+            int(values["command_valid"]) or int(values["command_timed_out"])
+        )
+        self._next_sequence = (
+            (int(values["command_rx_seq"]) + 1) & 0xFFFFFFFF
+            if command_received
+            else 0
+        )
+        return self._next_sequence
+
+    def encode(self, *, axes: tuple[float, ...], monotonic_ns: int) -> bytes:
+        if len(axes) != len(AXIS_NAMES):
+            raise ValueError("STM32 manual command requires six axes")
+        normalized = tuple(float(value) for value in axes)
+        if not all(
+            math.isfinite(value) and -1.000001 <= value <= 1.000001
+            for value in normalized
+        ):
+            raise ValueError("STM32 manual command axes must be finite within [-1, 1]")
+        if isinstance(monotonic_ns, bool) or not isinstance(monotonic_ns, int) or monotonic_ns < 0:
+            raise ValueError("STM32 command timestamp must be non-negative integer nanoseconds")
+        command = {
+            "schema_version": "stm32_manual_command.v1",
+            **dict(zip(AXIS_NAMES, normalized, strict=True)),
+            "command_seq": self._next_sequence,
+            "command_source_stamp_ms": (monotonic_ns // 1_000_000) & 0xFFFFFFFF,
+        }
+        self._next_sequence = (self._next_sequence + 1) & 0xFFFFFFFF
+        return (
+            json.dumps(command, ensure_ascii=False, separators=(",", ":")) + "\n"
+        ).encode("ascii")

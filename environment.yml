@@ -6,5 +6,4 @@ dependencies:
   - ffmpeg
   - pip
   - pip:
-      - lerobot==0.5.2
-      - -e .[test]
+      - -e .[teleop,training,test,ui]

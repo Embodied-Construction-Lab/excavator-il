@@ -1,0 +1,34 @@
+{
+  "schema_version": "excavator_act_runtime_config.v2",
+  "checkpoint_path": "/opt/act-checkpoint",
+  "deployment_manifest_path": "/opt/act-deployment/deployment_manifest.json",
+  "machine_profile_path": "/opt/excavator-config/machine_profile.json",
+  "checkpoint_model_sha256": "cb69bb5251c393129fbef2db3917a879e7602c4d978e2bf446858e24f8336fd2",
+  "checkpoint_files_sha256": {
+    "config.json": "93cb5ed474db2f1eda5b488be15e938e72d79c34dc04e9e997b7ac68730ee10b",
+    "model.safetensors": "cb69bb5251c393129fbef2db3917a879e7602c4d978e2bf446858e24f8336fd2",
+    "policy_postprocessor.json": "0e1790afcabc4ab149c95f833f8068f8470f6fa923e87734284e63d4d5eb0ee5",
+    "policy_postprocessor_step_0_unnormalizer_processor.safetensors": "5cb709ad90443b6967f2a33f3b5bc65c2b683ecb7c4100840e65bb6adf8b4bd7",
+    "policy_preprocessor.json": "5316da175aa491991d636a5e320392660bd49b1165cf8f763a4d0b79f3668b93",
+    "policy_preprocessor_step_3_normalizer_processor.safetensors": "5cb709ad90443b6967f2a33f3b5bc65c2b683ecb7c4100840e65bb6adf8b4bd7",
+    "train_config.json": "4868bac694e6dcd849d36a0c1c532677fe3051de0b9a2523d708756679a7f418"
+  },
+  "log_root": "/opt/act-runtime-logs",
+  "device": "cuda",
+  "stm32_serial": {
+    "port": "/dev/ttyTHS1",
+    "baudrate": 460800
+  },
+  "camera_front": {
+    "device": "/dev/video0",
+    "width": 640,
+    "height": 480,
+    "fps": 30
+  },
+  "timing": {
+    "max_inference_state_age_ms": 100,
+    "state_silence_timeout_ms": 250,
+    "max_camera_age_ms": 120,
+    "max_inference_ms": 100
+  }
+}

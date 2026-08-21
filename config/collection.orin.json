@@ -1,16 +1,16 @@
 {
   "schema_version": "excavator_collection_config.v1",
-  "data_root": "~/excavator-data/raw",
+  "data_root": "/home/jetson16/workspace_excavator/data/excavator-data",
   "joystick_udp": {
     "bind_host": "0.0.0.0",
     "port": 18090,
-    "allowed_pc_host": "192.168.0.220",
+    "allowed_pc_host": "192.168.50.1",
     "timeout_ms": 150
   },
   "controllers": {
     "device_ids": [
-      "REPLACE_WITH_LEFT_JOYSTICK_GUID",
-      "REPLACE_WITH_RIGHT_JOYSTICK_GUID"
+      "03008bc34f0400001604000011010000",
+      "03008bc34f0400001604000011010000"
     ],
     "mapping_id": "dual_stick.v1",
     "calibration_id": "raw.v1",
@@ -27,16 +27,25 @@
     "fps": 30,
     "jpeg_quality": 95
   },
-  "episode_control_socket": "~/.local/run/excavator-il/collector.sock",
+  "camera_preview_http": {
+    "bind_host": "0.0.0.0",
+    "port": 18092
+  },
+  "machine_state_udp": {
+    "host": "192.168.50.1",
+    "port": 18081,
+    "machine_id": "scale_excavator_v1"
+  },
+  "episode_control_socket": "/home/jetson16/.local/run/excavator-il/collector.sock",
   "episode_defaults": {
     "dig_target_m": [0.8, 0.0, -0.2],
     "material_id": "soil_default",
     "provenance": {
-      "firmware_commit": "REPLACE_BEFORE_COLLECTION",
-      "urdf_hash": "REPLACE_BEFORE_COLLECTION",
-      "machine_profile_hash": "REPLACE_BEFORE_COLLECTION",
-      "valve_calibration_id": "REPLACE_BEFORE_COLLECTION",
-      "pump_setting": "REPLACE_BEFORE_COLLECTION"
+      "firmware_commit": "ed2d8548bffe5e7a63973a69a8847f161d75ef31",
+      "urdf_hash": "8b2fdbeb63c909b4393e4a67783ad7ec0ab8731f853bf6b0ed847a4667fbdb9f",
+      "machine_profile_hash": "4b8c94484389429c2c3871857d928e46ec93fa1b62c66df459336868b00d2f89",
+      "valve_calibration_id": "data_celect_manual_open_loop_v1",
+      "pump_setting": "JOYSTICK_FIXED_PUMP_PERCENT=-30.0f"
     }
   }
 }

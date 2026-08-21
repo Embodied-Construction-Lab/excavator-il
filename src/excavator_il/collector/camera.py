@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+import numpy as np
+
 from .config import CameraConfig
 
 
@@ -14,6 +16,12 @@ class EncodedCameraFrame:
     capture_monotonic_ns: int
     encoded_image: bytes
     extension: str
+
+
+@dataclass(frozen=True)
+class RgbCameraFrame:
+    capture_monotonic_ns: int
+    rgb: np.ndarray
 
 
 class UvcCamera:
@@ -62,6 +70,19 @@ class UvcCamera:
             capture_monotonic_ns=capture_monotonic_ns,
             encoded_image=encoded.tobytes(),
             extension="jpg",
+        )
+
+    def read_rgb(self) -> RgbCameraFrame:
+        ok, frame = self._capture.read()
+        capture_monotonic_ns = self._clock()
+        if not ok or frame is None:
+            raise RuntimeError(f"camera read failed for {self._config.device}")
+        rgb = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2RGB)
+        if rgb.dtype != np.uint8:
+            raise RuntimeError("camera RGB frame must use uint8 pixels")
+        return RgbCameraFrame(
+            capture_monotonic_ns=capture_monotonic_ns,
+            rgb=np.ascontiguousarray(rgb),
         )
 
     def close(self) -> None:

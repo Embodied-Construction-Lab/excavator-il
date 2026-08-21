@@ -12,6 +12,18 @@ class _Result:
     value: str = "ok"
 
 
+@dataclass(frozen=True)
+class _ZeroResult:
+    passed: bool
+    episode_id: str
+
+
+@dataclass(frozen=True)
+class _CheckpointResult:
+    value: str = "ok"
+    selected_checkpoint: str = "checkpoint-a"
+
+
 def test_validate_command_prints_machine_readable_report(rgb_episode_factory, capsys):
     episode = rgb_episode_factory()
 
@@ -32,7 +44,7 @@ def test_validate_command_returns_nonzero_for_invalid_episode(tmp_path, capsys):
 
 
 def test_cli_dispatches_collection_tools_without_importing_training_stack(monkeypatch, capsys):
-    from excavator_il import episode_builder, teleop
+    from excavator_il import episode_builder, joystick_diagnostic, teleop
     from excavator_il.collector import client, config, service
 
     calls = []
@@ -41,6 +53,11 @@ def test_cli_dispatches_collection_tools_without_importing_training_stack(monkey
         teleop, "run_teleop", lambda loaded, print_every: calls.append((loaded, print_every))
     )
     monkeypatch.setattr(teleop, "list_pygame_devices", lambda: [{"device_id": "one"}])
+    monkeypatch.setattr(
+        joystick_diagnostic,
+        "run_joystick_diagnostic",
+        lambda loaded: SimpleNamespace(matches_config=True),
+    )
     monkeypatch.setattr(service, "run_collector", lambda path: calls.append(("collect", path)))
     monkeypatch.setattr(episode_builder, "build_steps", lambda *args, **kwargs: _Result())
     monkeypatch.setattr(
@@ -56,6 +73,7 @@ def test_cli_dispatches_collection_tools_without_importing_training_stack(monkey
 
     assert main(["teleop", "--config", "teleop.json", "--print-every", "7"]) == 0
     assert main(["list-joysticks"]) == 0
+    assert main(["diagnose-joysticks", "--config", "teleop.json"]) == 0
     assert main(["collect", "--config", "collection.json"]) == 0
     assert main(["build-steps", "episode_0001"]) == 0
     assert main(
@@ -78,17 +96,239 @@ def test_cli_dispatches_collection_tools_without_importing_training_stack(monkey
     ) == 0
     assert main(["episode", "stop", "--failure-reason", "bucket_empty"]) == 0
     assert main(["episode", "abort", "--reason", "emergency_stop"]) == 0
+    assert main(["episode", "seal"]) == 0
+    assert main(
+        [
+            "episode",
+            "finalize",
+            "/data/raw/episode_0001",
+            "--result",
+            "failure",
+            "--failure-reason",
+            "diagnostic_task_failed",
+        ]
+    ) == 0
     assert calls == [("teleop:teleop.json", 7), ("collect", "collection.json")]
     assert "device_id" in capsys.readouterr().out
 
 
+def test_diagnose_joysticks_returns_nonzero_when_mapping_does_not_match(monkeypatch):
+    from excavator_il import joystick_diagnostic, teleop
+
+    monkeypatch.setattr(teleop.TeleopConfig, "load", lambda path: f"teleop:{path}")
+    monkeypatch.setattr(
+        joystick_diagnostic,
+        "run_joystick_diagnostic",
+        lambda loaded: SimpleNamespace(matches_config=False),
+    )
+
+    assert main(["diagnose-joysticks"]) == 3
+
+
+def test_act_runtime_cli_defaults_to_shadow_and_passes_exact_motion_authorization(
+    monkeypatch,
+):
+    from excavator_il import cli
+    from excavator_il import act_runtime_service
+
+    calls = []
+    logging_calls = []
+    monkeypatch.setattr(
+        cli.logging,
+        "basicConfig",
+        lambda **kwargs: logging_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        act_runtime_service,
+        "run_act_runtime",
+        lambda path, motion_authorization=None, max_steps=None,
+        hardware_start_gate=None: calls.append(
+            (path, motion_authorization, max_steps, hardware_start_gate)
+        ),
+    )
+
+    assert main(["act-runtime", "--config", "runtime.json"]) == 0
+    assert main(
+        [
+            "act-runtime",
+            "--config",
+            "runtime.json",
+            "--motion-authorization",
+            "ALLOW_ACT_MACHINE_MOTION",
+            "--hardware-start-gate",
+            "/opt/act-control/hybrid_001.start",
+        ]
+    ) == 0
+    assert calls == [
+        ("runtime.json", None, None, None),
+        (
+            "runtime.json",
+            "ALLOW_ACT_MACHINE_MOTION",
+            None,
+            "/opt/act-control/hybrid_001.start",
+        ),
+    ]
+    assert all(call["force"] is True for call in logging_calls)
+
+
+def test_inspect_zero_soak_returns_nonzero_for_unsafe_episode(monkeypatch, capsys):
+    from excavator_il import zero_soak
+
+    monkeypatch.setattr(
+        zero_soak,
+        "inspect_zero_command_episode",
+        lambda path: _ZeroResult(passed=False, episode_id=str(path)),
+    )
+
+    assert main(["inspect-zero-soak", "episode_0007"]) == 3
+    assert json.loads(capsys.readouterr().out)["passed"] is False
+
+
+def test_diagnose_joysticks_handles_operator_interrupt_without_traceback(
+    monkeypatch, capsys
+):
+    from excavator_il import joystick_diagnostic, teleop
+
+    monkeypatch.setattr(teleop.TeleopConfig, "load", lambda path: f"teleop:{path}")
+
+    def interrupt(unused_config):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(joystick_diagnostic, "run_joystick_diagnostic", interrupt)
+
+    assert main(["diagnose-joysticks"]) == 130
+    assert "diagnostic interrupted" in capsys.readouterr().err
+
+
+def test_teleop_handles_operator_interrupt_without_traceback(monkeypatch, capsys):
+    from excavator_il import teleop
+
+    monkeypatch.setattr(teleop.TeleopConfig, "load", lambda path: f"teleop:{path}")
+
+    def interrupt(unused_config, *, print_every):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(teleop, "run_teleop", interrupt)
+
+    assert main(["teleop"]) == 130
+    assert "teleop interrupted" in capsys.readouterr().err
+
+
 def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
     pytest.importorskip("lerobot")
-    from excavator_il import act_smoke, lerobot_conversion
+    from excavator_il import (
+        action_dataset_transform,
+        act_smoke,
+        checkpoint_evaluation,
+        lerobot_conversion,
+        training_split,
+    )
+
+    inference_arguments = {}
+
+    def infer(**kwargs):
+        inference_arguments.update(kwargs)
+        return _Result()
 
     monkeypatch.setattr(lerobot_conversion, "convert_episodes", lambda *a, **k: _Result())
     monkeypatch.setattr(act_smoke, "run_act_smoke_train_step", lambda **k: _Result())
+    monkeypatch.setattr(act_smoke, "run_act_checkpoint_inference", infer)
+    monkeypatch.setattr(training_split, "prepare_training_split", lambda **k: _Result())
+    monkeypatch.setattr(training_split, "materialize_training_split", lambda **k: _Result())
+    monkeypatch.setattr(
+        action_dataset_transform, "derive_zero_swing_split", lambda **k: _Result()
+    )
+    monkeypatch.setattr(
+        checkpoint_evaluation, "evaluate_act_checkpoints", lambda **k: _CheckpointResult()
+    )
 
     assert main(["convert", "ep", "--output-root", "out"]) == 0
+    assert main(
+        [
+            "prepare-training-split",
+            "--dataset-root",
+            "dataset",
+            "--repo-id",
+            "local/dataset",
+            "--output",
+            "training_split.json",
+            "--train-ratio",
+            "0.8",
+            "--seed",
+            "7",
+        ]
+    ) == 0
+    assert main(
+        [
+            "derive-zero-swing-split",
+            "--source-root",
+            "data/lerobot/source_split",
+            "--output-root",
+            "data/lerobot/swing_zero_split",
+            "--repo-suffix",
+            "swing_zero",
+        ]
+    ) == 0
+    assert main(
+        [
+            "evaluate-checkpoints",
+            "checkpoint-a",
+            "checkpoint-b",
+            "--split-root",
+            "data/lerobot/split",
+            "--device",
+            "cuda",
+        ]
+    ) == 0
+    assert main(
+        [
+            "materialize-training-split",
+            "--manifest",
+            "training_split.json",
+            "--output-root",
+            "data/lerobot/splits",
+        ]
+    ) == 0
     assert main(["smoke-train"]) == 0
-    assert capsys.readouterr().out.count('"value": "ok"') == 2
+    assert main(
+        [
+            "smoke-infer",
+            "checkpoint",
+            "--dataset-root",
+            "dataset",
+            "--repo-id",
+            "local/dataset",
+            "--warmup-runs",
+            "2",
+            "--timed-runs",
+            "3",
+            "--max-inference-ms",
+            "100",
+        ]
+    ) == 0
+    assert inference_arguments["warmup_runs"] == 2
+    assert inference_arguments["timed_runs"] == 3
+    assert inference_arguments["max_inference_ms"] == 100.0
+    assert capsys.readouterr().out.count('"value": "ok"') == 7
+
+
+def test_cli_synthesizes_pipeline_validation_episodes(monkeypatch, capsys):
+    from excavator_il import synthetic_episodes
+
+    monkeypatch.setattr(
+        synthetic_episodes,
+        "synthesize_episodes",
+        lambda *args, **kwargs: _Result(),
+    )
+
+    assert main(
+        [
+            "synthesize-episodes",
+            "episode_0004",
+            "--output-root",
+            "data/raw/synthetic",
+            "--count",
+            "10",
+        ]
+    ) == 0
+    assert '"value": "ok"' in capsys.readouterr().out
