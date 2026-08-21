@@ -748,6 +748,66 @@ def test_system_starts_owned_rl_runtime_and_waits_for_ready(tmp_path, monkeypatc
     assert "fuser" in preflight_commands[1]
 
 
+def test_system_prewarms_rl_without_serial_then_releases_gate_after_serial_check(
+    tmp_path, monkeypatch
+):
+    config = _guided_config(tmp_path)
+    process_calls = []
+    remote_commands = []
+
+    class FakeRuntimeProcess:
+        def __init__(self, argv, **kwargs):
+            process_calls.append((argv, kwargs))
+
+        def wait_for(self, predicate, timeout_s, *, after_index=-1):
+            del timeout_s, after_index
+            candidates = (
+                "GUIDED_RL_PID=4242",
+                "RL prewarm ready: waiting for hardware start gate",
+                "REMOTE EDGE CONTROL ARMED IDLE",
+                "sent seq=0 stm32_t=100 sensor_valid=True",
+            )
+            line = next(candidate for candidate in candidates if predicate(candidate))
+            return candidates.index(line), line
+
+    operations = SystemGuidedEpisodeOperations(
+        config,
+        output=lambda _message: None,
+        line_process_factory=FakeRuntimeProcess,
+    )
+
+    def fake_run_ssh(command):
+        remote_commands.append(command)
+        if "fuser -s" in command:
+            return "released\n"
+        return "ready\n"
+
+    monkeypatch.setattr(operations, "_run_ssh", fake_run_ssh)
+    gate = "/tmp/excavator-rl-control/hybrid_test.start"
+
+    operations.prewarm_rl_runtime(gate)
+
+    rendered = " ".join(process_calls[0][0])
+    assert "--hardware-start-gate" in rendered
+    assert gate in rendered
+    assert not any("touch --" in command for command in remote_commands)
+
+    operations.start_rl_runtime()
+
+    assert operations._rl_runtime_pid == 4242
+    serial_check_index = next(
+        index
+        for index, command in enumerate(remote_commands)
+        if "fuser -s" in command
+    )
+    gate_release_index = next(
+        index
+        for index, command in enumerate(remote_commands)
+        if "touch --" in command
+    )
+    assert serial_check_index < gate_release_index
+
+
 def test_system_rl_release_targets_one_runtime_and_waits_for_serial(tmp_path, monkeypatch):
     config = _guided_config(tmp_path)
     remote_commands = []

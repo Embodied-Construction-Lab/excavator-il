@@ -352,6 +352,7 @@ class SystemGuidedEpisodeOperations:
         self._collector_pid: int | None = None
         self._rl_runtime: Any | None = None
         self._rl_runtime_pid: int | None = None
+        self._rl_hardware_start_gate: PurePosixPath | None = None
         self._teleop_cursor = -1
         self._started_episode_paths: tuple[str, ...] = ()
         self._discardable_episode_paths: tuple[str, ...] = ()
@@ -507,8 +508,7 @@ class SystemGuidedEpisodeOperations:
             raise RuntimeError(f"RL Mission {phase} position_m must be finite")
         return values
 
-    def start_rl_runtime(self) -> None:
-        self._reclaim_known_serial_owner()
+    def _rl_runtime_preflight(self, *, require_serial_free: bool) -> None:
         python = shlex.quote(str(self._config.rl_orin_python))
         edge_config = shlex.quote(str(self._config.rl_edge_config))
         pc_host = shlex.quote(self._config.rl_pc_host)
@@ -520,6 +520,13 @@ class SystemGuidedEpisodeOperations:
             "actual == sys.argv[2] or sys.exit("
             "f'allowed_client_host={actual!r}, expected {sys.argv[2]!r}')"
         )
+        serial_check = ""
+        if require_serial_free:
+            serial_check = f"""if fuser -s {serial}; then
+  echo "serial is already owned: {serial}" >&2
+  exit 16
+fi
+"""
         preflight_script = f"""set -eu
 command -v pgrep >/dev/null
 command -v fuser >/dev/null
@@ -530,10 +537,7 @@ if pgrep -u "$(id -u)" -f '[p]ython[^ ]* .*[/ ]orin_state_sender\\.py([[:space:]
   echo "orin_state_sender.py is already running" >&2
   exit 15
 fi
-if fuser -s {serial}; then
-  echo "serial is already owned: {serial}" >&2
-  exit 16
-fi
+{serial_check}
 echo ready
 """
         preflight = self._run_ssh(
@@ -543,27 +547,39 @@ echo ready
         )
         if preflight.strip() != "ready":
             raise RuntimeError("RL Runtime preflight did not confirm readiness")
-        rl_log = self._config.log_dir / f"guided_episode_{self._timestamp}.rl-runtime.log"
-        remote_command = self._in_remote_rl_repo(
-            [
-                str(self._config.rl_orin_python),
-                "-u",
-                "orin_state_sender.py",
-                "--serial-port",
-                str(self._config.rl_serial_port),
-                "--control-enabled",
-                "--pc-host",
-                self._config.rl_pc_host,
-                "--edge-config",
-                str(self._config.rl_edge_config),
-                "--edge-motion-authorization",
-                "ALLOW_EDGE_MACHINE_MOTION",
-                "--print-every",
-                "100",
-            ]
-        )
-        remote_command = remote_command.replace(
+
+    def _rl_remote_command(
+        self, *, hardware_start_gate: PurePosixPath | None
+    ) -> str:
+        argv = [
+            str(self._config.rl_orin_python),
+            "-u",
+            "orin_state_sender.py",
+            "--serial-port",
+            str(self._config.rl_serial_port),
+            "--control-enabled",
+            "--pc-host",
+            self._config.rl_pc_host,
+            "--edge-config",
+            str(self._config.rl_edge_config),
+            "--edge-motion-authorization",
+            "ALLOW_EDGE_MACHINE_MOTION",
+            "--print-every",
+            "100",
+        ]
+        if hardware_start_gate is not None:
+            argv.extend(("--hardware-start-gate", str(hardware_start_gate)))
+        remote_command = self._in_remote_rl_repo(argv)
+        return remote_command.replace(
             "&& ", "&& echo GUIDED_RL_PID=$$ && exec ", 1
+        )
+
+    def _spawn_rl_runtime(
+        self, *, hardware_start_gate: PurePosixPath | None
+    ) -> None:
+        rl_log = self._config.log_dir / f"guided_episode_{self._timestamp}.rl-runtime.log"
+        remote_command = self._rl_remote_command(
+            hardware_start_gate=hardware_start_gate
         )
         self._rl_runtime = self._line_process_factory(
             self._ssh_argv(remote_command),
@@ -577,17 +593,89 @@ echo ready
                 self._config.rl_ready_timeout_s,
             )
             self._rl_runtime_pid = int(pid_line.split("=", maxsplit=1)[1])
-            self._rl_runtime.wait_for(
-                lambda line: "REMOTE EDGE CONTROL ARMED IDLE" in line,
-                self._config.rl_ready_timeout_s,
-            )
-            self._rl_runtime.wait_for(
-                lambda line: "sent seq=" in line and "sensor_valid=True" in line,
-                self._config.rl_ready_timeout_s,
-            )
+            if hardware_start_gate is not None:
+                self._rl_runtime.wait_for(
+                    lambda line: "RL prewarm ready:" in line,
+                    self._config.rl_ready_timeout_s,
+                )
+                return
+            self._wait_for_rl_runtime_ready()
         except BaseException:
             self.stop_rl_runtime_and_wait_for_serial()
             raise
+
+    def _wait_for_rl_runtime_ready(self) -> None:
+        if self._rl_runtime is None:
+            raise RuntimeError("RL Runtime process is not available")
+        self._rl_runtime.wait_for(
+            lambda line: "REMOTE EDGE CONTROL ARMED IDLE" in line,
+            self._config.rl_ready_timeout_s,
+        )
+        self._rl_runtime.wait_for(
+            lambda line: "sent seq=" in line and "sensor_valid=True" in line,
+            self._config.rl_ready_timeout_s,
+        )
+
+    def _confirm_rl_serial_release(self) -> None:
+        serial = shlex.quote(str(self._config.rl_serial_port))
+        output = self._run_ssh(
+            "/bin/sh -c "
+            + shlex.quote(
+                f"set -eu; command -v fuser >/dev/null; "
+                f"if fuser -s {serial}; then echo 'serial still owned' >&2; exit 14; fi; "
+                "echo released"
+            )
+        )
+        if output.strip() != "released":
+            raise RuntimeError("RL handoff did not confirm serial release")
+
+    def prewarm_rl_runtime(self, hardware_start_gate: str | PurePosixPath) -> None:
+        """Load RL deployment assets without opening the STM32 serial port."""
+
+        if self._rl_runtime is not None:
+            raise RuntimeError("an RL Runtime is already active or prewarmed")
+        gate = PurePosixPath(hardware_start_gate)
+        allowed_parent = PurePosixPath("/tmp/excavator-rl-control")
+        if (
+            not gate.is_absolute()
+            or gate.parent != allowed_parent
+            or not gate.name.startswith("hybrid_")
+            or not gate.name.endswith(".start")
+        ):
+            raise ValueError(
+                "RL hardware start gate must be /tmp/excavator-rl-control/hybrid_*.start"
+            )
+        self._rl_runtime_preflight(require_serial_free=False)
+        self._run_ssh(
+            "/bin/sh -c "
+            + shlex.quote(
+                "set -eu; mkdir -p -- "
+                + shlex.quote(str(gate.parent))
+                + "; rm -f -- "
+                + shlex.quote(str(gate))
+            )
+        )
+        self._rl_hardware_start_gate = gate
+        self._spawn_rl_runtime(hardware_start_gate=gate)
+
+    def start_rl_runtime(self) -> None:
+        if self._rl_runtime is not None:
+            gate = self._rl_hardware_start_gate
+            if gate is None:
+                raise RuntimeError("RL Runtime is already active")
+            try:
+                self._confirm_rl_serial_release()
+                self._run_ssh("touch -- " + shlex.quote(str(gate)))
+                self._rl_hardware_start_gate = None
+                self._wait_for_rl_runtime_ready()
+            except BaseException:
+                self.stop_rl_runtime_and_wait_for_serial()
+                raise
+            return
+
+        self._reclaim_known_serial_owner()
+        self._rl_runtime_preflight(require_serial_free=True)
+        self._spawn_rl_runtime(hardware_start_gate=None)
 
     def run_rl_preposition(
         self, target_id: str | None = None
@@ -729,11 +817,13 @@ echo ready
     def stop_rl_runtime_and_wait_for_serial(self) -> None:
         runtime = self._rl_runtime
         runtime_pid = self._rl_runtime_pid
+        gate = self._rl_hardware_start_gate
         if runtime is None:
             return
         if runtime_pid is None:
             runtime.stop(signal.SIGKILL, timeout_s=2.0)
             self._rl_runtime = None
+            self._rl_hardware_start_gate = None
             raise RuntimeError("RL Runtime PID was not observed; serial release is unknown")
         try:
             self._ssh_host().stop_owned_process(
@@ -741,6 +831,8 @@ echo ready
                 identity_ere=r"[o]rin_state_sender\.py",
                 serial_path=self._config.rl_serial_port,
                 timeout_s=self._config.rl_serial_release_timeout_s,
+                require_serial_release=gate is None,
+                cleanup_paths=(gate,) if gate is not None else (),
                 execute=self._run_ssh,
             )
             try:
@@ -750,6 +842,7 @@ echo ready
         finally:
             self._rl_runtime = None
             self._rl_runtime_pid = None
+            self._rl_hardware_start_gate = None
 
     def start_collector(self) -> None:
         collector_log, _, _ = self.log_paths

@@ -190,8 +190,9 @@ shell，而是按固定状态机执行：
 RL Plan/Follow DIG + 并行 ACT 模型/CUDA 预热（ACT 不打开硬件）
 → 终态零 + 退出 RL Runtime + 确认串口释放
 → 内部交接门放行 → ACT 打开串口/相机并挖掘
+→ ACT 执行期间并行加载下一段 RL 资产/ONNX（RL 不打开串口）
 → 终态零 + 退出 ACT Runtime + 确认串口释放
-→ RL Plan/Follow DUMP → Orin ExecuteDump
+→ 内部交接门放行 → 预热 RL 接管串口并 Plan/Follow DUMP → Orin ExecuteDump
 → RL Runtime 保持零动作热待命 → Plan/Follow DIG 返回同一挖掘点 → 退出
 ```
 
@@ -215,7 +216,9 @@ Web UI 提供：
 为减少分段演示中的静止冷启动，分段 Mission 从开始到完成由同一个后台 worker 持有：第一段 RL
 运行时并行加载 ACT checkpoint 并完成 synthetic CUDA warmup，但 ACT 在内部交接门放行前不打开
 `/dev/ttyTHS1` 或 `/dev/video0`；只有 RL 已终态回零并确认串口释放后才放行。倾倒完成后同一个 RL
-Runtime 保持零动作待命，返回时直接复用；多铲模式还会在 RL 返回期间预热下一铲 ACT。等待阶段
+Runtime 保持零动作待命，返回时直接复用。ACT 挖掘开始后会对称地加载下一段 RL 配置、URDF、固定
+动作和 ONNX，但在 ACT 终态回零并确认串口释放前不打开串口或行为端口；若这项性能预热失败，
+当前 ACT 仍完成并在下一段回退到原有安全冷启动。多铲模式还会在 RL 返回期间预热下一铲 ACT。等待阶段
 点击“安全停止”会清理预热 ACT 或热待命 RL 并释放设备。该优化只隐藏进程冷启动，不缩短轨迹
 跟踪、ACT 130 step、固定倾倒或安全回零。
 
