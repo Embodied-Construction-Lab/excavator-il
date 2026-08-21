@@ -308,6 +308,58 @@ def test_preflight_reclaims_only_known_stale_serial_owner(tmp_path):
     assert messages == ["检测到并释放了上一次遗留的 Orin 串口 Runtime。"]
 
 
+def test_operator_preview_owns_only_camera_during_rl_stage(tmp_path):
+    config = _guided_config(tmp_path)
+    calls = []
+
+    class _RemoteHost:
+        def argv(self, command):
+            calls.append(("argv", command))
+            return ["ssh", command]
+
+        def reclaim_serial_owner(self, **kwargs):
+            calls.append(("reclaim", kwargs))
+            return "idle"
+
+        def stop_owned_process(self, **kwargs):
+            calls.append(("stop", kwargs))
+
+    class _PreviewProcess:
+        def wait_for(self, predicate, _timeout_s, *, after_index=-1):
+            del after_index
+            lines = ("GUIDED_PREVIEW_PID=4321", "camera preview ready: test")
+            line = next(value for value in lines if predicate(value))
+            return lines.index(line), line
+
+        def wait(self, timeout_s=5.0):
+            assert timeout_s == 2.0
+
+    operations = SystemGuidedEpisodeOperations(
+        config,
+        output=lambda _message: None,
+        line_process_factory=lambda _argv, **_kwargs: _PreviewProcess(),
+    )
+    operations._remote_host = _RemoteHost()
+
+    operations.start_operator_preview()
+    operations.stop_operator_preview_and_wait_for_camera()
+
+    reclaim = next(value for kind, value in calls if kind == "reclaim")
+    assert reclaim["serial_path"] == "/dev/video0"
+    assert reclaim["known_argv_suffixes"] == (
+        (
+            "/opt/excavator/bin/excavator-il",
+            "camera-preview",
+            "--config",
+            "config/collection.orin.json",
+        ),
+    )
+    stop = next(value for kind, value in calls if kind == "stop")
+    assert stop["pid"] == 4321
+    assert stop["serial_path"] == "/dev/video0"
+    assert stop["identity_ere"] == r"[c]amera-preview"
+
+
 def test_guided_episode_loads_selectable_demo_dig_targets(tmp_path):
     config = _guided_config(tmp_path)
     demo_path = tmp_path / "AiryLidar/mission/config/excavation_demo.json"

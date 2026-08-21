@@ -27,11 +27,15 @@ class HybridRlOperations(Protocol):
 
     def start_rl_runtime(self) -> None: ...
 
+    def start_operator_preview(self) -> None: ...
+
     def run_rl_follow(self, phase: str, *, target_id: str | None = None) -> Any: ...
 
     def run_rl_fixed_action(self, behavior: str, *, behavior_port: int) -> None: ...
 
     def stop_rl_runtime_and_wait_for_serial(self) -> None: ...
+
+    def stop_operator_preview_and_wait_for_camera(self) -> None: ...
 
 
 class SystemHybridMissionOperations:
@@ -117,6 +121,11 @@ class SystemHybridMissionOperations:
         if self._rl_runtime_active:
             return
         self._rl.start_rl_runtime()
+        try:
+            self._rl.start_operator_preview()
+        except BaseException:
+            self._rl.stop_rl_runtime_and_wait_for_serial()
+            raise
         self._rl_runtime_prepared = False
         self._rl_runtime_active = True
 
@@ -139,6 +148,8 @@ class SystemHybridMissionOperations:
         if not self._rl_runtime_active and not self._rl_runtime_prepared:
             return
         try:
+            if self._rl_runtime_active:
+                self._rl.stop_operator_preview_and_wait_for_camera()
             self._rl.stop_rl_runtime_and_wait_for_serial()
         finally:
             self._rl_runtime_active = False

@@ -142,8 +142,14 @@ def test_act_runtime_cli_defaults_to_shadow_and_passes_exact_motion_authorizatio
         act_runtime_service,
         "run_act_runtime",
         lambda path, motion_authorization=None, max_steps=None,
-        hardware_start_gate=None: calls.append(
-            (path, motion_authorization, max_steps, hardware_start_gate)
+        hardware_start_gate=None, operator_observation_config=None: calls.append(
+            (
+                path,
+                motion_authorization,
+                max_steps,
+                hardware_start_gate,
+                operator_observation_config,
+            )
         ),
     )
 
@@ -160,15 +166,30 @@ def test_act_runtime_cli_defaults_to_shadow_and_passes_exact_motion_authorizatio
         ]
     ) == 0
     assert calls == [
-        ("runtime.json", None, None, None),
+        ("runtime.json", None, None, None, None),
         (
             "runtime.json",
             "ALLOW_ACT_MACHINE_MOTION",
             None,
             "/opt/act-control/hybrid_001.start",
+            None,
         ),
     ]
     assert all(call["force"] is True for call in logging_calls)
+
+
+def test_camera_preview_cli_dispatches_collection_config(monkeypatch):
+    from excavator_il import camera_preview_service
+
+    calls = []
+    monkeypatch.setattr(
+        camera_preview_service,
+        "run_camera_preview",
+        lambda path: calls.append(path),
+    )
+
+    assert main(["camera-preview", "--config", "collection.json"]) == 0
+    assert calls == ["collection.json"]
 
 
 def test_inspect_zero_soak_returns_nonzero_for_unsafe_episode(monkeypatch, capsys):

@@ -44,7 +44,9 @@ def test_act_motion_requires_local_authorization_without_pc_runtime_input():
     assert script_path.stat().st_mode & 0o111
     assert "act_operator_hmac" not in script
     assert "authentication_key" not in script
-    assert "--network=none" in script
+    assert "--network=host" in script
+    assert "--operator-observation-config /opt/collection-runtime.json" in script
+    assert "collection.orin.json:/opt/collection-runtime.json:ro" in script
     assert "PC teleop" in script
     assert "模型可能立即发送非零杆量" in script
     assert '[[ "${confirmation}" != "ALLOW_ACT_MACHINE_MOTION" ]]' in script

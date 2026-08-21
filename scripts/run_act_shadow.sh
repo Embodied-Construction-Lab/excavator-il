@@ -47,5 +47,7 @@ exec sudo docker run --rm \
   -v /home/jetson16/workspace_excavator/shared:/opt/excavator-config:ro \
   -v "${deployment_root}/logs:/opt/act-runtime-logs" \
   -v "${repo_dir}/config/act_runtime.orin.json:/opt/act-runtime.json:ro" \
+  -v "${repo_dir}/config/collection.orin.json:/opt/collection-runtime.json:ro" \
   "${image}" \
-  excavator-il act-runtime --config /opt/act-runtime.json
+  excavator-il act-runtime --config /opt/act-runtime.json \
+    --operator-observation-config /opt/collection-runtime.json

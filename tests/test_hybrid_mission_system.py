@@ -15,6 +15,9 @@ class _RlOperations:
     def start_rl_runtime(self):
         self.calls.append("start_rl_runtime")
 
+    def start_operator_preview(self):
+        self.calls.append("start_operator_preview")
+
     def prewarm_rl_runtime(self, hardware_start_gate):
         self.calls.append(("prewarm_rl_runtime", str(hardware_start_gate)))
         if self.fail_prewarm:
@@ -30,6 +33,9 @@ class _RlOperations:
 
     def stop_rl_runtime_and_wait_for_serial(self):
         self.calls.append("stop_rl_runtime_and_wait_for_serial")
+
+    def stop_operator_preview_and_wait_for_camera(self):
+        self.calls.append("stop_operator_preview_and_wait_for_camera")
 
 
 def _config(tmp_path):
@@ -113,7 +119,9 @@ def test_hybrid_system_adapter_prewarms_act_and_reuses_rl_for_dump_return(
 
     assert rl.calls == [
         "start_rl_runtime",
+        "start_operator_preview",
         ("run_rl_follow", "dig", "dig_03"),
+        "stop_operator_preview_and_wait_for_camera",
         "stop_rl_runtime_and_wait_for_serial",
         (
             "prewarm_rl_runtime",
@@ -121,9 +129,11 @@ def test_hybrid_system_adapter_prewarms_act_and_reuses_rl_for_dump_return(
             + operations._act_gate_name.removeprefix("hybrid_"),
         ),
         "start_rl_runtime",
+        "start_operator_preview",
         ("run_rl_follow", "dump", None),
         ("run_rl_fixed_action", "ExecuteDump", 18083),
         ("run_rl_follow", "dig", "dig_03"),
+        "stop_operator_preview_and_wait_for_camera",
         "stop_rl_runtime_and_wait_for_serial",
     ]
     rendered = " ".join(processes[0].argv)

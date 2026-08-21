@@ -352,6 +352,8 @@ class SystemGuidedEpisodeOperations:
         self._collector_pid: int | None = None
         self._rl_runtime: Any | None = None
         self._rl_runtime_pid: int | None = None
+        self._operator_preview: Any | None = None
+        self._operator_preview_pid: int | None = None
         self._rl_hardware_start_gate: PurePosixPath | None = None
         self._teleop_cursor = -1
         self._started_episode_paths: tuple[str, ...] = ()
@@ -470,6 +472,24 @@ class SystemGuidedEpisodeOperations:
         # that interpreter was named.
         rl_runtime_interpreter_independent = rl_runtime[1:]
         return collector, rl_runtime, rl_runtime_interpreter_independent
+
+    def _operator_preview_argv(self) -> tuple[str, ...]:
+        return (
+            str(self._config.orin_executable),
+            "camera-preview",
+            "--config",
+            str(self._config.orin_collection_config),
+        )
+
+    def _reclaim_known_camera_owner(self) -> None:
+        result = self._ssh_host().reclaim_serial_owner(
+            serial_path="/dev/video0",
+            known_argv_suffixes=(self._operator_preview_argv(),),
+            timeout_s=self._config.rl_serial_release_timeout_s,
+            execute=self._run_ssh,
+        )
+        if result == "reclaimed":
+            self._output("检测到并释放了上一次遗留的 Orin 相机预览进程。")
 
     def _reclaim_known_serial_owner(self) -> None:
         result = self._ssh_host().reclaim_serial_owner(
@@ -676,6 +696,67 @@ echo ready
         self._reclaim_known_serial_owner()
         self._rl_runtime_preflight(require_serial_free=True)
         self._spawn_rl_runtime(hardware_start_gate=None)
+
+    def start_operator_preview(self) -> None:
+        """Serve the front camera while RL exclusively owns the STM32 serial port."""
+
+        if self._operator_preview is not None:
+            raise RuntimeError("operator camera preview is already active")
+        self._reclaim_known_camera_owner()
+        command = self._in_repo(list(self._operator_preview_argv()))
+        command = command.replace(
+            "&& ", "&& echo GUIDED_PREVIEW_PID=$$ && exec ", 1
+        )
+        log_path = (
+            self._config.log_dir
+            / f"guided_episode_{self._timestamp}.camera-preview.log"
+        )
+        self._operator_preview = self._line_process_factory(
+            self._ssh_argv(command),
+            log_path=log_path,
+            prefix="camera-preview",
+            output=self._output,
+        )
+        try:
+            _, pid_line = self._operator_preview.wait_for(
+                lambda line: line.startswith("GUIDED_PREVIEW_PID="),
+                self._config.collector_ready_timeout_s,
+            )
+            self._operator_preview_pid = int(pid_line.split("=", maxsplit=1)[1])
+            self._operator_preview.wait_for(
+                lambda line: "camera preview ready:" in line,
+                self._config.collector_ready_timeout_s,
+            )
+        except BaseException:
+            self.stop_operator_preview_and_wait_for_camera()
+            raise
+
+    def stop_operator_preview_and_wait_for_camera(self) -> None:
+        preview = self._operator_preview
+        pid = self._operator_preview_pid
+        if preview is None:
+            return
+        if pid is None:
+            preview.stop(signal.SIGKILL, timeout_s=2.0)
+            self._operator_preview = None
+            raise RuntimeError(
+                "camera preview PID was not observed; camera release is unknown"
+            )
+        try:
+            self._ssh_host().stop_owned_process(
+                pid=pid,
+                identity_ere=r"[c]amera-preview",
+                serial_path="/dev/video0",
+                timeout_s=self._config.rl_serial_release_timeout_s,
+                execute=self._run_ssh,
+            )
+            try:
+                preview.wait(timeout_s=2.0)
+            except subprocess.TimeoutExpired:
+                preview.stop(signal.SIGKILL, timeout_s=2.0)
+        finally:
+            self._operator_preview = None
+            self._operator_preview_pid = None
 
     def run_rl_preposition(
         self, target_id: str | None = None

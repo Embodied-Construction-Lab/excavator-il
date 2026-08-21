@@ -45,7 +45,7 @@ class _Cv2:
     @staticmethod
     def imencode(extension, frame, params):
         assert extension == ".jpg"
-        assert frame.shape == (24, 32, 3)
+        assert frame.ndim == 3 and frame.shape[2] == 3
         assert params == [4, 95]
         return True, _Encoded()
 
@@ -101,3 +101,4 @@ def test_uvc_camera_returns_timestamped_rgb_for_live_policy():
     assert frame.capture_monotonic_ns == 987_654
     assert frame.rgb.dtype == np.uint8
     assert frame.rgb.tolist() == [[[3, 2, 1], [6, 5, 4]]]
+    assert frame.encoded_image == b"jpeg-data"

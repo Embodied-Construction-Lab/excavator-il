@@ -108,6 +108,12 @@ def _parser() -> argparse.ArgumentParser:
     collect = commands.add_parser("collect", help="run the Orin hardware collector")
     collect.add_argument("--config", default="config/collection.orin.json")
 
+    camera_preview = commands.add_parser(
+        "camera-preview",
+        help="serve the Orin camera while another Runtime owns STM32",
+    )
+    camera_preview.add_argument("--config", default="config/collection.orin.json")
+
     diagnose_stm32 = commands.add_parser(
         "diagnose-stm32-link",
         help="read-only check of the Orin USART2 telemetry link",
@@ -131,6 +137,10 @@ def _parser() -> argparse.ArgumentParser:
     act_runtime.add_argument(
         "--hardware-start-gate",
         help="absolute file gate consumed after CUDA warmup and before hardware open",
+    )
+    act_runtime.add_argument(
+        "--operator-observation-config",
+        help="collector config reused for read-only camera and machine-state outputs",
     )
 
     inspect_runtime = commands.add_parser(
@@ -331,6 +341,15 @@ def main(argv: list[str] | None = None) -> int:
                 format="%(asctime)s %(levelname)s %(name)s: %(message)s",
             )
             run_collector(args.config)
+        elif args.command == "camera-preview":
+            from .camera_preview_service import run_camera_preview
+
+            logging.basicConfig(
+                level=logging.INFO,
+                format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+                force=True,
+            )
+            run_camera_preview(args.config)
         elif args.command == "diagnose-stm32-link":
             from .stm32_link_diagnostic import run_stm32_link_diagnostic
 
@@ -352,6 +371,7 @@ def main(argv: list[str] | None = None) -> int:
                 motion_authorization=args.motion_authorization,
                 max_steps=args.max_steps,
                 hardware_start_gate=args.hardware_start_gate,
+                operator_observation_config=args.operator_observation_config,
             )
         elif args.command == "inspect-act-runtime-log":
             from .act_runtime_config import load_act_runtime_config

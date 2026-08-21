@@ -235,9 +235,11 @@ docker info >/dev/null && echo docker-ready
 失败，不会把密码写入配置。更新 ACT Runtime Python 代码后还必须重新构建 Orin 镜像；仅 `git pull`
 不会改变已存在镜像中的代码。
 
-混合 Mission 期间 Collector 未运行，因此当前页面的 Collector 相机/遥测卡片会显示等待；ACT
-容器仍独占读取相机用于推理，但 `--network=none` 下不对外提供预览。这不影响闭环控制，后续如确有
-实验需求再复用 ACT 内部最新帧接口，不新增第二个相机 owner。
+混合 Mission 仍保持单一硬件 owner，但观测输出不会随策略切换消失：RL 阶段由不访问串口的
+`camera-preview` sidecar 独占 `/dev/video0`；切换到 ACT 前先停止 sidecar 并确认相机释放，ACT 再用
+同一次相机采样同时提供模型 RGB 与 Web JPEG。ACT 还把自己读取的 STM32 遥测转换为既有
+`machine_state_v1`，因此 ACT 阶段 RViz 关节状态继续更新。浏览器会在短暂交接间隙自动重连。
+这些接口只提供只读预览和状态，不接收任何运动命令，也不改变串口 owner 互斥。
 
 不启动 Web UI 时，也可从 PC 单独运行同一遥操作流程：
 

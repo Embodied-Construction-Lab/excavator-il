@@ -27,6 +27,7 @@ from excavator_il.act_runtime_service import (
 )
 from excavator_il.act_deployment import verify_deployment_manifest
 from excavator_il.collector.camera import RgbCameraFrame
+from excavator_il.collector.preview import LatestJpegFrame, LatestTelemetryFrame
 from excavator_il.stm32_protocol import (
     STM32_TELEMETRY_FIELDS,
     Stm32ManualCommandEncoder,
@@ -193,6 +194,86 @@ def test_runtime_service_construction_has_no_pc_operator_dependency():
     )
 
     assert service is not None
+
+
+def test_act_runtime_camera_loop_publishes_the_policy_frame_for_web_preview():
+    frames = LatestJpegFrame()
+    service_holder = {}
+
+    class _Observations:
+        def add_camera(self, _frame):
+            service_holder["service"].request_stop()
+
+    class _Processor:
+        _observations = _Observations()
+
+    class _Camera:
+        def read_rgb(self):
+            return RgbCameraFrame(
+                capture_monotonic_ns=123,
+                rgb=np.zeros((2, 3, 3), dtype=np.uint8),
+                encoded_image=b"jpeg-from-policy-frame",
+            )
+
+    service = ActRuntimeService(
+        serial_port=object(),
+        camera=_Camera(),
+        processor=_Processor(),
+        command_channel=object(),
+        camera_preview=frames,
+    )
+    service_holder["service"] = service
+
+    service._camera_loop()
+
+    published = frames.wait_after(0, timeout_s=0.01)
+    assert published is not None
+    assert published.capture_monotonic_ns == 123
+    assert published.encoded_image == b"jpeg-from-policy-frame"
+
+
+def test_act_runtime_routes_stm32_telemetry_to_web_and_rviz_outputs():
+    telemetry = LatestTelemetryFrame()
+
+    class _MachineStatePublisher:
+        def __init__(self):
+            self.calls = []
+
+        def publish(self, frame, *, receive_wall_ns):
+            self.calls.append((frame, receive_wall_ns))
+
+    publisher = _MachineStatePublisher()
+    frame = _telemetry(stamp=321)
+    channel = Stm32CommandChannel(
+        serial_port=_Serial(),
+        encoder=Stm32ManualCommandEncoder(),
+        mode=RuntimeMode.SHADOW,
+    )
+    channel.synchronize(frame)
+
+    states = LatestStateQueue()
+    sequences = SensorSequenceTracker()
+    _route_telemetry_frame(
+        frame=frame,
+        command_channel=channel,
+        states=states,
+        sensor_sequences=sequences,
+        telemetry_preview=telemetry,
+    )
+    service = ActRuntimeService(
+        serial_port=object(),
+        camera=object(),
+        processor=type("_Processor", (), {"_observations": object()})(),
+        command_channel=channel,
+        machine_state_publisher=publisher,
+    )
+    service._publish_machine_state(frame, receive_wall_ns=987_000_000)
+
+    snapshot = telemetry.snapshot()
+    assert snapshot is not None
+    assert snapshot.receive_monotonic_ns == 321
+    assert snapshot.values["sensor_valid"] is True
+    assert publisher.calls == [(frame, 987_000_000)]
 
 
 def test_runtime_service_run_does_not_open_a_pc_udp_socket(monkeypatch):

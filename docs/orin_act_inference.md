@@ -220,7 +220,7 @@ Shadow 使用真实相机与 STM32 遥测运行 ACT，但物理串口边界禁�
 只属于人工示教采集与单独的手动控制诊断链路。
 
 若 checkpoint 的 `pretrained_backbone_weights` 不是 `null`，LeRobot 在载入完整 checkpoint 前仍会先
-构造 torchvision backbone。在线 Runtime 保持 `--network=none`，因此必须把训练时固定的权重部署到：
+构造 torchvision backbone。在线 Runtime 设置 Hugging Face/Transformers 离线模式，因此必须把训练时固定的权重部署到：
 
 ```text
 /home/jetson16/workspace_excavator/act_inference/torch-cache/checkpoints/resnet18-f37072fd.pth
@@ -228,8 +228,9 @@ Shadow 使用真实相机与 STM32 遥测运行 ACT，但物理串口边界禁�
 
 当前权威 SHA-256 是
 `f37072fd47e89c5e827621c5baffa7500819f7896bbacec160b1a16c560e07ec`。Shadow/Motion 启动脚本都会在
-Docker 启动前校验该文件，并把缓存只读挂载到 `/tmp/cache/torch/hub`；不得为了下载 backbone 而给
-Motion 容器开放网络。
+Docker 启动前校验该文件，并把缓存只读挂载到 `/tmp/cache/torch/hub`；不得在运行时下载 backbone。
+Motion 容器使用 host network 仅用于向 PC 提供只读相机/遥测预览并发送 `machine_state_v1`；它不
+监听或接收网络运动命令，ACT 动作仍只来自 Orin 本地模型。
 
 先在 PC 执行只读 USART2 验收；该命令不启动 Collector、不写串口，也不发送零命令：
 
@@ -277,8 +278,8 @@ bash scripts/run_act_motion.sh
 ```
 
 脚本拒绝竞争的 Collector/RL/ACT Runtime 和被占用的串口/相机，并要求操作者在 Orin 终端输入
-精确的一次性启动授权 `ALLOW_ACT_MACHINE_MOTION`。容器使用 `--network=none`，启动后不依赖 PC
-或现场 Wi-Fi。该授权会让 ACT 在硬件 ready 后直接向 STM32 写入模型杆量，不能再把 motion 模式当作
+精确的一次性启动授权 `ALLOW_ACT_MACHINE_MOTION`。容器不依赖 PC 的网络输入；host network 只
+承载只读 Web 预览与向 PC 发送的机器状态。该授权会让 ACT 在硬件 ready 后直接向 STM32 写入模型杆量，不能再把 motion 模式当作
 “全程零命令”测试；首次必须保持发动机关闭。运行 30 秒后按 `Ctrl+C` 停止 Orin Runtime，检查日志中
 动作有限且位于 `[-1,1]`、四轴到六轴映射正确、无 stale/future 输入、startup 与 shutdown 为零、
 state timeout/unsafe telemetry 会归零，且终态零之后没有非零写入。以上发动机关闭验收通过后，才能在
