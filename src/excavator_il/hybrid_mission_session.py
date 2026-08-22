@@ -7,6 +7,7 @@ import os
 import queue
 import signal
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -20,14 +21,52 @@ from .hybrid_mission import (
     next_hybrid_segment,
 )
 from .hybrid_mission_system import SystemHybridMissionOperations
+from .hybrid_mission_resident_system import (
+    SystemResidentHybridMissionOperations,
+)
 
 
 _FINAL_STAGES = frozenset({"completed", "failed", "cancelled"})
+MAX_HYBRID_CYCLE_COUNT = 9
 _WAITING_STAGES = {
     HybridMissionSegment.ACT_DIG: "awaiting_act_dig",
     HybridMissionSegment.RL_TO_DUMP_AND_DUMP: "awaiting_rl_to_dump",
     HybridMissionSegment.RL_RETURN_TO_DIG: "awaiting_rl_return",
 }
+
+
+def _watch_parent_identity(
+    expected_parent_pid: int,
+    *,
+    get_parent_pid: Callable[[], int],
+    sleep: Callable[[float], None],
+    interrupt: Callable[[], None],
+) -> None:
+    """Interrupt the Mission worker if its supervising WebUI process vanishes."""
+
+    while get_parent_pid() == expected_parent_pid:
+        sleep(0.1)
+    interrupt()
+
+
+def _arm_parent_death_interrupt() -> threading.Thread | None:
+    parent = multiprocessing.parent_process()
+    if parent is None or parent.pid is None:
+        return None
+
+    thread = threading.Thread(
+        target=_watch_parent_identity,
+        kwargs={
+            "expected_parent_pid": parent.pid,
+            "get_parent_pid": os.getppid,
+            "sleep": time.sleep,
+            "interrupt": lambda: os.kill(os.getpid(), signal.SIGINT),
+        },
+        name="hybrid-mission-parent-lease",
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 @dataclass(frozen=True)
@@ -39,7 +78,7 @@ class HybridMissionSnapshot:
     error: str = ""
     logs: tuple[str, ...] = ()
     # Lifetime total remains available for experiment bookkeeping.  The UI uses
-    # run_completed_cycles so a new 4-scoop run always starts at 0 / 4.
+    # run_completed_cycles so every new run starts at 0 / requested_cycles.
     completed_cycles: int = 0
     run_completed_cycles: int = 0
     requested_cycles: int = 1
@@ -58,14 +97,22 @@ def run_hybrid_mission_worker(
 ) -> None:
     if not isinstance(cycle_count, int) or isinstance(cycle_count, bool):
         raise ValueError("cycle_count must be an integer")
-    if not 1 <= cycle_count <= 5:
-        raise ValueError("cycle_count must be within [1, 5]")
+    if not 1 <= cycle_count <= MAX_HYBRID_CYCLE_COUNT:
+        raise ValueError(
+            f"cycle_count must be within [1, {MAX_HYBRID_CYCLE_COUNT}]"
+        )
     target_cycle = _rotated_target_cycle(dig_target_id, dig_target_ids)
     config = HybridMissionConfig.load(config_path)
-    operations = SystemHybridMissionOperations(
+    operations_type = (
+        SystemResidentHybridMissionOperations
+        if getattr(config, "runtime_backend", "legacy") == "resident"
+        else SystemHybridMissionOperations
+    )
+    operations = operations_type(
         config,
         output=lambda message: events.put({"kind": "log", "message": str(message)}),
     )
+    _arm_parent_death_interrupt()
     segment = HybridMissionSegment(start_segment)
     current_authorization = motion_authorization
     completed_cycles = 0
@@ -124,6 +171,11 @@ def run_hybrid_mission_worker(
                     current_target_id = segment_target_id
                     segment = HybridMissionSegment.ACT_DIG
                     continue
+                # A completed Mission is still a terminal authority boundary.
+                # The resident backend disarms the owner and releases its two
+                # long-lived workers here; the legacy backend keeps its existing
+                # zero/release cleanup behavior behind the same Interface.
+                operations.safe_stop()
                 events.put(
                     {
                         "kind": "terminal",
@@ -163,11 +215,22 @@ def run_hybrid_mission_worker(
                 )
             current_authorization = command.get("motion_authorization")
             segment = requested
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         try:
             operations.safe_stop()
-        except Exception as exc:
-            events.put({"kind": "log", "message": f"停止清理失败：{exc}"})
+        except Exception as cleanup_exc:
+            events.put(
+                {
+                    "kind": "terminal",
+                    "stage": "failed",
+                    "next_segment": "",
+                    "error": (
+                        f"{type(exc).__name__}: operator cancellation; "
+                        f"cleanup={cleanup_exc}"
+                    ),
+                }
+            )
+            return
         events.put(
             {"kind": "terminal", "stage": "cancelled", "next_segment": ""}
         )
@@ -262,8 +325,10 @@ class HybridMissionSupervisor:
             raise ValueError("automatic must be boolean")
         if not isinstance(cycle_count, int) or isinstance(cycle_count, bool):
             raise ValueError("cycle_count must be an integer")
-        if not 1 <= cycle_count <= 5:
-            raise ValueError("cycle_count must be within [1, 5]")
+        if not 1 <= cycle_count <= MAX_HYBRID_CYCLE_COUNT:
+            raise ValueError(
+                f"cycle_count must be within [1, {MAX_HYBRID_CYCLE_COUNT}]"
+            )
         if not automatic and cycle_count != 1:
             raise ValueError("segmented Mission supports exactly one cycle")
         if automatic and motion_authorization != REQUIRED_HYBRID_MOTION_AUTHORIZATION:

@@ -191,15 +191,42 @@ PC 局域网代理仍可沿 Wi-Fi 使用 `192.168.31.219:7897`，无需给独立
 ## 6. PC–Orin 时间同步
 
 RL 规划和状态新鲜度检查使用 UTC 时间戳。长时间断电后，PC 和 Orin 可能先从各自 RTC/上次
-记录时间启动，再等待外部 NTP 校时；两端未都完成校时前，不运行 RL Plan/Follow。分别检查：
+记录时间启动，再等待外部 NTP 校时。两端分别连接高延迟公网 NTP 时，即使都显示
+`System clock synchronized: yes`，也可能保留几十毫秒的相对偏差，导致 PC 将 Orin 状态判定为
+“来自未来”并拒绝 RL Plan。
+
+当前权威拓扑是：PC 使用 Chrony 访问外部时间源，同时在独立有线网
+`192.168.50.1:123/udp` 为 Orin 授时；Orin 保留 `systemd-timesyncd`，仅向 PC 校时。首次配置：
 
 ```bash
+# PC：会安装 chrony，并只允许 192.168.50.2 通过有线网请求 NTP。
+cd /home/zhaoshuai/workspace_uinty/RL_prj/excavator-il
+sudo bash scripts/configure_lan_time_sync.sh pc
+
+# Orin：不增加新包，将 timesyncd 的权威时间源固定为 PC。
+cd /home/jetson16/workspace_excavator/excavator-il
+sudo bash scripts/configure_lan_time_sync.sh orin
+```
+
+脚本会先验证有线接口和地址，现有配置会以 `.backup.<UTC>` 后缀保留；PC 的 UFW 仅在已启用时
+增加 `192.168.50.2 -> 192.168.50.1:123/udp` 规则。PC 会拒绝根距离超过 50 ms 的低质量公网时间源，
+并限制运行期时钟调整速率；Orin 每 16 s 向 PC 取样。这些参数优先保证实验期间两端相对时间稳定，
+而不是跟随高抖动公网 NTP 频繁移动 PC 时钟。配置后等待至少两个轮询周期，再分别检查：
+
+```bash
+# PC
+chronyc tracking
+sudo chronyc clients
+
+# Orin
 timedatectl status
 timedatectl timesync-status
 ```
 
-两端都必须显示 `System clock synchronized: yes`、`NTP service: active`，且 `Packet count`
-大于 0。PC 使用 Clash Verge Rev/Mihomo Fake-IP 时，还要确认 NTP 域名没有解析到
+验收条件：Orin 的 `Server` 必须是 `192.168.50.1`，`Packet count` 大于 0；PC 的 `chronyc clients`
+必须出现 `192.168.50.2`。仅看两端的 `System clock synchronized: yes` 不再视为充分验收。
+
+PC 使用 Clash Verge Rev/Mihomo Fake-IP 时，还要确认 Chrony 的上游 NTP 域名没有解析到
 `198.18.0.0/15`：
 
 ```bash
@@ -222,16 +249,16 @@ dns:
 DST-PORT,123,DIRECT
 ```
 
-重载 Mihomo 配置、清理 DNS 缓存并让 timesyncd 重新建联：
+重载 Mihomo 配置并清理 DNS 缓存后，重启 PC Chrony：
 
 ```bash
 resolvectl flush-caches
-systemctl restart systemd-timesyncd
-timedatectl timesync-status
+sudo systemctl restart chrony
+chronyc tracking
 ```
 
-重启后 `Server` 必须是真实公网 IP，不得为 `198.18.*`。不把每次手动 `date -s`作为常规
-方案；它只修改当前时钟，不会修复 NTP 不通的根因。
+Chrony 上游必须是真实公网 IP，不得为 `198.18.*`。不把每次手动 `date -s`作为常规方案；
+它只修改当前时钟，不会修复两台设备使用不同时间源的根因。
 
 ## 7. Wi-Fi 省电与回滚
 

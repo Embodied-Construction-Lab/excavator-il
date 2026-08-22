@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from enum import Enum
+import math
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 
-HYBRID_MISSION_CONFIG_SCHEMA_VERSION = "excavator_hybrid_mission_config.v1"
+HYBRID_MISSION_CONFIG_SCHEMA_VERSION = "excavator_hybrid_mission_config.v2"
+LEGACY_HYBRID_MISSION_CONFIG_SCHEMA_VERSION = "excavator_hybrid_mission_config.v1"
 REQUIRED_HYBRID_MOTION_AUTHORIZATION = "ALLOW_HYBRID_MACHINE_MOTION"
 
 
@@ -38,6 +40,49 @@ class HybridMissionOperations(Protocol):
 
 
 @dataclass(frozen=True)
+class ResidentMissionConfig:
+    """Remote paths and bounded waits for one Mission-scoped resident stack."""
+
+    owner_script: str
+    act_worker_script: str
+    runtime_root: PurePosixPath
+    ready_timeout_s: int
+    handoff_timeout_s: int
+    poll_interval_ms: int
+    prepared_dump_lead_steps: int
+    prepared_ready_grace_ms: int
+    prepared_start_tolerance_m: float
+
+    def __post_init__(self) -> None:
+        _integer(
+            self.prepared_dump_lead_steps,
+            "resident.prepared_dump_lead_steps",
+            1,
+            2000,
+        )
+        _integer(
+            self.prepared_ready_grace_ms,
+            "resident.prepared_ready_grace_ms",
+            10,
+            1000,
+        )
+        _finite_number(
+            self.prepared_start_tolerance_m,
+            "resident.prepared_start_tolerance_m",
+            0.01,
+            0.5,
+        )
+
+    @property
+    def control_socket(self) -> PurePosixPath:
+        return self.runtime_root / "control.sock"
+
+    @property
+    def act_socket(self) -> PurePosixPath:
+        return self.runtime_root / "act.sock"
+
+
+@dataclass(frozen=True)
 class HybridMissionConfig:
     guided_config: Path
     act_max_steps: int
@@ -45,6 +90,17 @@ class HybridMissionConfig:
     act_run_timeout_s: int
     act_remote_script: str
     rl_behavior_port: int
+    runtime_backend: str = "legacy"
+    resident: ResidentMissionConfig | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            self.resident is not None
+            and self.resident.prepared_dump_lead_steps >= self.act_max_steps
+        ):
+            raise ValueError(
+                "resident.prepared_dump_lead_steps must be less than act.max_steps"
+            )
 
     @classmethod
     def load(cls, path: str | Path) -> "HybridMissionConfig":
@@ -56,14 +112,30 @@ class HybridMissionConfig:
                 f"cannot load hybrid Mission config {config_path}: {exc}"
             ) from exc
         root = _object(raw, "config")
-        expected_root = {"schema_version", "guided_config", "act", "rl"}
+        schema_version = root.get("schema_version")
+        if schema_version == LEGACY_HYBRID_MISSION_CONFIG_SCHEMA_VERSION:
+            expected_root = {"schema_version", "guided_config", "act", "rl"}
+            runtime_backend = "legacy"
+            resident = None
+        elif schema_version == HYBRID_MISSION_CONFIG_SCHEMA_VERSION:
+            expected_root = {
+                "schema_version",
+                "runtime_backend",
+                "guided_config",
+                "act",
+                "rl",
+                "resident",
+            }
+            runtime_backend = _runtime_backend(root.get("runtime_backend"))
+        else:
+            raise ValueError(
+                "schema_version must be one of "
+                f"{LEGACY_HYBRID_MISSION_CONFIG_SCHEMA_VERSION}, "
+                f"{HYBRID_MISSION_CONFIG_SCHEMA_VERSION}"
+            )
         if set(root) != expected_root:
             raise ValueError(
                 f"hybrid Mission config fields must be {sorted(expected_root)}"
-            )
-        if root.get("schema_version") != HYBRID_MISSION_CONFIG_SCHEMA_VERSION:
-            raise ValueError(
-                f"schema_version must be {HYBRID_MISSION_CONFIG_SCHEMA_VERSION}"
             )
         act = _object(root.get("act"), "act")
         rl = _object(root.get("rl"), "rl")
@@ -92,6 +164,7 @@ class HybridMissionConfig:
         remote_script = _safe_relative_path(
             act.get("remote_script"), "act.remote_script"
         )
+        resident = _resident_config(root.get("resident"), runtime_backend)
         return cls(
             guided_config=(
                 config_path.parent
@@ -104,6 +177,8 @@ class HybridMissionConfig:
             rl_behavior_port=_integer(
                 rl.get("behavior_port"), "rl.behavior_port", 1, 65535
             ),
+            runtime_backend=runtime_backend,
+            resident=resident,
         )
 
 
@@ -170,9 +245,105 @@ def _integer(value: Any, field: str, low: int, high: int) -> int:
     return value
 
 
+def _finite_number(value: Any, field: str, low: float, high: float) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or not low <= float(value) <= high
+    ):
+        raise ValueError(f"{field} must be finite and in [{low:g}, {high:g}]")
+    return float(value)
+
+
 def _safe_relative_path(value: Any, field: str) -> str:
     text = _text(value, field)
     path = PurePosixPath(text)
     if path.is_absolute() or ".." in path.parts or path == PurePosixPath("."):
         raise ValueError(f"{field} must be a safe relative path")
     return str(path)
+
+
+def _runtime_backend(value: Any) -> str:
+    backend = _text(value, "runtime_backend")
+    if backend not in {"legacy", "resident"}:
+        raise ValueError("runtime_backend must be legacy or resident")
+    return backend
+
+
+def _resident_config(
+    value: Any,
+    runtime_backend: str,
+) -> ResidentMissionConfig | None:
+    if runtime_backend == "legacy":
+        if value is not None:
+            raise ValueError("resident must be null for the legacy backend")
+        return None
+    resident = _object(value, "resident")
+    expected = {
+        "owner_script",
+        "act_worker_script",
+        "runtime_root",
+        "ready_timeout_s",
+        "handoff_timeout_s",
+        "poll_interval_ms",
+        "prepared_dump_lead_steps",
+        "prepared_ready_grace_ms",
+        "prepared_start_tolerance_m",
+    }
+    if set(resident) != expected:
+        raise ValueError(f"resident fields must be {sorted(expected)}")
+    runtime_root = PurePosixPath(
+        _text(resident.get("runtime_root"), "resident.runtime_root")
+    )
+    if (
+        not runtime_root.is_absolute()
+        or runtime_root == PurePosixPath("/")
+        or ".." in runtime_root.parts
+    ):
+        raise ValueError("resident.runtime_root must be a safe absolute POSIX path")
+    return ResidentMissionConfig(
+        owner_script=_safe_relative_path(
+            resident.get("owner_script"), "resident.owner_script"
+        ),
+        act_worker_script=_safe_relative_path(
+            resident.get("act_worker_script"), "resident.act_worker_script"
+        ),
+        runtime_root=runtime_root,
+        ready_timeout_s=_integer(
+            resident.get("ready_timeout_s"),
+            "resident.ready_timeout_s",
+            1,
+            600,
+        ),
+        handoff_timeout_s=_integer(
+            resident.get("handoff_timeout_s"),
+            "resident.handoff_timeout_s",
+            1,
+            60,
+        ),
+        poll_interval_ms=_integer(
+            resident.get("poll_interval_ms"),
+            "resident.poll_interval_ms",
+            10,
+            1000,
+        ),
+        prepared_dump_lead_steps=_integer(
+            resident.get("prepared_dump_lead_steps"),
+            "resident.prepared_dump_lead_steps",
+            1,
+            2000,
+        ),
+        prepared_ready_grace_ms=_integer(
+            resident.get("prepared_ready_grace_ms"),
+            "resident.prepared_ready_grace_ms",
+            10,
+            1000,
+        ),
+        prepared_start_tolerance_m=_finite_number(
+            resident.get("prepared_start_tolerance_m"),
+            "resident.prepared_start_tolerance_m",
+            0.01,
+            0.5,
+        ),
+    )

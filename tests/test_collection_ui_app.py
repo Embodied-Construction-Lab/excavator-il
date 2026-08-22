@@ -233,7 +233,7 @@ def test_collection_ui_exposes_segmented_and_automatic_hybrid_mission_actions(
     assert hybrid.calls[-1] == ("close",)
 
 
-def test_collection_ui_starts_four_cycle_truck_loading_mission(tmp_path):
+def test_collection_ui_starts_nine_cycle_truck_loading_mission(tmp_path):
     collection = _Supervisor()
     hybrid = _HybridSupervisor()
     app = create_collection_ui_app(
@@ -262,7 +262,7 @@ def test_collection_ui_starts_four_cycle_truck_loading_mission(tmp_path):
             json={
                 "dig_target_id": "dig_01",
                 "automatic": True,
-                "cycle_count": 4,
+                "cycle_count": 9,
                 "motion_authorization": "ALLOW_HYBRID_MACHINE_MOTION",
             },
             headers={"X-Excavator-UI": "1"},
@@ -274,7 +274,7 @@ def test_collection_ui_starts_four_cycle_truck_loading_mission(tmp_path):
         "dig_01",
         True,
         "ALLOW_HYBRID_MACHINE_MOTION",
-        4,
+        9,
     )
 
 
@@ -363,8 +363,12 @@ def test_collection_ui_exposes_config_status_and_guided_collection_actions(tmp_p
     assert page.status_code == 200
     assert 'data-app="excavator-collection-ui"' in page.text
     assert "选择工作模式" in page.text
-    assert "仅遥操作" in page.text
-    assert '/static/app.js?v=20260820-target-cycle' in page.text
+    assert "遥操作" in page.text
+    assert "三维可视化" not in page.text
+    assert "RViz / Foxglove 扩展位" not in page.text
+    assert "连续自动完成 1～9 铲装车循环" in page.text
+    assert '<option value="9">9 铲</option>' in page.text
+    assert '/static/app.js?v=20260821-nine-cycle' in page.text
     assert stylesheet.status_code == 200
     assert "collection-grid" in stylesheet.text
     assert script.status_code == 200

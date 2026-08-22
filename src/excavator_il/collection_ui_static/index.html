@@ -104,11 +104,6 @@
             <small>相机由 Orin Collector 独占，UI 不会重复打开设备。</small>
           </div>
         </div>
-        <div class="visualization-slot">
-          <div><small>三维可视化</small><strong>RViz / Foxglove 扩展位</strong></div>
-          <a id="visualization-link" class="text-link hidden" target="_blank" rel="noopener">打开可视化</a>
-          <span id="visualization-note">第一版不嵌入原生 RViz，保留浏览器三维视图接口。</span>
-        </div>
         <div class="telemetry-card">
           <div class="telemetry-heading">
             <div><small>STM32 / LIVE</small><strong>机构状态</strong></div>
@@ -148,7 +143,7 @@
       <section id="hybrid-panel" class="panel hybrid-panel hidden">
         <div class="section-heading">
           <div><span class="step-number">03</span><h2>RL + ACT 混合 Mission</h2></div>
-          <p>分段拍摄单个动作，或连续自动完成 1～5 铲装车循环。</p>
+          <p>分段拍摄单个动作，或连续自动完成 1～9 铲装车循环。</p>
         </div>
         <div id="operator-control" class="operator-control hidden">
           <div>
@@ -181,6 +176,10 @@
               <option value="3">3 铲</option>
               <option value="4" selected>4 铲</option>
               <option value="5">5 铲</option>
+              <option value="6">6 铲</option>
+              <option value="7">7 铲</option>
+              <option value="8">8 铲</option>
+              <option value="9">9 铲</option>
             </select>
           </label>
           <button id="hybrid-auto-start" class="button accent" type="button">自动装车 4 铲</button>
@@ -193,6 +192,6 @@
       </section>
     </main>
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20260820-target-cycle" defer></script>
+    <script src="/static/app.js?v=20260821-nine-cycle" defer></script>
   </body>
 </html>

@@ -35,7 +35,7 @@ button { font: inherit; }
 .eyebrow { margin: 0 0 7px; color: var(--green); font-size: 11px; font-weight: 800; letter-spacing: .2em; }
 h1 { margin: 0; font-size: clamp(28px, 3vw, 43px); letter-spacing: -.045em; }
 .runtime-chip { display: flex; align-items: center; gap: 12px; min-width: 176px; padding: 11px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
-.runtime-chip small, .machine-strip small, .visualization-slot small { display: block; color: var(--muted); font-size: 11px; }
+.runtime-chip small, .machine-strip small { display: block; color: var(--muted); font-size: 11px; }
 .runtime-chip strong { display: block; margin-top: 2px; }
 .topbar .episode-counter { margin-left: auto; margin-right: 12px; }
 .status-dot { width: 11px; height: 11px; border-radius: 50%; background: #87928d; box-shadow: 0 0 0 5px rgba(135,146,141,.12); }
@@ -116,10 +116,6 @@ h1 { margin: 0; font-size: clamp(28px, 3vw, 43px); letter-spacing: -.045em; }
 .camera-placeholder strong { margin: 13px 0 5px; }
 .camera-placeholder small { color: #8fa099; }
 .camera-placeholder.hidden { display: none; }
-.visualization-slot { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin-top: 13px; padding: 12px 13px; border: 1px dashed #c9d0ca; border-radius: 12px; }
-.visualization-slot > span { max-width: 260px; color: var(--muted); font-size: 11px; text-align: right; }
-.text-link { color: var(--green); font-size: 12px; font-weight: 800; }
-
 .telemetry-card { margin-top: 13px; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: #f7f9f5; }
 .telemetry-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .telemetry-heading small { display: block; color: var(--green); font-size: 9px; font-weight: 900; letter-spacing: .16em; }

@@ -177,9 +177,8 @@ Orin `18092/tcp` 只读输出；因此 Collector 尚未启动或已经退出时�
 同一 Collector 还把已经解析的 STM32 最新帧投影为只读遥测，页面以 2 Hz 显示动臂/斗杆/铲斗/
 回转关节角以及三个油缸活塞杆伸缩量。UI 不会为此再次打开串口；Collector 未运行时显示等待。
 
-原生 RViz 是 Qt 桌面程序，第一版不把窗口强行嵌入浏览器。页面保留 `visualization_url` 扩展位；
-未来需要浏览器三维视图时，再将 ROS 2 数据通过 Foxglove Bridge 提供给浏览器，并保持采集状态机
-与可视化解耦。
+原生 RViz 是 Qt 桌面程序，当前 Web UI 不嵌入 RViz/Foxglove，也不显示三维可视化占位。
+需要录制三维状态时，使用页面“启动 RL + RViz”打开的原生 RViz 窗口。
 
 ### RL + ACT 混合 Mission（分段验收）
 
@@ -187,13 +186,15 @@ Orin `18092/tcp` 只读输出；因此 Collector 尚未启动或已经退出时�
 shell，而是按固定状态机执行：
 
 ```text
-RL Plan/Follow DIG + 并行 ACT 模型/CUDA 预热（ACT 不打开硬件）
-→ 终态零 + 退出 RL Runtime + 确认串口释放
-→ 内部交接门放行 → ACT 打开串口/相机并挖掘
-→ ACT 执行期间并行加载下一段 RL 资产/ONNX（RL 不打开串口）
-→ 终态零 + 退出 ACT Runtime + 确认串口释放
-→ 内部交接门放行 → 预热 RL 接管串口并 Plan/Follow DUMP → Orin ExecuteDump
-→ RL Runtime 保持零动作热待命 → Plan/Follow DIG 返回同一挖掘点 → 退出
+Mission 开始时一次性启动 Orin resident owner（唯一串口 owner）
+→ 一次性启动 ACT Worker，加载 checkpoint、CUDA warmup 并持续占用相机
+→ RL Plan/Follow DIG（RL ONNX 已在 resident owner 内存中）
+→ STM32 确认 RL terminal zero 与 ACT target zero
+→ 同一 owner 内切换 generation，ACT 直接执行挖掘
+→ ACT 末段并行准备 DUMP 轨迹
+→ STM32 确认 ACT terminal zero 与 RL target zero
+→ 激活已准备轨迹；不满足新鲜度/起点契约时安全回退到普通 Plan
+→ ExecuteDump → RL Follow 下一挖掘点 → 下一铲
 ```
 
 第一版 ACT 完成条件是 `config/hybrid_mission.pc.json` 中的 `act.max_steps=130`：live warmup 后累计
@@ -208,19 +209,22 @@ Web UI 提供：
 
 - `开始分段验证`：每完成一段后停在明确的等待阶段，由操作者点击下一段；点击执行 ACT 段本身
   作为本地显式运动授权，页面自动发送固定授权值，不再要求手工输入口令；
-- `自动装车 1～5 铲`：选择铲数后点击一次即连续执行；以页面选中的 DIG 点为第一铲，后续按
+- `自动装车 1～9 铲`：选择铲数后点击一次即连续执行；以页面选中的 DIG 点为第一铲，后续按
   Mission 配置顺序循环 `dig_01 → dig_02 → dig_03 → dig_01`。RL 返回阶段直接去下一铲点位，
   到达后从交接位姿开始 ACT，不额外增加一次策略冷启动；
 - `安全停止`：中断当前精确 owner，执行终态零并检查 `/dev/ttyTHS1` 释放。
 
-为减少分段演示中的静止冷启动，分段 Mission 从开始到完成由同一个后台 worker 持有：第一段 RL
-运行时并行加载 ACT checkpoint 并完成 synthetic CUDA warmup，但 ACT 在内部交接门放行前不打开
-`/dev/ttyTHS1` 或 `/dev/video0`；只有 RL 已终态回零并确认串口释放后才放行。倾倒完成后同一个 RL
-Runtime 保持零动作待命，返回时直接复用。ACT 挖掘开始后会对称地加载下一段 RL 配置、URDF、固定
-动作和 ONNX，但在 ACT 终态回零并确认串口释放前不打开串口或行为端口；若这项性能预热失败，
-当前 ACT 仍完成并在下一段回退到原有安全冷启动。多铲模式还会在 RL 返回期间预热下一铲 ACT。等待阶段
-点击“安全停止”会清理预热 ACT 或热待命 RL 并释放设备。该优化只隐藏进程冷启动，不缩短轨迹
-跟踪、ACT 130 step、固定倾倒或安全回零。
+默认 `resident` backend 不再在每段退出/重启硬件 Runtime。Orin owner 在整个 Mission 内持续拥有
+`/dev/ttyTHS1`，RL ONNX 常驻其中；独立 ACT Worker 在整个 Mission 内保持 checkpoint、CUDA、
+action queue 与 `/dev/video0` 就绪，但永不映射串口。交接只更换带
+`control_generation` 的 Motion Authority，并严格等待旧来源 terminal zero、目标模式 zero claim
+和首条非零命令的 STM32 telemetry ACK。ACT 最后 20 steps 时，PC 并行准备 DUMP 轨迹；若准备结果
+过期、起点不兼容或未及时就绪，则保持归零并回退到普通 live Plan，不复用可疑轨迹。该结构消除模型、
+容器、串口和相机冷启动，但不缩短真实轨迹跟踪、ACT 130 steps、固定倾倒或必要的 zero/ACK。
+
+PC 每 0.4 s 续约一次 1.5 s Mission lease。PC/Web UI 异常退出、网线断开或续约停止后，Orin owner
+会不可逆 terminal disarm，等待最终零命令 ACK 后释放串口；ACT Worker 随本机 data link 关闭退出。
+点击“安全停止”时先禁止新的续约，再 terminal disarm，不能让阻塞的远程清理延长运动授权。
 
 Web UI 通过 SSH 非交互启动 ACT Docker。Orin 的 `jetson16` 必须能直接运行 Docker；实验机可一次性
 加入 `docker` 组并重新登录，之后先验证 `docker info`：
@@ -235,11 +239,29 @@ docker info >/dev/null && echo docker-ready
 失败，不会把密码写入配置。更新 ACT Runtime Python 代码后还必须重新构建 Orin 镜像；仅 `git pull`
 不会改变已存在镜像中的代码。
 
-混合 Mission 仍保持单一硬件 owner，但观测输出不会随策略切换消失：RL 阶段由不访问串口的
-`camera-preview` sidecar 独占 `/dev/video0`；切换到 ACT 前先停止 sidecar 并确认相机释放，ACT 再用
-同一次相机采样同时提供模型 RGB 与 Web JPEG。ACT 还把自己读取的 STM32 遥测转换为既有
-`machine_state_v1`，因此 ACT 阶段 RViz 关节状态继续更新。浏览器会在短暂交接间隙自动重连。
-这些接口只提供只读预览和状态，不接收任何运动命令，也不改变串口 owner 互斥。
+在 Orin 的最新 `excavator-il` 工作树执行增量重建并验证常驻入口：
+
+```bash
+cd /home/jetson16/workspace_excavator/excavator-il
+git status --short
+
+sudo docker build --progress=plain --network=none \
+  --build-arg BASE_RUNTIME_IMAGE=excavator-act-inference:jp72-pytorch261 \
+  --build-arg EXCAVATOR_IL_REVISION="$(git rev-parse HEAD)$(test -z "$(git status --porcelain)" || printf '%s' -dirty)" \
+  -f docker/act-inference.incremental.Dockerfile \
+  -t excavator-act-inference:jp72-pytorch261 .
+
+docker run --rm --network=none \
+  excavator-act-inference:jp72-pytorch261 \
+  python3 -c 'import excavator_il.resident_act_runtime; print("resident-act-import-ok")'
+```
+
+增量 Dockerfile 也会在 build 阶段执行同一 import；任一步失败都不要启动 resident Mission。
+
+混合 Mission 仍保持单一硬件 owner，观测输出也不随策略切换消失：常驻 ACT Worker 在整个 Mission
+内独占 `/dev/video0`，同一次相机采样同时供策略 RGB 与 Web JPEG；resident owner 则持续把 STM32
+遥测发布为既有 `machine_state_v1`，因此 RL/ACT 两个阶段 RViz 关节状态都能更新。这些接口只提供
+只读预览和状态，不接收任何运动命令，也不改变串口 owner 互斥。
 
 不启动 Web UI 时，也可从 PC 单独运行同一遥操作流程：
 

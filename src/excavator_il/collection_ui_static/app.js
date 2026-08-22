@@ -97,12 +97,6 @@ function renderConfig(config) {
     scheduleCameraRefresh(CAMERA_RETRY_MS);
   });
   loadCameraPreview();
-  if (config.visualization_url) {
-    const link = $("visualization-link");
-    link.href = config.visualization_url;
-    link.classList.remove("hidden");
-    $("visualization-note").classList.add("hidden");
-  }
 }
 
 function renderTargets(targets) {
@@ -338,7 +332,7 @@ function hybridMotionAuthorization() {
 
 function selectedHybridCycleCount() {
   const value = Number.parseInt($("hybrid-cycle-count")?.value || "4", 10);
-  return Number.isInteger(value) && value >= 1 && value <= 5 ? value : 4;
+  return Number.isInteger(value) && value >= 1 && value <= 9 ? value : 4;
 }
 
 function renderHybridCycleButton() {

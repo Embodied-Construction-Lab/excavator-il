@@ -19,7 +19,10 @@ from pydantic import BaseModel, Field
 from .airy_operator import AiryOperatorSnapshot
 from .collection_ui_config import CollectionUiConfig
 from .collection_ui_session import CollectionSessionSnapshot
-from .hybrid_mission_session import HybridMissionSnapshot
+from .hybrid_mission_session import (
+    MAX_HYBRID_CYCLE_COUNT,
+    HybridMissionSnapshot,
+)
 
 
 @dataclass(frozen=True)
@@ -87,7 +90,7 @@ class EpisodeOutcomeRequest(BaseModel):
 class StartHybridMissionRequest(BaseModel):
     dig_target_id: str
     automatic: bool = False
-    cycle_count: int = Field(default=1, ge=1, le=5)
+    cycle_count: int = Field(default=1, ge=1, le=MAX_HYBRID_CYCLE_COUNT)
     motion_authorization: str | None = None
 
 

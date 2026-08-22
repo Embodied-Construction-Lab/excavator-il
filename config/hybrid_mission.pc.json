@@ -1,5 +1,6 @@
 {
-  "schema_version": "excavator_hybrid_mission_config.v1",
+  "schema_version": "excavator_hybrid_mission_config.v2",
+  "runtime_backend": "resident",
   "guided_config": "guided_episode.pc.json",
   "act": {
     "max_steps": 130,
@@ -9,5 +10,16 @@
   },
   "rl": {
     "behavior_port": 18083
+  },
+  "resident": {
+    "owner_script": "scripts/run_resident_mission_runtime.sh",
+    "act_worker_script": "scripts/run_act_resident.sh",
+    "runtime_root": "/home/jetson16/.local/run/excavator-resident",
+    "ready_timeout_s": 120,
+    "handoff_timeout_s": 3,
+    "poll_interval_ms": 50,
+    "prepared_dump_lead_steps": 20,
+    "prepared_ready_grace_ms": 300,
+    "prepared_start_tolerance_m": 0.15
   }
 }

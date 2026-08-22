@@ -100,6 +100,28 @@ sudo docker run --rm --runtime=nvidia --gpus all \
   python3 -c 'import torch, torchvision, lerobot, datasets, av, pyarrow; print(torch.__version__, torchvision.__version__, lerobot.__version__, datasets.__version__, av.__version__, pyarrow.__version__); print(torch.cuda.is_available(), torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0))'
 ```
 
+### 3.1 更新 resident ACT Worker 代码
+
+常驻混合 Mission 的 ACT Worker 从镜像内 Python 包运行。PC/Orin `git pull` 后，已有镜像不会自动
+更新；必须在 Orin 的新工作树上执行离线增量构建：
+
+```bash
+cd /home/jetson16/workspace_excavator/excavator-il
+
+sudo docker build --progress=plain --network=none \
+  --build-arg BASE_RUNTIME_IMAGE=excavator-act-inference:jp72-pytorch261 \
+  --build-arg EXCAVATOR_IL_REVISION="$(git rev-parse HEAD)$(test -z "$(git status --porcelain)" || printf '%s' -dirty)" \
+  -f docker/act-inference.incremental.Dockerfile \
+  -t excavator-act-inference:jp72-pytorch261 .
+
+docker run --rm --network=none \
+  excavator-act-inference:jp72-pytorch261 \
+  python3 -c 'import excavator_il.resident_act_runtime; print("resident-act-import-ok")'
+```
+
+Dockerfile 在构建阶段也强制导入该 Module。任一 import 失败都表示镜像与当前 Mission 代码不一致，
+不得进入真机 resident 验收。
+
 ## 4. 传输和校验离线输入
 
 训练 PC 只传 `pretrained_model` 和一条已转换 LeRobotDataset；训练 optimizer state 不参与

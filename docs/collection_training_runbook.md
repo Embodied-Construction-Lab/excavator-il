@@ -382,28 +382,33 @@ Collector 运行时，同一只读 HTTP 服务还提供最新 STM32 遥测。UI 
 
 页面选择 DIG 点后点击“开始分段验证”，按顺序检查：
 
-- `RL 到挖点` 期间会并行预热 ACT；此时 ACT 不打开串口或相机。RL 完成、终态回零并确认
-  `/dev/ttyTHS1` 释放后进入 `等待 ACT 挖掘`；
-- 点击 ACT 段；这次明确点击就是本地运动授权，页面自动发送固定授权值，不需要手工输入口令。
-  默认完成 130 个 10 Hz step 后自动回零。ACT 硬件就绪后，后台同时预加载下一段 RL 的配置、
-  URDF、固定动作与 ONNX；这个 RL 预热进程在内部交接门放行前不打开串口或行为端口；
-- 点击“前往倾倒并倾倒”，同一 RL Runtime 先 Follow DUMP，再调用现有 `ExecuteDump`，完成后以
-  零动作保持热待命；
-- 点击“RL 返回挖点”，直接复用热待命 Runtime 返回本轮选择的同一 DIG 点，完成后终态回零并退出。
+- Mission 开始时 Orin resident owner 一次性打开 `/dev/ttyTHS1` 并在内存中保持 RL ONNX；独立
+  ACT Worker 一次性加载 checkpoint、完成 CUDA warmup 并占用 `/dev/video0`，但绝不映射串口；
+- `RL 到挖点` 使用 resident RL generation。完成后 owner 依次等待 RL terminal zero 与 ACT 模式
+  zero claim 的 STM32 ACK，不退出进程、不释放重开串口；
+- 点击 ACT 段；这次明确点击就是本地运动授权。默认完成 130 个 10 Hz step。在最后 20 steps 时，
+  PC 后台准备 DUMP 轨迹；
+- 点击“前往倾倒并倾倒”时先完成 ACT terminal zero → RL target zero 的 ACK 交接，再激活准备好的
+  DUMP 轨迹。轨迹未及时就绪、已过期或当前起点不兼容时保持归零，回退到普通 live Plan；
+- 点击“RL 返回挖点”，继续复用同一 resident RL Runtime 返回本轮目标，不发生模型或容器冷启动。
 
-整个分段流程由一个后台 worker 保存预热/热待命状态，但任何时刻仍只有一个硬件 owner。RL→ACT
-交接必须先执行 terminal zero 并确认串口释放；ACT 预热和 RL 预热本身都不持有硬件。RL 预热失败
-只回退到原有冷启动，不中断已经安全运行的 ACT 段。倾倒→返回不切换 owner，
-RL Runtime 保持零动作待命；等待阶段点击“安全停止”会停止当前 Runtime 并释放串口。分段全部通过
-后才能使用“自动装车”。自动模式可选择 1～5 铲；页面选中的 DIG 点是第一铲，后续按 Mission
+整个流程只有 resident owner 能写串口；策略切换只增加 `control_generation` 并更换候选动作语义。
+PC 每 0.4 秒续约一次 1.5 秒 Mission lease。Web UI/PC 退出或控制网线断开后，Orin 会 terminal
+disarm、等待最终零命令 ACK 并释放串口；点击“安全停止”时先禁止新的续约，再执行相同终态路径。
+分段全部通过
+后才能使用“自动装车”。自动模式可选择 1～9 铲；页面选中的 DIG 点是第一铲，后续按 Mission
 配置中的 DIG 顺序循环。例如从 `dig_02` 开始的 5 铲依次为
 `dig_02 → dig_03 → dig_01 → dig_02 → dig_03`。RL 返回阶段直接去下一铲的交接位姿，并在途中
-预热下一铲 ACT，以减少静止等待；最后一铲仍返回该铲使用的挖点。任一阶段失败即停止，不会跳过
-故障继续下一铲。ACT step 上限集中在
+保持常驻 ACT Worker ready；最后一铲仍返回该铲使用的挖点。任一阶段失败即停止，不会跳过故障
+继续下一铲。ACT step 上限集中在
 `config/hybrid_mission.pc.json`，不得通过页面临时随意扩大。该有界 step 规则只是当前实验的
 最小完成条件，不代表任务成功识别；真实土壤验收仍记录是否完成挖掘、是否带土和最终交接位姿。
-原生 RViz 不作为 iframe 嵌入；`config/collection_ui.pc.json.visualization_url` 仅保留未来
-Foxglove Web 三维视图入口，当前留空。
+原生 RViz 不作为 iframe 嵌入，Web UI 也不显示 RViz/Foxglove 扩展占位。
+需要三维状态或录屏时，使用页面“启动 RL + RViz”打开的原生 RViz 窗口。
+
+更新 `excavator-il` Python 代码后，Orin 必须用
+`docker/act-inference.incremental.Dockerfile` 重建 `excavator-act-inference:jp72-pytorch261`；Git
+同步不会修改已有镜像。精确构建与 import 核验命令见仓库 README 的“RL + ACT 混合 Mission”节。
 
 Wi-Fi 局域网避免了公网路由，但不是实时总线：无线信道争用/重传/省电、驱动与内核队列，以及
 Orin 进程调度都可能把若干 20 Hz 包延后后再成批交付。`episode_0004` 中 PC 采样间隔仍约
