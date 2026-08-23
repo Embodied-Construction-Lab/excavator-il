@@ -137,6 +137,18 @@ class _FrameStatistics:
     latest_jpeg: bytes | None
 
 
+@dataclass(frozen=True)
+class _FrameAccumulator:
+    frame_count: int
+    shapes: frozenset[tuple[int, ...]]
+    luma_sum: float
+    pixel_count: int
+    near_black_count: int
+    near_white_count: int
+    latest_shape: tuple[int, ...] | None
+    latest_jpeg: bytes | None
+
+
 def _round_metric(value: float) -> float:
     return round(value, 6)
 
@@ -157,25 +169,53 @@ def _frame_luma(rgb: np.ndarray) -> np.ndarray:
     return np.mean(rgb.astype(np.float32), axis=2)
 
 
-def _frame_statistics(
-    frames: list[RgbCameraFrame],
-    duration_s: float,
-    thresholds: CameraDiagnosticThresholds,
-) -> _FrameStatistics:
-    all_luma = np.concatenate(
-        [_frame_luma(frame.rgb).reshape(-1) for frame in frames]
+def _initial_frame_accumulator() -> _FrameAccumulator:
+    return _FrameAccumulator(
+        frame_count=0,
+        shapes=frozenset(),
+        luma_sum=0.0,
+        pixel_count=0,
+        near_black_count=0,
+        near_white_count=0,
+        latest_shape=None,
+        latest_jpeg=None,
     )
+
+
+def _accumulate_frame(
+    accumulator: _FrameAccumulator,
+    frame: RgbCameraFrame,
+    thresholds: CameraDiagnosticThresholds,
+) -> _FrameAccumulator:
+    luma = _frame_luma(frame.rgb)
+    shape = tuple(frame.rgb.shape)
+    return _FrameAccumulator(
+        frame_count=accumulator.frame_count + 1,
+        shapes=accumulator.shapes | {shape},
+        luma_sum=accumulator.luma_sum + float(np.sum(luma, dtype=np.float64)),
+        pixel_count=accumulator.pixel_count + int(luma.size),
+        near_black_count=accumulator.near_black_count
+        + int(np.count_nonzero(luma <= thresholds.near_black_value)),
+        near_white_count=accumulator.near_white_count
+        + int(np.count_nonzero(luma >= thresholds.near_white_value)),
+        latest_shape=shape,
+        latest_jpeg=frame.encoded_image,
+    )
+
+
+def _frame_statistics(
+    accumulator: _FrameAccumulator,
+    duration_s: float,
+) -> _FrameStatistics:
+    if accumulator.frame_count <= 0 or accumulator.pixel_count <= 0:
+        raise ValueError("frame accumulator must contain pixels")
     return _FrameStatistics(
-        shapes=frozenset(tuple(frame.rgb.shape) for frame in frames),
-        measured_fps=len(frames) / duration_s,
-        mean_luma=float(np.mean(all_luma)),
-        near_black_fraction=float(
-            np.mean(all_luma <= thresholds.near_black_value)
-        ),
-        near_white_fraction=float(
-            np.mean(all_luma >= thresholds.near_white_value)
-        ),
-        latest_jpeg=frames[-1].encoded_image,
+        shapes=accumulator.shapes,
+        measured_fps=accumulator.frame_count / duration_s,
+        mean_luma=accumulator.luma_sum / accumulator.pixel_count,
+        near_black_fraction=accumulator.near_black_count / accumulator.pixel_count,
+        near_white_fraction=accumulator.near_white_count / accumulator.pixel_count,
+        latest_jpeg=accumulator.latest_jpeg,
     )
 
 
@@ -258,7 +298,7 @@ def _sample_camera(
         start_barrier.wait(timeout=5.0)
         start_ns = time.monotonic_ns()
         deadline_ns = start_ns + round(duration_s * 1_000_000_000)
-        frames: list[RgbCameraFrame] = []
+        accumulator = _initial_frame_accumulator()
         latencies_ms: list[float] = []
         while time.monotonic_ns() < deadline_ns:
             read_start_ns = time.monotonic_ns()
@@ -266,7 +306,7 @@ def _sample_camera(
             read_end_ns = time.monotonic_ns()
             if read_end_ns > deadline_ns:
                 break
-            frames.append(frame)
+            accumulator = _accumulate_frame(accumulator, frame, thresholds)
             latencies_ms.append((read_end_ns - read_start_ns) / 1_000_000.0)
         return _summarize_camera(
             role=role,
@@ -274,7 +314,7 @@ def _sample_camera(
             resolved_device=resolved_device,
             duration_s=duration_s,
             thresholds=thresholds,
-            frames=frames,
+            accumulator=accumulator,
             latencies_ms=latencies_ms,
         )
     except threading.BrokenBarrierError:
@@ -300,12 +340,12 @@ def _summarize_camera(
     resolved_device: str,
     duration_s: float,
     thresholds: CameraDiagnosticThresholds,
-    frames: list[RgbCameraFrame],
+    accumulator: _FrameAccumulator,
     latencies_ms: list[float],
 ) -> _SampledCamera:
-    if not frames:
+    if accumulator.frame_count == 0:
         return _result_for_failure(role, config, resolved_device, "no successful frames")
-    statistics = _frame_statistics(frames, duration_s, thresholds)
+    statistics = _frame_statistics(accumulator, duration_s)
     expected_shape = (config.height, config.width, 3)
     return _SampledCamera(
         result=CameraDiagnosticResult(
@@ -314,11 +354,11 @@ def _summarize_camera(
             resolved_device=resolved_device,
             nominal_fps=config.nominal_fps,
             expected_shape=expected_shape,
-            successful_frame_count=len(frames),
+            successful_frame_count=accumulator.frame_count,
             measured_fps=_round_metric(statistics.measured_fps),
             read_latency_p95_ms=_round_metric(_percentile_95(latencies_ms)),
             read_latency_max_ms=_round_metric(max(latencies_ms)),
-            frame_shape=tuple(frames[-1].rgb.shape),
+            frame_shape=accumulator.latest_shape,
             mean_luma=_round_metric(statistics.mean_luma),
             near_black_fraction=_round_metric(statistics.near_black_fraction),
             near_white_fraction=_round_metric(statistics.near_white_fraction),
@@ -433,7 +473,7 @@ def _save_latest_jpegs(
 def _error_payload(
     *,
     config_path: Path,
-    duration_s: float,
+    duration_s: float | None,
     thresholds: CameraDiagnosticThresholds,
     reason: str,
 ) -> dict[str, object]:
@@ -447,6 +487,15 @@ def _error_payload(
         "cameras": {},
         "failure_reasons": [reason],
     }
+
+
+def _normalized_error_duration(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    duration_s = float(value)
+    if not math.isfinite(duration_s):
+        return None
+    return duration_s
 
 
 def build_parser(default_config_path: str | Path) -> argparse.ArgumentParser:
@@ -490,10 +539,18 @@ def main(
     except (OSError, RuntimeError, ValueError) as exc:
         payload = _error_payload(
             config_path=args.config,
-            duration_s=args.duration_s,
+            duration_s=_normalized_error_duration(args.duration_s),
             thresholds=thresholds,
             reason=str(exc),
         )
         exit_code = 2
-    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    print(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+    )
     return exit_code

@@ -7,6 +7,7 @@ import runpy
 import socket
 import threading
 import time
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -133,6 +134,45 @@ class _WhiteWrongShapeCamera(_ConcurrentFakeCamera):
             capture_monotonic_ns=time.monotonic_ns(),
             rgb=image,
             encoded_image=b"white-jpeg",
+        )
+
+
+class _LifetimeTrackedCamera(_ConcurrentFakeCamera):
+    read_barrier = threading.Barrier(2)
+    _lock = threading.Lock()
+    alive_arrays = 0
+    peak_alive_arrays = 0
+
+    @classmethod
+    def reset_counts(cls) -> None:
+        with cls._lock:
+            cls.alive_arrays = 0
+            cls.peak_alive_arrays = 0
+
+    @classmethod
+    def _released(cls) -> None:
+        with cls._lock:
+            cls.alive_arrays -= 1
+
+    def read_rgb(self) -> RgbCameraFrame:
+        if self._first_read:
+            self._first_read = False
+            self.read_barrier.wait(timeout=1.0)
+        time.sleep(0.02)
+        image = np.full(
+            (self._config.height, self._config.width, 3),
+            100,
+            dtype=np.uint8,
+        )
+        cls = type(self)
+        with cls._lock:
+            cls.alive_arrays += 1
+            cls.peak_alive_arrays = max(cls.peak_alive_arrays, cls.alive_arrays)
+        weakref.finalize(image, cls._released)
+        return RgbCameraFrame(
+            capture_monotonic_ns=time.monotonic_ns(),
+            rgb=image,
+            encoded_image=b"tracked-jpeg",
         )
 
 
@@ -271,6 +311,18 @@ def test_dual_camera_diagnostic_optionally_saves_latest_jpegs(
         ).hexdigest()
 
 
+def test_dual_camera_diagnostic_keeps_rgb_memory_bounded(tmp_path: Path) -> None:
+    _LifetimeTrackedCamera.reset_counts()
+
+    run_dual_camera_diagnostic(
+        _write_collection_config(tmp_path),
+        duration_s=0.25,
+        camera_factory=_LifetimeTrackedCamera,
+    )
+
+    assert _LifetimeTrackedCamera.peak_alive_arrays <= 4
+
+
 def test_dual_camera_diagnostic_reports_one_open_failure_for_both_roles(
     tmp_path: Path,
 ) -> None:
@@ -324,6 +376,28 @@ def test_camera_diagnostic_cli_reports_config_errors_without_traceback(
             "near_white_value": 250,
         },
     }
+    assert "Traceback" not in captured.out
+
+
+def test_camera_diagnostic_cli_rejects_nan_duration_with_strict_json(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from excavator_il.camera_diagnostics import main
+
+    exit_code = main(["--duration-s", "nan"])
+    captured = capsys.readouterr()
+    payload = json.loads(
+        captured.out,
+        parse_constant=lambda value: (_ for _ in ()).throw(
+            AssertionError(f"non-standard JSON constant: {value}")
+        ),
+    )
+
+    assert exit_code == 2
+    assert captured.err == ""
+    assert payload["duration_s"] is None
+    assert payload["failure_reasons"] == ["duration_s must be in [0.2, 30.0]"]
+    assert "NaN" not in captured.out
     assert "Traceback" not in captured.out
 
 
