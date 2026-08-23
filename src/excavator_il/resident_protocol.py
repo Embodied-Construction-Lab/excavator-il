@@ -82,6 +82,10 @@ _CANDIDATE_FIELDS = frozenset(
 )
 
 
+class ResidentActOwnerClosed(ConnectionError):
+    """The authoritative resident owner ended the local data link."""
+
+
 @dataclass(frozen=True)
 class ResidentActState:
     """One immutable canonical ACT state plus current safety evidence."""
@@ -352,7 +356,9 @@ class ResidentActDataClient:
                 except BlockingIOError:
                     continue
                 if not chunk:
-                    raise ConnectionError("resident ACT owner closed the data link")
+                    raise ResidentActOwnerClosed(
+                        "resident ACT owner closed the data link"
+                    )
                 self._receive_buffer.extend(chunk)
 
     def send_candidate(self, candidate: ResidentPolicyCandidate) -> None:
@@ -378,7 +384,9 @@ class ResidentActDataClient:
                         "cannot send ACT candidate to resident owner"
                     ) from exc
                 if sent <= 0:
-                    raise ConnectionError("resident ACT owner closed the data link")
+                    raise ResidentActOwnerClosed(
+                        "resident ACT owner closed the data link"
+                    )
                 offset += sent
 
     def close(self) -> None:

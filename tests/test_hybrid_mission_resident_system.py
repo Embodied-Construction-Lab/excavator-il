@@ -80,8 +80,11 @@ class _ResidentProcess:
         lines = {
             "resident-owner": (
                 "RESIDENT_OWNER_PID=4100",
-                "REMOTE EDGE CONTROL ARMED IDLE: behavior RPC 0.0.0.0:18083 from 192.168.50.1; actions use the resident STM32 command sink",
-                "sent seq=0 stm32_t=42 sensor_valid=True boom=0.1",
+                "2026-08-23 13:50:51,747 INFO orin_state_sender: "
+                "RESIDENT_CONTROL_READY control_socket=/run/control.sock "
+                "act_socket=/run/act.sock",
+                "2026-08-23 13:50:54,008 INFO orin_state_sender: "
+                "RESIDENT_HARDWARE_READY sensor_valid=True",
             ),
             "resident-act": (
                 "RESIDENT_ACT_PID=4200",
@@ -280,7 +283,11 @@ def test_system_operations_reuse_one_resident_stack_and_cleanup_after_mission(
                 calls.append(("start_act",))
                 self.started = True
 
-        def stop(self):
+        def wait_for_owner_hardware_ready(self):
+            calls.append(("wait_hardware",))
+
+        def stop(self, *, terminal_disarmed=False):
+            assert terminal_disarmed is True
             calls.append(("stop_processes",))
             self.owner_started = False
             self.started = False
@@ -339,6 +346,8 @@ def test_system_operations_reuse_one_resident_stack_and_cleanup_after_mission(
         ("start_lease",),
         ("lease_healthy",),
         ("start_act",),
+        ("wait_hardware",),
+        ("lease_healthy",),
         ("rl_to_dig", "dig_01"),
         ("lease_healthy",),
         ("lease_healthy",),
@@ -366,7 +375,8 @@ def test_system_safe_stop_releases_processes_even_if_disarm_reports_failure(
         owner_started = True
         started = True
 
-        def stop(self):
+        def stop(self, *, terminal_disarmed=False):
+            assert terminal_disarmed is False
             calls.append("stop_processes")
             self.owner_started = False
             self.started = False
@@ -406,6 +416,102 @@ def test_system_safe_stop_releases_processes_even_if_disarm_reports_failure(
         "stop_lease",
         "stop_processes",
     ]
+
+
+def test_system_safe_stop_accepts_act_disconnect_after_confirmed_disarm(
+    tmp_path,
+):
+    created = []
+
+    def factory(*args, **kwargs):
+        process = _ResidentProcess(*args, **kwargs)
+        created.append(process)
+        return process
+
+    processes = ResidentMissionProcesses(
+        _config(tmp_path),
+        guided_config=_Guided(tmp_path),
+        remote_host=_RemoteHost(),
+        line_process_factory=factory,
+        output=lambda _message: None,
+    )
+    processes.start()
+
+    class Operations:
+        def safe_stop(self):
+            # The owner closes the ACT data link after terminal disarm.  The
+            # worker deliberately fails closed, while the owner's SSH process
+            # may not have observed its own clean exit yet.
+            created[1].returncode = 1
+
+    class Heartbeat:
+        running = True
+
+        def request_stop(self):
+            return None
+
+        def stop(self):
+            self.running = False
+
+    system = SystemResidentHybridMissionOperations(
+        _config(tmp_path),
+        processes=processes,
+        resident_operations=Operations(),
+        lease_heartbeat=Heartbeat(),
+    )
+
+    system.safe_stop()
+
+    assert not processes.owner_started
+    assert not processes.started
+
+
+def test_system_safe_stop_rejects_act_nonzero_when_disarm_is_unconfirmed(
+    tmp_path,
+):
+    created = []
+
+    def factory(*args, **kwargs):
+        process = _ResidentProcess(*args, **kwargs)
+        created.append(process)
+        return process
+
+    processes = ResidentMissionProcesses(
+        _config(tmp_path),
+        guided_config=_Guided(tmp_path),
+        remote_host=_RemoteHost(),
+        line_process_factory=factory,
+        output=lambda _message: None,
+    )
+    processes.start()
+
+    class Operations:
+        def safe_stop(self):
+            created[1].returncode = 1
+            raise RuntimeError("terminal zero was not confirmed")
+
+    class Heartbeat:
+        running = True
+
+        def request_stop(self):
+            return None
+
+        def stop(self):
+            self.running = False
+
+    system = SystemResidentHybridMissionOperations(
+        _config(tmp_path),
+        processes=processes,
+        resident_operations=Operations(),
+        lease_heartbeat=Heartbeat(),
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        system.safe_stop()
+
+    message = str(error.value)
+    assert "terminal zero was not confirmed" in message
+    assert "resident remote process exited with return code 1" in message
 
 
 def test_process_aware_control_forwards_lease_renewal_only_while_stack_runs():

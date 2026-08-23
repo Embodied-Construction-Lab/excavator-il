@@ -10,6 +10,7 @@ from excavator_il.resident_protocol import (
     ACTION_ORDER,
     ACT_STATE_NAMES,
     ResidentActDataClient,
+    ResidentActOwnerClosed,
     ResidentActState,
     ResidentPolicyCandidate,
     decode_policy_candidate,
@@ -90,6 +91,18 @@ def test_data_client_uses_strict_bidirectional_length_framing(tmp_path):
         listener.close()
 
     assert received == [candidate]
+
+
+def test_data_client_distinguishes_owner_eof_from_protocol_failure():
+    client_connection, owner_connection = socket.socketpair()
+    client = ResidentActDataClient("/tmp/resident-act-owner-eof.sock")
+    client._connection = client_connection
+    owner_connection.close()
+    try:
+        with pytest.raises(ResidentActOwnerClosed, match="owner closed"):
+            client.receive_state(timeout_s=0.1)
+    finally:
+        client.close()
 
 
 def test_data_client_retries_nonblocking_would_block_and_partial_io(monkeypatch):

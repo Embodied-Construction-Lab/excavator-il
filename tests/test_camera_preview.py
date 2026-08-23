@@ -8,6 +8,7 @@ from excavator_il.collector.preview import (
     LatestJpegFrame,
     LatestTelemetryFrame,
     MjpegPreviewServer,
+    _write_preview_payload,
 )
 
 
@@ -21,6 +22,14 @@ def test_latest_jpeg_frame_is_bounded_and_waits_for_a_new_sequence():
     assert first.sequence == 1
     assert second.sequence == 2
     assert latest.wait_after(1, timeout_s=0.01) == second
+
+
+def test_preview_client_disconnect_is_an_expected_write_result():
+    class DisconnectedClient:
+        def write(self, _payload):
+            raise BrokenPipeError("browser closed the preview request")
+
+    assert _write_preview_payload(DisconnectedClient(), b"jpeg") is False
 
 
 def test_mjpeg_preview_server_streams_the_collector_owned_latest_frame():

@@ -8,7 +8,21 @@ import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import MappingProxyType
-from typing import Mapping
+from typing import Mapping, Protocol
+
+
+class _PreviewWriter(Protocol):
+    def write(self, payload: bytes) -> object: ...
+
+
+def _write_preview_payload(writer: _PreviewWriter, payload: bytes) -> bool:
+    """Write one response body; a browser closing the request is not a fault."""
+
+    try:
+        writer.write(payload)
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -176,7 +190,7 @@ class MjpegPreviewServer:
                 self.send_header("Content-Length", str(len(payload)))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
-                self.wfile.write(payload)
+                _write_preview_payload(self.wfile, payload)
 
             def _snapshot(self) -> None:
                 frame = owner._frames.wait_after(0, timeout_s=1.0)
@@ -188,7 +202,7 @@ class MjpegPreviewServer:
                 self.send_header("Content-Length", str(len(frame.encoded_image)))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
-                self.wfile.write(frame.encoded_image)
+                _write_preview_payload(self.wfile, frame.encoded_image)
 
             def _telemetry_snapshot(self) -> None:
                 if owner._telemetry is None:
@@ -232,7 +246,7 @@ class MjpegPreviewServer:
                 self.send_header("Content-Length", str(len(payload)))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
-                self.wfile.write(payload)
+                _write_preview_payload(self.wfile, payload)
 
             def _stream(self) -> None:
                 self.send_response(200)

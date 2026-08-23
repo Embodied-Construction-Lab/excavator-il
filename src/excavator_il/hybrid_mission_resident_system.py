@@ -100,6 +100,17 @@ class ResidentMissionProcesses:
             return
         self._start_act_worker()
 
+    def wait_for_owner_hardware_ready(self) -> None:
+        """Wait until the resident owner has observed one valid sensor state."""
+
+        self.require_owner_running()
+        process = self._owner_process
+        assert process is not None
+        process.wait_for(
+            lambda line: "RESIDENT_HARDWARE_READY sensor_valid=True" in line,
+            self._resident.ready_timeout_s,
+        )
+
     def start(self) -> None:
         if self.started:
             self.require_running()
@@ -117,16 +128,28 @@ class ResidentMissionProcesses:
                 )
             raise
 
-    def stop(self) -> None:
+    def stop(self, *, terminal_disarmed: bool = False) -> None:
+        if not isinstance(terminal_disarmed, bool):
+            raise ValueError("terminal_disarmed must be a boolean")
         errors: list[str] = []
-        try:
-            self._stop_act_worker()
-        except Exception as exc:
-            errors.append(f"ACT worker: {exc}")
-        try:
-            self._stop_owner()
-        except Exception as exc:
-            errors.append(f"resident owner: {exc}")
+        if terminal_disarmed:
+            try:
+                self._stop_owner()
+            except Exception as exc:
+                errors.append(f"resident owner: {exc}")
+            try:
+                self._stop_act_worker(allow_fail_closed_exit=True)
+            except Exception as exc:
+                errors.append(f"ACT worker: {exc}")
+        else:
+            try:
+                self._stop_act_worker()
+            except Exception as exc:
+                errors.append(f"ACT worker: {exc}")
+            try:
+                self._stop_owner()
+            except Exception as exc:
+                errors.append(f"resident owner: {exc}")
         if errors:
             raise RuntimeError("; ".join(errors))
 
@@ -165,11 +188,7 @@ class ResidentMissionProcesses:
         )
         self._owner_pid = _remote_pid(pid_line, "RESIDENT_OWNER_PID")
         process.wait_for(
-            lambda line: "REMOTE EDGE CONTROL ARMED IDLE" in line,
-            self._resident.ready_timeout_s,
-        )
-        process.wait_for(
-            lambda line: "sent seq=" in line and "sensor_valid=True" in line,
+            lambda line: "RESIDENT_CONTROL_READY " in line,
             self._resident.ready_timeout_s,
         )
 
@@ -218,7 +237,7 @@ class ResidentMissionProcesses:
             output=self._output,
         )
 
-    def _stop_act_worker(self) -> None:
+    def _stop_act_worker(self, *, allow_fail_closed_exit: bool = False) -> None:
         process, pid = self._act_process, self._act_pid
         if process is None:
             return
@@ -241,7 +260,9 @@ class ResidentMissionProcesses:
             )
             _wait_for_local_process(
                 process,
-                allow_nonzero=owner_driven_fail_closed_exit,
+                allow_nonzero=(
+                    allow_fail_closed_exit or owner_driven_fail_closed_exit
+                ),
             )
         finally:
             self._act_process = None
@@ -433,6 +454,7 @@ class SystemResidentHybridMissionOperations:
 
     def safe_stop(self) -> None:
         errors: list[str] = []
+        terminal_disarmed = False
         try:
             self._lease_heartbeat.request_stop()
         except Exception as exc:
@@ -440,6 +462,7 @@ class SystemResidentHybridMissionOperations:
         if self._processes.owner_started:
             try:
                 self._operations.safe_stop()
+                terminal_disarmed = True
             except Exception as exc:
                 errors.append(f"terminal disarm: {exc}")
         try:
@@ -448,7 +471,7 @@ class SystemResidentHybridMissionOperations:
             errors.append(f"lease heartbeat: {exc}")
         try:
             if self._processes.owner_started:
-                self._processes.stop()
+                self._processes.stop(terminal_disarmed=terminal_disarmed)
         except Exception as exc:
             errors.append(f"process release: {exc}")
         if errors:
@@ -457,10 +480,14 @@ class SystemResidentHybridMissionOperations:
     def _run(self, operation: Callable[..., None], *args: Any) -> None:
         try:
             self._processes.start_owner()
-            if not self._lease_heartbeat.running:
+            starting = not self._lease_heartbeat.running
+            if starting:
                 self._lease_heartbeat.start()
             self._lease_heartbeat.require_healthy()
             self._processes.start_act_worker()
+            if starting:
+                self._processes.wait_for_owner_hardware_ready()
+                self._lease_heartbeat.require_healthy()
             operation(*args)
             self._lease_heartbeat.require_healthy()
         except BaseException as exc:

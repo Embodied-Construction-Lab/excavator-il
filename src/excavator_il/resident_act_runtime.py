@@ -43,6 +43,7 @@ from .resident_protocol import (
     ACT_CONTROL_MODE,
     ACT_POLICY_SOURCE,
     ResidentActDataClient,
+    ResidentActOwnerClosed,
     ResidentActState,
     ResidentPolicyCandidate,
 )
@@ -53,6 +54,12 @@ _DEFAULT_CANDIDATE_TTL_MS = 300.0
 _MIN_CANDIDATE_TTL_MS = 200.0
 _MAX_CANDIDATE_TTL_MS = 300.0
 LOGGER = logging.getLogger("excavator_il.resident_act_runtime")
+
+
+def _emit_lifecycle(message: str) -> None:
+    """Emit process-control markers independently of third-party logging setup."""
+
+    print(message, flush=True)
 
 
 class ResidentCausalObservationBuffer:
@@ -535,7 +542,9 @@ class ResidentActWorker:
                     daemon=True,
                 )
                 preview_thread.start()
+            _emit_lifecycle("ACT resident warmup starting")
             self._warmup()
+            _emit_lifecycle("ACT resident warmup passed")
             if self.error is not None:
                 raise RuntimeError("resident ACT preview failed") from self.error
             camera_thread = threading.Thread(
@@ -559,7 +568,7 @@ class ResidentActWorker:
             )
             reader_thread.start()
             self._ready.set()
-            LOGGER.info("ACT resident worker ready: owner connected")
+            _emit_lifecycle("ACT resident worker ready: owner connected")
 
             while not self._stop.is_set():
                 state = self._mailbox.receive(timeout_s=0.05)
@@ -571,6 +580,8 @@ class ResidentActWorker:
             error = self.error
             if error is not None:
                 raise RuntimeError("resident ACT worker failed") from error
+        except ResidentActOwnerClosed:
+            self._handle_owner_disconnect()
         except BaseException as exc:
             raised = exc
             self._record_error(exc)
@@ -610,11 +621,19 @@ class ResidentActWorker:
     def _guarded_worker(self, target: Callable[[], None]) -> None:
         try:
             target()
+        except ResidentActOwnerClosed:
+            self._handle_owner_disconnect()
         except BaseException as exc:
             if not self._stop.is_set():
                 self._record_error(exc)
                 self._stop.set()
                 self._mailbox.close()
+
+    def _handle_owner_disconnect(self) -> None:
+        if not self._stop.is_set():
+            _emit_lifecycle("ACT resident owner disconnected: stopping worker")
+        self._stop.set()
+        self._mailbox.close()
 
     def _record_error(self, error: BaseException) -> None:
         with self._error_lock:
@@ -666,8 +685,11 @@ def build_resident_act_worker(
     }
     verify_deployment_manifest(**provenance)
     policy_class = get_policy_class("act")
+    _emit_lifecycle("ACT resident build: policy load starting")
     policy = policy_class.from_pretrained(config.checkpoint_path)
+    _emit_lifecycle("ACT resident build: policy load passed")
     policy.to(config.device)
+    _emit_lifecycle("ACT resident build: CUDA transfer passed")
     policy.config.device = config.device
     preprocessor, postprocessor = make_pre_post_processors(
         policy.config,
@@ -675,6 +697,7 @@ def build_resident_act_worker(
         preprocessor_overrides={"device_processor": {"device": config.device}},
         postprocessor_overrides={"device_processor": {"device": config.device}},
     )
+    _emit_lifecycle("ACT resident build: processors ready")
     session = ActPolicySession(
         policy=policy,
         preprocessor=preprocessor,
@@ -694,6 +717,7 @@ def build_resident_act_worker(
     )
     # Catch checkpoint replacement during the comparatively expensive load.
     verify_deployment_manifest(**provenance)
+    _emit_lifecycle("ACT resident build: deployment recheck passed")
     transport = ResidentActDataClient(socket_path)
     camera = UvcCamera(
         CameraConfig(

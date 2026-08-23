@@ -16,6 +16,7 @@ from excavator_il.resident_act_runtime import (
     run_resident_act_worker,
 )
 from excavator_il.resident_protocol import (
+    ResidentActOwnerClosed,
     ResidentActState,
     ResidentPolicyCandidate,
 )
@@ -342,7 +343,9 @@ def test_activation_progress_resets_per_generation_without_stopping_the_worker()
     assert statuses[-1] == runtime.status
 
 
-def test_worker_warms_once_and_stays_resident_while_states_keep_arriving(caplog):
+def test_worker_warms_once_and_stays_resident_while_states_keep_arriving(
+    caplog, capsys
+):
     decision = ActRuntimeDecision(
         predicted_action=(0.1, -0.2, 0.3, 0.0),
         commanded_action=(0.1, -0.2, 0.3, 0.0),
@@ -443,7 +446,10 @@ def test_worker_warms_once_and_stays_resident_while_states_keep_arriving(caplog)
     assert camera.read_count >= 1
     assert camera.close_count == 1
     assert worker.error is None
-    assert "ACT resident worker ready:" in caplog.text
+    lifecycle_output = capsys.readouterr().out
+    assert "ACT resident warmup starting" in lifecycle_output
+    assert "ACT resident warmup passed" in lifecycle_output
+    assert "ACT resident worker ready:" in lifecycle_output
     assert "ACT resident worker stopped" in caplog.text
 
 
@@ -567,7 +573,7 @@ def test_slow_inference_consumes_latest_state_without_replaying_socket_backlog()
     assert worker.error is None
 
 
-def test_owner_disconnect_resets_policy_and_exits_the_worker_fail_closed():
+def test_owner_disconnect_resets_policy_and_exits_the_worker_cleanly():
     class _Transport(_CandidateTransport):
         connected = False
 
@@ -575,7 +581,7 @@ def test_owner_disconnect_resets_policy_and_exits_the_worker_fail_closed():
             self.connected = True
 
         def receive_state(self, *, timeout_s):
-            raise ConnectionError("owner disconnected")
+            raise ResidentActOwnerClosed("owner disconnected")
 
         def close(self):
             self.connected = False
@@ -607,15 +613,16 @@ def test_owner_disconnect_resets_policy_and_exits_the_worker_fail_closed():
         connect_timeout_s=0.5,
     )
 
-    with pytest.raises(RuntimeError, match="resident ACT worker failed"):
-        worker.run()
+    worker.run()
 
-    assert isinstance(worker.error, ConnectionError)
+    assert worker.error is None
     assert engine.reset_count == 1
     assert runtime.status.active_generation is None
 
 
-def test_worker_factory_loads_the_model_and_opens_the_camera_exactly_once(monkeypatch):
+def test_worker_factory_loads_the_model_and_opens_the_camera_exactly_once(
+    monkeypatch, capsys
+):
     calls = {"load": 0, "camera": [], "verify": 0, "preview": []}
 
     class _Policy:
@@ -728,6 +735,12 @@ def test_worker_factory_loads_the_model_and_opens_the_camera_exactly_once(monkey
             },
         )
     ]
+    lifecycle_output = capsys.readouterr().out
+    assert "ACT resident build: policy load starting" in lifecycle_output
+    assert "ACT resident build: policy load passed" in lifecycle_output
+    assert "ACT resident build: CUDA transfer passed" in lifecycle_output
+    assert "ACT resident build: processors ready" in lifecycle_output
+    assert "ACT resident build: deployment recheck passed" in lifecycle_output
 
 
 def test_runner_builds_once_and_runs_the_resident_worker(monkeypatch):
