@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from excavator_il.collection_campaign import inspect_collection_campaign
 from excavator_il.guided_episode import (
     GuidedEpisodeConfig,
     GuidedEpisodeStage,
@@ -17,6 +18,7 @@ from excavator_il.guided_episode import (
     SystemGuidedEpisodeOperations,
     _read_positioning_choice,
     load_rl_dig_targets,
+    main as guided_main,
     run_guided_episode,
     run_standalone_teleop,
 )
@@ -28,6 +30,7 @@ class _FakeOperations:
         self.events = []
         self.episode_index = 0
         self.episode_targets = []
+        self.episode_purposes = []
         self.target_source_requests = []
 
     def preflight(self):
@@ -72,9 +75,16 @@ class _FakeOperations:
     def wait_for_deadman_released(self):
         self.events.append("wait_for_deadman_released")
 
-    def start_episode(self, dig_target_m=None, **protocol):
+    def start_episode(
+        self,
+        dig_target_m=None,
+        *,
+        recording_purpose="demonstration",
+        **protocol,
+    ):
         self.events.append("start_episode")
         self.episode_targets.append(dig_target_m)
+        self.episode_purposes.append(recording_purpose)
         target_source = protocol.pop("target_source_provenance", None)
         if target_source is not None:
             self.events.append(("target_source_provenance", target_source))
@@ -171,6 +181,7 @@ def test_formal_collection_validates_and_propagates_live_target_source_before_pr
         assert gate_indices[0] < operations.events.index("start_teleop")
     assert gate_indices[-1] < operations.events.index("start_episode")
     assert capture_indices[-1] < operations.events.index("start_episode")
+    assert operations.episode_purposes == ["demonstration"]
     provenance_event = next(
         event
         for event in operations.events
@@ -359,6 +370,7 @@ def test_guided_episode_passes_collection_protocol_to_every_recording_attempt(tm
     )
 
     assert completed == "/data/raw/episode_0001"
+    assert operations.episode_purposes == ["demonstration", "demonstration"]
     protocol_events = [
         event
         for event in operations.events
@@ -481,11 +493,118 @@ def test_protocol_free_cli_collection_keeps_configured_legacy_target(tmp_path):
     )
 
     assert operations.episode_targets == [config.dig_target_m]
+    assert operations.episode_purposes == ["demonstration"]
     assert not any(
         isinstance(event, tuple)
         and event[0] == "require_expected_campaign_slot"
         for event in operations.events
     )
+
+
+def test_non_formal_guided_terminal_episode_is_diagnostic_and_ignored_by_campaign(
+    tmp_path,
+    monkeypatch,
+):
+    raw_root = tmp_path / "raw"
+    episode_path = raw_root / "episode_0001"
+
+    class DiagnosticEpisodeOperations(_FakeOperations):
+        @property
+        def log_paths(self):
+            return (
+                tmp_path / "collector.log",
+                tmp_path / "teleop.log",
+                tmp_path / "validation.log",
+            )
+
+        def start_episode(
+            self,
+            dig_target_m=None,
+            *,
+            recording_purpose="demonstration",
+            **protocol,
+        ):
+            episode_path.mkdir(parents=True)
+            metadata = {
+                "schema_version": "excavator_demo_raw.v2",
+                "episode_id": episode_path.name,
+                "recording_purpose": recording_purpose,
+                "status": "recording",
+                "success": None,
+            }
+            if protocol:
+                metadata = {**metadata, "collection_protocol": protocol}
+            (episode_path / "episode.json").write_text(
+                json.dumps(metadata), encoding="utf-8"
+            )
+            return str(episode_path)
+
+        def seal_episode(self):
+            metadata_path = episode_path / "episode.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata_path.write_text(
+                json.dumps({**metadata, "status": "pending_review"}),
+                encoding="utf-8",
+            )
+            return str(episode_path)
+
+        def finalize_episode(self, completed_path, result, reason=""):
+            assert completed_path == str(episode_path)
+            metadata_path = episode_path / "episode.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        **metadata,
+                        "status": "complete" if result == "success" else "failed",
+                        "success": result == "success",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return completed_path
+
+    config = _guided_config(tmp_path)
+    operations = DiagnosticEpisodeOperations()
+    original_run = run_guided_episode
+
+    def run_from_terminal(config_arg, operations_arg, **kwargs):
+        return original_run(
+            config_arg,
+            operations_arg,
+            input_fn=lambda _prompt: "s",
+            output=lambda _message: None,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(
+        "excavator_il.guided_episode.GuidedEpisodeConfig.load",
+        lambda _path: config,
+    )
+    monkeypatch.setattr(
+        "excavator_il.guided_episode.SystemGuidedEpisodeOperations",
+        lambda _config: operations,
+    )
+    monkeypatch.setattr(
+        "excavator_il.guided_episode._read_positioning_choice",
+        lambda _input, _output: PositioningMode.DIRECT,
+    )
+    monkeypatch.setattr(
+        "excavator_il.guided_episode.run_guided_episode",
+        run_from_terminal,
+    )
+
+    assert guided_main(["--config", str(tmp_path / "guided.json")]) == 0
+
+    metadata = json.loads(
+        (episode_path / "episode.json").read_text(encoding="utf-8")
+    )
+    report = inspect_collection_campaign(raw_root)
+    assert metadata["recording_purpose"] == "diagnostic"
+    assert "collection_protocol" not in metadata
+    assert report["summary"]["ignored_diagnostics"] == 1
+    assert report["summary"]["malformed"] == 0
+    assert report["next_expected_slot"]["slot_id"] == "slot_001"
 
 
 def test_standalone_teleop_never_creates_episode_and_cleans_up_on_interrupt(tmp_path):

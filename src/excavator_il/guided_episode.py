@@ -17,7 +17,10 @@ from ._guided_episode_config import (
 )
 from ._guided_episode_system import SystemGuidedEpisodeOperations
 from ._guided_episode_targets import load_rl_dig_targets, resolve_rl_dig_target
-from .collector.config import validate_collection_protocol
+from .collector.config import (
+    validate_collection_protocol,
+    validate_recording_purpose,
+)
 
 
 _BRACKETED_PASTE_MARKER = re.compile(r"\x1b\[(?:200|201)~")
@@ -173,6 +176,7 @@ def run_guided_episode(
     task_variant: str | None = None,
     soil_reset_block_id: str | None = None,
     dig_point_id: str | None = None,
+    recording_purpose: str = "demonstration",
 ) -> str:
     """Collect deadman-bounded attempts and validate them after motion I/O stops."""
     if positioning_mode is None:
@@ -200,6 +204,11 @@ def run_guided_episode(
         soil_reset_block_id=soil_reset_block_id,
         dig_point_id=dig_point_id,
     )
+    recording_purpose = validate_recording_purpose(recording_purpose)
+    if protocol and recording_purpose != "demonstration":
+        raise ValueError(
+            "collection protocol requires recording_purpose=demonstration"
+        )
     selected_rl_target_id = rl_target_id
     target_source_provenance: Mapping[str, str | bool] | None = None
     if protocol:
@@ -228,6 +237,11 @@ def run_guided_episode(
 
     def start_episode() -> str:
         if not protocol:
+            if recording_purpose != "demonstration":
+                return operations.start_episode(
+                    episode_target_m,
+                    recording_purpose=recording_purpose,
+                )
             return operations.start_episode(episode_target_m)
         refreshed_target_source = operations.capture_target_source_provenance(
             protocol["dig_point_id"],
@@ -483,7 +497,10 @@ def main(argv: list[str] | None = None) -> int:
         operations = SystemGuidedEpisodeOperations(config)
         positioning_mode = _read_positioning_choice(input, print)
         path = run_guided_episode(
-            config, operations, positioning_mode=positioning_mode
+            config,
+            operations,
+            positioning_mode=positioning_mode,
+            recording_purpose="diagnostic",
         )
     except KeyboardInterrupt:
         print("guided Episode aborted by operator", file=sys.stderr)

@@ -244,6 +244,11 @@ python scripts/collect_guided_episode.py
 脚本读取 `config/guided_episode.pc.json`。启动后先选择
 `RL定位/l`、`人工预定位/y` 或 `直接采集/n`：
 
+该脚本是非正式终端诊断入口：实际创建的 Episode 固定写为
+`recording_purpose=diagnostic`，且不携带 `collection_protocol`。即使 Orin 的 `data_root` 指向正式
+campaign raw root，权威 inspector 也只会把它计入 `ignored_diagnostics`，不会形成 `malformed`、
+占用槽位或进入训练集。不得使用该脚本填充正式 200 条 campaign；正式示教从 3.2 的 WebUI 发起。
+
 - `人工预定位/y`：Collector 先运行一个不创建 Episode 的 teleop。按住 deadman 用双杆调整到 RL
   Follow 的交接位姿附近；X/Y 调整工作装置，Z1/Z2 调整左右履带。完成后六轴全部回中、松开
   deadman，再输入 `完成/c`。脚本确认释放后
@@ -271,9 +276,9 @@ Orin 的 `excavator-orin-runtime/deploy/edge_runtime.remote.json` 必须把
 `remote_behavior.allowed_client_host` 配为当前控制链路 PC 地址（有线链路为 `192.168.50.1`）。修改
 AiryLidar Mission 目标后必须重启 Operator，使 Planner 与引导客户端加载同一 Mission SHA。
 
-正式 campaign 中，RL、人工和直接三种模式都从 `rl_preposition.demo_config` 按本槽位
+正式 campaign 的 WebUI 流程中，RL、人工和直接三种模式都从 `rl_preposition.demo_config` 按本槽位
 `dig_point_id` 解析实际 Dig 目标并写入 Episode 的 `dig_target_m`；RL 定位返回值还必须与该权威
-坐标一致。脚本在 preflight 前和每次 Episode 创建（包括重录）前，都会重新读取 PC 上实际文件，
+坐标一致。共享引导流程在 preflight 前和每次 Episode 创建（包括重录）前，都会重新读取 PC 上实际文件，
 核对 AiryLidar 仓库为 clean、HEAD 未变、文件路径与 SHA-256 未变，并把这组事实写入
 `episode.json.target_source_provenance`。只有没有 collection protocol 的旧式诊断入口才兼容使用
 `episode.dig_target_m`。该字段仅作溯源元数据，不参与 ACT 输入。
@@ -287,7 +292,8 @@ velocity zero → 向本轮脚本启动的精确 RL PID 发送 `SIGTERM` → 等
 
 1. 检查 PC 配置与 Orin SSH；
 2. 启动本次专属 Collector，并记录其精确 PID；
-3. 创建正式 Episode，使 Recorder 进入待命，再启动新的 teleop；teleop 先通过 0.5 秒本地手柄中位
+3. 创建明确标记为 `recording_purpose=diagnostic` 的 Episode，使 Recorder 进入待命，再启动新的
+   teleop；teleop 先通过 0.5 秒本地手柄中位
    稳定门，然后确认 ACK 已接受、无拒绝且 deadman 初始释放；稳定门通过前不创建 UDP socket；
 4. Recorder、teleop 和 ACK 门禁全部就绪后才提示等待 deadman；按下后终端显示“记录已开始”，
    此时再操纵双杆 XY；Z1/Z2 在 Recorder 激活期间由 Collector 强制为零；
@@ -321,14 +327,17 @@ python scripts/inspect_collection_campaign.py \
 采满 200 条之前该命令以退出码 2 返回是预期行为；应读取 JSON 中的 `summary` 和
 `next_expected_slot`。只有 `complete_and_valid=true` 时才表示整个 campaign 已完成且不存在
 duplicate、unplanned 或 malformed Episode。失败/中止尝试保留，但不会占用计划槽位；
-`recording_purpose=diagnostic` 的零命令 soak 会计入 `ignored_diagnostics`，不会进入训练集。
+`recording_purpose=diagnostic` 的零命令 soak 和 `collect_guided_episode.py` 动作诊断都会计入
+`ignored_diagnostics`，不会进入训练集或占用槽位。
 
 ### 3.2 PC 本地采集 UI
 
-UI 是终端引导脚本的本地浏览器 Adapter，不是另一套采集实现。它调用同一个
+UI 复用终端引导脚本的运动与 Episode 生命周期实现，不是另一套采集实现。它调用同一个
 `GuidedCollectionSupervisor`，再按模式进入 `run_guided_episode()` 或 `run_standalone_teleop()`，
 所以 RL/Collector/teleop 串口互斥、deadman
-门禁、Episode 封存、重录、校验和异常归零语义与 3.1 完全一致。服务强制只监听 loopback，浏览器
+门禁、Episode 封存、重录、校验和异常归零语义与 3.1 一致；但 recording purpose 不同：3.1 的
+终端入口固定为 `diagnostic`，WebUI 正式请求携带完整 `collection_protocol` 并记录为
+`demonstration`，同时执行 campaign 槽位门禁。服务强制只监听 loopback，浏览器
 之外的页面没有 UI 请求头时不能触发状态改变。
 
 PC 安装并启动：
@@ -442,9 +451,9 @@ Orin 进程调度都可能把若干 20 Hz 包延后后再成批交付。`episode
 
 ### 3.4 非正式链路诊断命令
 
-正式 200 条 campaign 必须使用 WebUI/引导流程，使 `dig_point_id`、AiryLidar 权威目标坐标和
-campaign 槽位在创建 Episode 前一并校验。下面的分端命令只用于诊断 Collector/teleop/Recorder，
-显式标记为 `diagnostic`，不会占 campaign 槽位或进入训练集。
+正式 200 条 campaign 必须从 WebUI 发起，使 `dig_point_id`、AiryLidar 权威目标坐标和 campaign
+槽位在创建 Episode 前一并校验。`collect_guided_episode.py` 和下面的分端命令只用于诊断
+Collector/teleop/Recorder，显式标记为 `diagnostic`，不会占 campaign 槽位或进入训练集。
 
 Orin 终端 1——启动 Collector：
 
