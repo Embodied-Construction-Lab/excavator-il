@@ -28,14 +28,26 @@ deployment_root="/home/jetson16/workspace_excavator/act_inference"
 resident_runtime_root="${RESIDENT_RUNTIME_ROOT:-${HOME}/.local/run/excavator-resident}"
 resident_act_socket="${RESIDENT_ACT_SOCKET:-${resident_runtime_root}/act.sock}"
 operator_observation_config="/opt/collection-runtime.json"
+collection_config="${repo_dir}/config/collection.orin.json"
 backbone_cache="${deployment_root}/torch-cache"
 backbone_weight="${backbone_cache}/checkpoints/resnet18-f37072fd.pth"
 backbone_weight_sha256="f37072fd47e89c5e827621c5baffa7500819f7896bbacec160b1a16c560e07ec"
 runtime_uid="$(id -u)"
 runtime_gid="$(id -g)"
-camera_gid="$(stat -c '%g' /dev/video0)"
+front_camera_device="$(python3 -c '
+import json
+import sys
+from pathlib import Path
 
-test -c /dev/video0
+config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+device = config.get("camera_front", {}).get("device")
+if not isinstance(device, str) or not device.startswith("/dev/"):
+    raise SystemExit("collection camera_front.device must be an absolute /dev path")
+print(device)
+' "${collection_config}")"
+camera_gid="$(stat -c '%g' "${front_camera_device}")"
+
+test -c "${front_camera_device}"
 test -S "${resident_act_socket}"
 test -d "${resident_runtime_root}"
 test -r "${resident_runtime_root}"
@@ -45,7 +57,7 @@ test -f "${backbone_weight}"
 printf '%s  %s\n' "${backbone_weight_sha256}" "${backbone_weight}" | sha256sum -c - >/dev/null
 test -f /home/jetson16/workspace_excavator/shared/machine_profile.json
 test -f "${repo_dir}/config/act_runtime.orin.json"
-test -f "${repo_dir}/config/collection.orin.json"
+test -f "${collection_config}"
 mkdir -p "${deployment_root}/logs"
 test -w "${deployment_root}/logs"
 if pgrep -f '[p]ython3 -m excavator_il.resident_act_runtime' >/dev/null; then
@@ -73,7 +85,7 @@ exec "${docker_command[@]}" run --rm \
   --security-opt=no-new-privileges \
   --tmpfs /tmp:rw,noexec,nosuid,size=256m \
   --ulimit memlock=-1 --ulimit stack=67108864 \
-  --device /dev/video0 \
+  --device "${front_camera_device}:/dev/video0" \
   -e PYTHONUNBUFFERED=1 \
   -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
   -e HF_HOME=/tmp/huggingface -e XDG_CACHE_HOME=/tmp/cache \
@@ -84,7 +96,7 @@ exec "${docker_command[@]}" run --rm \
   -v "${deployment_root}/logs:/opt/act-runtime-logs" \
   -v "${resident_runtime_root}:/opt/excavator-resident" \
   -v "${repo_dir}/config/act_runtime.orin.json:/opt/act-runtime.json:ro" \
-  -v "${repo_dir}/config/collection.orin.json:${operator_observation_config}:ro" \
+  -v "${collection_config}:${operator_observation_config}:ro" \
   "${image}" \
   /bin/sh -lc \
   'test -f /opt/collection-runtime.json && python3 -m excavator_il.resident_act_runtime --config /opt/act-runtime.json --socket-path /opt/excavator-resident/act.sock --operator-observation-config /opt/collection-runtime.json'

@@ -8,7 +8,6 @@ Unix stream and keeps the policy and camera alive across policy handoffs.
 from __future__ import annotations
 
 import argparse
-from collections import deque
 from dataclasses import dataclass
 import logging
 import math
@@ -23,7 +22,6 @@ from lerobot.policies import get_policy_class, make_pre_post_processors
 
 from .act_deployment import verify_deployment_manifest
 from .act_runtime import (
-    ActObservation,
     ActPolicySession,
     ActRuntimeController,
     ActRuntimeEngine,
@@ -39,6 +37,7 @@ from .collector.preview import (
     LatestTelemetryFrame,
     MjpegPreviewServer,
 )
+from .dig_policy import DigPolicyFactory
 from .resident_protocol import (
     ACT_CONTROL_MODE,
     ACT_POLICY_SOURCE,
@@ -46,6 +45,12 @@ from .resident_protocol import (
     ResidentActOwnerClosed,
     ResidentActState,
     ResidentPolicyCandidate,
+)
+from ._resident_act_observation import (
+    ResidentCausalObservationBuffer,
+    operator_telemetry as _operator_telemetry,
+    safety_telemetry as _safety_telemetry,
+    state_permits_act_motion as _state_permits_act_motion,
 )
 
 
@@ -62,50 +67,51 @@ def _emit_lifecycle(message: str) -> None:
     print(message, flush=True)
 
 
-class ResidentCausalObservationBuffer:
-    """Join the named resident state to the latest non-future camera frame."""
+def _load_commissioned_lerobot_act_session(config: Any) -> Any:
+    """Load the commissioned LeRobot ACT Adapter with deployment rechecks."""
 
-    def __init__(self, *, capacity: int = 8) -> None:
-        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
-            raise ValueError("camera buffer capacity must be a positive integer")
-        self._frames: deque[RgbCameraFrame] = deque(maxlen=capacity)
-        self._lock = threading.Lock()
-        self._ready = threading.Event()
+    provenance = {
+        "manifest_path": config.deployment_manifest_path,
+        "checkpoint_path": config.checkpoint_path,
+        "machine_profile_path": config.machine_profile_path,
+    }
+    verify_deployment_manifest(**provenance)
+    policy_class = get_policy_class("act")
+    _emit_lifecycle("ACT resident build: policy load starting")
+    policy = policy_class.from_pretrained(config.checkpoint_path)
+    _emit_lifecycle("ACT resident build: policy load passed")
+    policy.to(config.device)
+    _emit_lifecycle("ACT resident build: CUDA transfer passed")
+    policy.config.device = config.device
+    preprocessor, postprocessor = make_pre_post_processors(
+        policy.config,
+        pretrained_path=str(config.checkpoint_path),
+        preprocessor_overrides={"device_processor": {"device": config.device}},
+        postprocessor_overrides={"device_processor": {"device": config.device}},
+    )
+    _emit_lifecycle("ACT resident build: processors ready")
+    session = ActPolicySession(
+        policy=policy,
+        preprocessor=preprocessor,
+        postprocessor=postprocessor,
+        device=config.device,
+    )
+    # Catch checkpoint replacement during the comparatively expensive load.
+    verify_deployment_manifest(**provenance)
+    _emit_lifecycle("ACT resident build: deployment recheck passed")
+    return session
 
-    def add_camera(self, frame: RgbCameraFrame) -> None:
-        if not isinstance(frame, RgbCameraFrame):
-            raise ValueError("resident camera frame has the wrong type")
-        with self._lock:
-            if self._frames and (
-                frame.capture_monotonic_ns
-                <= self._frames[-1].capture_monotonic_ns
-            ):
-                raise ValueError("camera timestamps must be strictly increasing")
-            self._frames.append(frame)
-            self._ready.set()
 
-    def wait_ready(self, timeout_s: float) -> bool:
-        return self._ready.wait(timeout_s)
-
-    def build(self, state: ResidentActState) -> ActObservation:
-        with self._lock:
-            frames = tuple(self._frames)
-        camera = next(
-            (
-                frame
-                for frame in reversed(frames)
-                if frame.capture_monotonic_ns <= state.state_monotonic_ns
-            ),
-            None,
-        )
-        if camera is None:
-            raise ValueError("no causal camera frame is available for resident state")
-        return ActObservation(
-            state=state.state,
-            front_rgb=camera.rgb,
-            state_monotonic_ns=state.state_monotonic_ns,
-            camera_monotonic_ns=camera.capture_monotonic_ns,
-        )
+def _build_commissioned_dig_policy_factory(
+    config: Any,
+    *,
+    commissioned_lerobot_act_loader: Callable[[Any], Any],
+) -> DigPolicyFactory:
+    return DigPolicyFactory(
+        {
+            "lerobot_act": lambda: commissioned_lerobot_act_loader(config),
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -374,62 +380,6 @@ class ResidentActRuntime:
             self._status_callback(status)
 
 
-def _state_permits_act_motion(state: ResidentActState) -> bool:
-    return (
-        state.control_enabled
-        and not state.estop
-        and state.rs485_ok
-        and state.dwj_ok
-        and state.imu_ok
-        and state.sensor_valid
-        and state.stm32_alive
-        and state.fault_flags == 0
-    )
-
-
-def _safety_telemetry(state: ResidentActState) -> dict[str, int]:
-    return {
-        "control_enabled": int(state.control_enabled),
-        "estop": int(state.estop),
-        "fault_flags": state.fault_flags,
-        "rs485_ok": int(state.rs485_ok),
-        "dwj_ok": int(state.dwj_ok),
-        "imu_ok": int(state.imu_ok),
-    }
-
-
-def _operator_telemetry(
-    state: ResidentActState,
-) -> dict[str, int | float | bool]:
-    values = state.state
-    return {
-        "control_seq": state.control_seq,
-        "sensor_seq": state.sensor_seq,
-        "sensor_is_new": state.sensor_is_new,
-        "sensor_valid": state.sensor_valid,
-        "control_enabled": state.control_enabled,
-        "estop": state.estop,
-        "command_timed_out": not state.stm32_alive,
-        "fault_flags": state.fault_flags,
-        "control_generation": state.control_generation,
-        "rs485_ok": state.rs485_ok,
-        "dwj_ok": state.dwj_ok,
-        "imu_ok": state.imu_ok,
-        "stm32_alive": state.stm32_alive,
-        "boom_pos_mm": values[0] * 1_000.0,
-        "stick_pos_mm": values[1] * 1_000.0,
-        "bucket_pos_mm": values[2] * 1_000.0,
-        "boom_vel_mmps": values[3] * 1_000.0,
-        "stick_vel_mmps": values[4] * 1_000.0,
-        "bucket_vel_mmps": values[5] * 1_000.0,
-        "boom_angle_deg": math.degrees(values[6]),
-        "arm_angle_deg": math.degrees(values[7]),
-        "bucket_angle_deg": math.degrees(values[8]),
-        "swing_angle_deg": math.degrees(values[9]),
-        "swing_vel_degps": math.degrees(values[10]),
-    }
-
-
 class _LatestResidentState:
     """One-slot mailbox so slow inference cannot replay a state backlog."""
 
@@ -650,6 +600,8 @@ def build_resident_act_worker(
     camera_preview: LatestJpegFrame | None = None,
     telemetry_preview: LatestTelemetryFrame | None = None,
     preview_server: MjpegPreviewServer | None = None,
+    dig_policy_provider: Callable[[Any], DigPolicyFactory] | None = None,
+    commissioned_lerobot_act_loader: Callable[[Any], Any] | None = None,
 ) -> ResidentActWorker:
     """Load one verified ACT model and open one camera for resident operation."""
 
@@ -660,8 +612,11 @@ def build_resident_act_worker(
         else load_collection_config(operator_observation_config)
     )
     if observation_config is not None:
-        if observation_config.camera.device != config.camera.device:
-            raise ValueError("ACT and operator observation cameras must match")
+        # The collection config names the physical host device (normally a
+        # stable /dev/v4l/by-path path), while the launcher maps that device
+        # into the ACT container under config.camera.device (normally
+        # /dev/video0).  Device strings therefore belong to different device
+        # namespaces and are not part of the observation contract.
         camera_format = (
             observation_config.camera.width,
             observation_config.camera.height,
@@ -678,32 +633,26 @@ def build_resident_act_worker(
             raise ValueError("operator observation config must enable camera preview")
         if any(item is not None for item in (camera_preview, telemetry_preview, preview_server)):
             raise ValueError("operator preview resources must have a single owner")
-    provenance = {
-        "manifest_path": config.deployment_manifest_path,
-        "checkpoint_path": config.checkpoint_path,
-        "machine_profile_path": config.machine_profile_path,
-    }
-    verify_deployment_manifest(**provenance)
-    policy_class = get_policy_class("act")
-    _emit_lifecycle("ACT resident build: policy load starting")
-    policy = policy_class.from_pretrained(config.checkpoint_path)
-    _emit_lifecycle("ACT resident build: policy load passed")
-    policy.to(config.device)
-    _emit_lifecycle("ACT resident build: CUDA transfer passed")
-    policy.config.device = config.device
-    preprocessor, postprocessor = make_pre_post_processors(
-        policy.config,
-        pretrained_path=str(config.checkpoint_path),
-        preprocessor_overrides={"device_processor": {"device": config.device}},
-        postprocessor_overrides={"device_processor": {"device": config.device}},
+    backend_id = getattr(config, "dig_policy_backend", "lerobot_act")
+    loader = (
+        _load_commissioned_lerobot_act_session
+        if commissioned_lerobot_act_loader is None
+        else commissioned_lerobot_act_loader
     )
-    _emit_lifecycle("ACT resident build: processors ready")
-    session = ActPolicySession(
-        policy=policy,
-        preprocessor=preprocessor,
-        postprocessor=postprocessor,
-        device=config.device,
+    provider = (
+        (
+            lambda loaded_config: _build_commissioned_dig_policy_factory(
+                loaded_config,
+                commissioned_lerobot_act_loader=loader,
+            )
+        )
+        if dig_policy_provider is None
+        else dig_policy_provider
     )
+    policy_factory = provider(config)
+    if not isinstance(policy_factory, DigPolicyFactory):
+        raise ValueError("dig policy provider must return DigPolicyFactory")
+    session = policy_factory.create(backend_id)
     controller = ActRuntimeController(
         mode=RuntimeMode.MOTION,
         motion_authorization=REQUIRED_MOTION_AUTHORIZATION,
@@ -715,9 +664,6 @@ def build_resident_act_worker(
         controller=controller,
         max_inference_ms=config.max_inference_ms,
     )
-    # Catch checkpoint replacement during the comparatively expensive load.
-    verify_deployment_manifest(**provenance)
-    _emit_lifecycle("ACT resident build: deployment recheck passed")
     transport = ResidentActDataClient(socket_path)
     camera = UvcCamera(
         CameraConfig(

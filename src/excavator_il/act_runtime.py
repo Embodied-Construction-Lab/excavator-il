@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections import deque
 from enum import Enum
 import math
@@ -17,6 +17,7 @@ from .lerobot_conversion import STATE_FIELDS
 from .act_runtime_contract import REQUIRED_MOTION_AUTHORIZATION
 from .raw_episode import ACTION_FIELDS
 from .collector.camera import RgbCameraFrame
+from .dig_policy import DigPolicy, DigPolicyDescriptor, DigPolicyObservation
 from .stm32_protocol import Stm32TelemetryFrame
 
 _ZERO_ACTION = (0.0, 0.0, 0.0, 0.0)
@@ -28,6 +29,26 @@ class ActObservation:
     front_rgb: np.ndarray
     state_monotonic_ns: int
     camera_monotonic_ns: int
+    extra_rgb_by_role: Mapping[str, np.ndarray] = field(default_factory=dict)
+    extra_camera_monotonic_ns_by_role: Mapping[str, int] = field(default_factory=dict)
+
+    def to_policy_observation(self) -> DigPolicyObservation:
+        if len(self.state) != len(STATE_FIELDS):
+            raise ValueError("ACT runtime state must contain 11 finite values")
+        rgb = {"front": self.front_rgb, **dict(self.extra_rgb_by_role)}
+        stamps = {
+            "front": self.camera_monotonic_ns,
+            **dict(self.extra_camera_monotonic_ns_by_role),
+        }
+        return DigPolicyObservation(
+            state_by_name={
+                name: float(self.state[index])
+                for index, name in enumerate(STATE_FIELDS)
+            },
+            rgb_by_role=rgb,
+            state_monotonic_ns=self.state_monotonic_ns,
+            camera_monotonic_ns_by_role=stamps,
+        )
 
 
 class RuntimeMode(str, Enum):
@@ -156,7 +177,7 @@ class ActRuntimeEngine:
     def __init__(
         self,
         *,
-        session: Any,
+        session: DigPolicy,
         controller: ActRuntimeController,
         max_inference_ms: float = 100.0,
         monotonic_ns: Callable[[], int] = time.monotonic_ns,
@@ -178,7 +199,7 @@ class ActRuntimeEngine:
 
         started_ns = self._clock()
         try:
-            action = self._session.select_action(observation)
+            action = self._session.select_action(observation.to_policy_observation())
         finally:
             self._session.reset()
         completed_ns = self._clock()
@@ -194,7 +215,7 @@ class ActRuntimeEngine:
     ) -> ActRuntimeDecision:
         started_ns = self._clock()
         try:
-            predicted = self._session.select_action(observation)
+            predicted = self._session.select_action(observation.to_policy_observation())
         except (RuntimeError, ValueError):
             self._session.reset()
             return ActRuntimeDecision(
@@ -257,8 +278,8 @@ def state_from_stm32_telemetry(
     return values
 
 
-class ActPolicySession:
-    """Adapt live observations to LeRobot while retaining its action queue."""
+class LeRobotActDigPolicyAdapter:
+    """Adapt the named DigPolicy Interface to a LeRobot ACT checkpoint."""
 
     def __init__(
         self,
@@ -272,11 +293,23 @@ class ActPolicySession:
             raise ValueError("ACT runtime requires chunk_size=20 and n_action_steps=10")
         if getattr(policy.config, "temporal_ensemble_coeff", None) is not None:
             raise ValueError("ACT runtime does not support temporal ensemble checkpoints")
-        if set(policy.config.input_features) != {
-            "observation.state",
-            "observation.images.front",
-        }:
-            raise ValueError("ACT runtime requires exactly one single front RGB input")
+        input_features = set(policy.config.input_features)
+        image_features = {
+            name
+            for name in input_features
+            if name.startswith("observation.images.")
+        }
+        image_roles = {
+            name.removeprefix("observation.images.") for name in image_features
+        }
+        if (
+            input_features != {"observation.state"} | image_features
+            or "front" not in image_roles
+            or not image_roles <= {"front", "dump"}
+        ):
+            raise ValueError(
+                "ACT runtime requires named front RGB and optionally dump RGB inputs"
+            )
         if tuple(policy.config.input_features["observation.state"].shape) != (
             len(STATE_FIELDS),
         ):
@@ -289,35 +322,60 @@ class ActPolicySession:
         self._preprocessor = preprocessor
         self._postprocessor = postprocessor
         self._device = device
-        self._image_shape = tuple(
-            policy.config.input_features["observation.images.front"].shape
+        self._image_shapes = {
+            role: tuple(
+                policy.config.input_features[f"observation.images.{role}"].shape
+            )
+            for role in sorted(image_roles)
+        }
+        self._descriptor = DigPolicyDescriptor(
+            backend_id="lerobot_act",
+            implementation="lerobot.ACTPolicy",
         )
         policy.eval()
         policy.reset()
 
+    @property
+    def descriptor(self) -> DigPolicyDescriptor:
+        return self._descriptor
+
     def reset(self) -> None:
         self._policy.reset()
 
-    def select_action(self, observation: ActObservation) -> tuple[float, ...]:
-        if len(observation.state) != len(STATE_FIELDS) or not all(
-            math.isfinite(value) for value in observation.state
-        ):
+    def select_action(
+        self, observation: DigPolicyObservation | ActObservation
+    ) -> tuple[float, ...]:
+        named = (
+            observation.to_policy_observation()
+            if isinstance(observation, ActObservation)
+            else observation
+        )
+        if set(named.state_by_name) != set(STATE_FIELDS):
+            raise ValueError("ACT runtime named state fields are invalid")
+        state = tuple(float(named.state_by_name[name]) for name in STATE_FIELDS)
+        if not all(math.isfinite(value) for value in state):
             raise ValueError("ACT runtime state must contain 11 finite values")
-        image = np.asarray(observation.front_rgb)
-        expected_hwc = (self._image_shape[1], self._image_shape[2], 3)
-        if image.dtype != np.uint8 or image.shape != expected_hwc:
-            raise ValueError(f"ACT runtime RGB must be uint8 with shape {expected_hwc}")
         batch = {
             "observation.state": torch.tensor(
-                observation.state, dtype=torch.float32
+                state, dtype=torch.float32
             ).unsqueeze(0),
-            "observation.images.front": torch.from_numpy(
-                np.ascontiguousarray(image.transpose(2, 0, 1))
-            )
-            .to(dtype=torch.float32)
-            .div_(255.0)
-            .unsqueeze(0),
         }
+        for role, image_shape in self._image_shapes.items():
+            try:
+                image = np.asarray(named.rgb_by_role[role])
+            except KeyError as exc:
+                raise ValueError(f"ACT runtime observation is missing {role} RGB") from exc
+            expected_hwc = (image_shape[1], image_shape[2], 3)
+            if image.dtype != np.uint8 or image.shape != expected_hwc:
+                raise ValueError(
+                    f"ACT runtime {role} RGB must be uint8 with shape {expected_hwc}"
+                )
+            batch[f"observation.images.{role}"] = (
+                torch.from_numpy(np.ascontiguousarray(image.transpose(2, 0, 1)))
+                .to(dtype=torch.float32)
+                .div_(255.0)
+                .unsqueeze(0)
+            )
         processed = self._preprocessor(batch)
         with torch.no_grad():
             action = self._postprocessor(self._policy.select_action(processed))
@@ -329,10 +387,41 @@ class ActPolicySession:
             raise ValueError("ACT runtime produced an invalid normalized action")
         return values
 
+    def warmup(self) -> tuple[float, ...]:
+        observation = DigPolicyObservation(
+            state_by_name={name: 0.0 for name in STATE_FIELDS},
+            rgb_by_role={
+                role: np.zeros((shape[1], shape[2], 3), dtype=np.uint8)
+                for role, shape in self._image_shapes.items()
+            },
+            state_monotonic_ns=0,
+            camera_monotonic_ns_by_role={
+                role: 0 for role in self._image_shapes
+            },
+        )
+        try:
+            return self.select_action(observation)
+        finally:
+            self.reset()
+
+
+# Compatibility name for existing deployment imports.  New algorithm wiring
+# should depend on DigPolicy and select this Adapter through DigPolicyFactory.
+ActPolicySession = LeRobotActDigPolicyAdapter
+
 
 def warmup_act_policy_session(session: Any) -> tuple[float, ...]:
     """Initialize CUDA kernels with a synthetic finite input, then clear ACT state."""
 
+    warmup = getattr(session, "warmup", None)
+    if callable(warmup):
+        action = tuple(float(value) for value in warmup())
+        if len(action) != len(ACTION_FIELDS) or not all(
+            math.isfinite(value) and -1.000001 <= value <= 1.000001
+            for value in action
+        ):
+            raise ValueError("ACT policy warmup produced an invalid normalized action")
+        return action
     observation = ActObservation(
         state=(0.0,) * len(STATE_FIELDS),
         front_rgb=np.zeros((480, 640, 3), dtype=np.uint8),

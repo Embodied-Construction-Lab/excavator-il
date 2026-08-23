@@ -1,6 +1,6 @@
 {
-  "schema_version": "excavator_collection_config.v1",
-  "data_root": "/home/jetson16/workspace_excavator/data/excavator-data",
+  "schema_version": "excavator_collection_config.v2",
+  "data_root": "/home/jetson16/workspace_excavator/data/icra2027-dual-rgb-campaign-v1/raw",
   "joystick_udp": {
     "bind_host": "0.0.0.0",
     "port": 18090,
@@ -21,7 +21,14 @@
     "baudrate": 460800
   },
   "camera_front": {
-    "device": "/dev/video0",
+    "device": "/dev/v4l/by-path/platform-3610000.usb-usb-0:2.1:1.0-video-index0",
+    "width": 640,
+    "height": 480,
+    "fps": 30,
+    "jpeg_quality": 95
+  },
+  "camera_dump": {
+    "device": "/dev/v4l/by-path/platform-3610000.usb-usb-0:2.4:1.0-video-index0",
     "width": 640,
     "height": 480,
     "fps": 30,

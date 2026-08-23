@@ -17,13 +17,14 @@ def _write_jsonl(path, records):
     )
 
 
-def _safe_episode(tmp_path):
+def _safe_episode(tmp_path, *, dual_camera=False):
     episode = tmp_path / "episode_0001"
     episode.mkdir()
     (episode / "episode.json").write_text(
         json.dumps(
             {
                 "episode_id": "episode_0001",
+                "recording_purpose": "diagnostic",
                 "status": "aborted",
                 "failure_reason": "zero_command_soak_complete",
             }
@@ -122,6 +123,13 @@ def _safe_episode(tmp_path):
                     "image_path": f"camera_front/{index:06d}.jpg",
                 }
             )
+    if dual_camera:
+        (episode / "camera_dump_timestamps.csv").write_text(
+            (episode / "camera_front_timestamps.csv").read_text(
+                encoding="utf-8"
+            ).replace("camera_front/", "camera_dump/"),
+            encoding="utf-8",
+        )
     return episode
 
 
@@ -140,6 +148,48 @@ def test_zero_soak_accepts_safe_zero_commands_and_nominal_stream_rates(tmp_path)
         "expert_action": 20.0,
         "camera_front": 30.000000300000004,
     }
+
+
+def test_zero_soak_rejects_demonstration_recording_purpose(tmp_path):
+    episode = _safe_episode(tmp_path)
+    metadata_path = episode / "episode.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["recording_purpose"] = "demonstration"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    report = inspect_zero_command_episode(episode)
+
+    assert report.passed is False
+    assert "Episode recording_purpose must be diagnostic" in report.failure_reasons
+
+
+def test_zero_soak_reports_both_camera_rates_for_dual_camera_diagnostic(tmp_path):
+    report = inspect_zero_command_episode(_safe_episode(tmp_path, dual_camera=True))
+
+    assert report.passed is True
+    assert report.stream_rates_hz["camera_front"] == pytest.approx(30.0)
+    assert report.stream_rates_hz["camera_dump"] == pytest.approx(30.0)
+
+
+def test_zero_soak_fails_when_dump_camera_rate_is_too_low(tmp_path):
+    episode = _safe_episode(tmp_path, dual_camera=True)
+    timestamps_path = episode / "camera_dump_timestamps.csv"
+    with timestamps_path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))[::3]
+    for index, row in enumerate(rows):
+        row["camera_frame_index"] = str(index)
+    with timestamps_path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=rows[0].keys())
+        writer.writeheader()
+        writer.writerows(rows)
+
+    report = inspect_zero_command_episode(episode)
+
+    assert report.passed is False
+    assert any(
+        reason.startswith("camera_dump rate ")
+        for reason in report.failure_reasons
+    )
 
 
 def test_zero_soak_accepts_independent_control_and_telemetry_phase(tmp_path):
@@ -199,8 +249,8 @@ def test_zero_soak_automates_safe_lifecycle_before_inspection():
         def start_collector(self):
             self.events.append("start_collector")
 
-        def start_episode(self):
-            self.events.append("start_episode")
+        def start_episode(self, *, recording_purpose):
+            self.events.append(("start_episode", recording_purpose))
             return "/data/episode_0001"
 
         def start_teleop(self):
@@ -238,7 +288,7 @@ def test_zero_soak_automates_safe_lifecycle_before_inspection():
     assert operations.events == [
         "preflight",
         "start_collector",
-        "start_episode",
+        ("start_episode", "diagnostic"),
         "start_teleop",
         ("wait_for_ack", 8),
         ("monitor_deadman_released", 30),

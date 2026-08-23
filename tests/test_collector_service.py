@@ -61,6 +61,25 @@ class _Camera:
         return _Frame()
 
 
+class _FailOnDemandCamera:
+    def __init__(self):
+        self.fail = threading.Event()
+
+    def read_encoded(self):
+        if self.fail.wait(0.005):
+            raise OSError("fixture dump camera disconnected")
+        return _Frame()
+
+
+_TARGET_SOURCE_PROVENANCE = {
+    "repository": "airylidar",
+    "path": "mission/config/excavation_demo.json",
+    "sha256": "a" * 64,
+    "commit": "b" * 40,
+    "dirty": False,
+}
+
+
 def _free_udp_port():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("127.0.0.1", 0))
@@ -88,7 +107,8 @@ def test_collector_service_connects_udp_episode_socket_camera_and_safe_shutdown(
             ("left-guid", "right-guid"), "dual_stick.v1", "raw.v1", 0.15
         ),
         serial=SerialConfig("fixture", 460800),
-        camera=CameraConfig("fixture", 32, 24, 30, 95),
+        camera_front=CameraConfig("front-fixture", 32, 24, 30, 95),
+        camera_dump=CameraConfig("dump-fixture", 32, 24, 30, 95),
         episode_control_socket=control_socket,
         episode_defaults=EpisodeDefaults((0.8, 0.1, -0.2), "soil", {}),
         camera_preview=CameraPreviewConfig("127.0.0.1", preview_port),
@@ -105,7 +125,11 @@ def test_collector_service_connects_udp_episode_socket_camera_and_safe_shutdown(
         telemetry[field] for field in STM32_TELEMETRY_FIELDS
     ).encode("ascii")
     serial = _Serial([telemetry_row])
-    service = CollectorService(config, serial_port=serial, camera=_Camera())
+    service = CollectorService(
+        config,
+        serial_port=serial,
+        cameras={"front": _Camera(), "dump": _Camera()},
+    )
     thread = threading.Thread(target=service.run)
     thread.start()
     deadline = time.monotonic() + 2.0
@@ -116,10 +140,22 @@ def test_collector_service_connects_udp_episode_socket_camera_and_safe_shutdown(
         f"http://127.0.0.1:{preview_port}/camera/front.jpg", timeout=1.0
     ) as response:
         assert response.read() == b"jpeg"
+    with urllib.request.urlopen(
+        f"http://127.0.0.1:{preview_port}/camera/dump.jpg", timeout=1.0
+    ) as response:
+        assert response.read() == b"jpeg"
 
     started = send_episode_command(
         control_socket,
-        {"command": "start", "task": "ExecuteDig", "operator_id": "operator_01"},
+        {
+            "command": "start",
+            "task": "ExecuteDig",
+            "operator_id": "operator_01",
+            "task_variant": "dig_only",
+            "soil_reset_block_id": "block_01",
+            "dig_point_id": "dig_01",
+            "target_source_provenance": _TARGET_SOURCE_PROVENANCE,
+        },
     )
     packet = JoystickPacket(
         session_id="session-a",
@@ -155,6 +191,80 @@ def test_collector_service_connects_udp_episode_socket_camera_and_safe_shutdown(
     episode = tmp_path / "raw" / "episode_0001"
     assert (episode / "joystick_raw.jsonl").stat().st_size > 0
     assert (episode / "camera_front_timestamps.csv").stat().st_size > 0
+    assert (episode / "camera_dump_timestamps.csv").stat().st_size > 0
+
+
+def test_collector_service_aborts_active_episode_when_dump_camera_fails(tmp_path):
+    control_socket = tmp_path / "collector.sock"
+    config = CollectionConfig(
+        data_root=tmp_path / "raw",
+        joystick=JoystickUdpConfig(
+            "127.0.0.1", _free_udp_port(), "127.0.0.1", 150
+        ),
+        controllers=ControllerConfig(
+            ("left-guid", "right-guid"), "dual_stick.v1", "raw.v1", 0.15
+        ),
+        serial=SerialConfig("fixture", 460800),
+        camera_front=CameraConfig("front-fixture", 32, 24, 30, 95),
+        camera_dump=CameraConfig("dump-fixture", 32, 24, 30, 95),
+        episode_control_socket=control_socket,
+        episode_defaults=EpisodeDefaults((0.8, 0.1, -0.2), "soil", {}),
+    )
+    telemetry = {field: "0" for field in STM32_TELEMETRY_FIELDS}
+    telemetry.update(
+        schema_version="stm32_control_telemetry.v2",
+        command_rx_seq="8",
+        command_timed_out="1",
+    )
+    row = ",".join(
+        telemetry[field] for field in STM32_TELEMETRY_FIELDS
+    ).encode("ascii")
+    dump_camera = _FailOnDemandCamera()
+    service = CollectorService(
+        config,
+        serial_port=_Serial([row]),
+        cameras={"front": _Camera(), "dump": dump_camera},
+    )
+    errors = []
+
+    def run_service():
+        try:
+            service.run()
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run_service)
+    thread.start()
+    deadline = time.monotonic() + 2.0
+    while not control_socket.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert control_socket.exists()
+    started = send_episode_command(
+        control_socket,
+        {
+            "command": "start",
+            "task": "ExecuteDig",
+            "operator_id": "operator_01",
+            "task_variant": "dig_transport_dump",
+            "soil_reset_block_id": "block_02",
+            "dig_point_id": "dig_03",
+            "target_source_provenance": _TARGET_SOURCE_PROVENANCE,
+        },
+    )
+
+    dump_camera.fail.set()
+    thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    assert errors and "collector worker failed" in str(errors[0])
+    metadata = json.loads(
+        (tmp_path / "raw" / started["episode_id"] / "episode.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert metadata["status"] == "aborted"
+    assert metadata["success"] is False
+    assert metadata["failure_reason"] == "collector_runtime_error"
 
 
 def test_collector_service_forwards_stm32_state_to_airylidar_udp(tmp_path):
@@ -172,7 +282,8 @@ def test_collector_service_forwards_stm32_state_to_airylidar_udp(tmp_path):
             ("left-guid", "right-guid"), "dual_stick.v1", "raw.v1", 0.15
         ),
         serial=SerialConfig("fixture", 460800),
-        camera=CameraConfig("fixture", 32, 24, 30, 95),
+        camera_front=CameraConfig("fixture", 32, 24, 30, 95),
+        camera_dump=None,
         episode_control_socket=tmp_path / "collector.sock",
         episode_defaults=EpisodeDefaults((0.8, 0.1, -0.2), "soil", {}),
         machine_state_udp=MachineStateUdpConfig(
@@ -208,7 +319,9 @@ def test_collector_service_forwards_stm32_state_to_airylidar_udp(tmp_path):
         telemetry[field] for field in STM32_TELEMETRY_FIELDS
     ).encode("ascii")
     serial = _Serial([row, row])
-    service = CollectorService(config, serial_port=serial, camera=_Camera())
+    service = CollectorService(
+        config, serial_port=serial, cameras={"front": _Camera()}
+    )
     thread = threading.Thread(target=service.run)
     thread.start()
     try:

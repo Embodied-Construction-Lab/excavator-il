@@ -16,13 +16,20 @@ class EpisodeController:
         *,
         recorder: EpisodeRecorder,
         defaults: EpisodeDefaults,
-        camera: CameraConfig,
+        cameras: Mapping[str, CameraConfig] | None = None,
+        camera: CameraConfig | None = None,
         monotonic_ns: Callable[[], int] = time.monotonic_ns,
         wall_ns: Callable[[], int] = time.time_ns,
     ) -> None:
         self._recorder = recorder
         self._defaults = defaults
-        self._camera = camera
+        if cameras is None:
+            if camera is None:
+                raise ValueError("cameras must contain the front camera")
+            cameras = {"front": camera}
+        if tuple(cameras) not in {("front",), ("front", "dump")}:
+            raise ValueError("cameras must contain front and optional dump roles")
+        self._cameras = dict(cameras)
         self._monotonic_ns = monotonic_ns
         self._wall_ns = wall_ns
 
@@ -43,6 +50,25 @@ class EpisodeController:
         material_id = request.get("material_id", self._defaults.material_id)
         if not isinstance(material_id, str) or not material_id:
             raise ValueError("material_id must be non-empty text")
+
+        def camera_metadata(camera_id: str) -> dict[str, Any]:
+            camera_config = self._cameras[camera_id]
+            return {
+                "device_id": camera_config.device,
+                "width": camera_config.width,
+                "height": camera_config.height,
+                "nominal_fps": camera_config.nominal_fps,
+                "pixel_format": "RGB8",
+                "storage_encoding": "JPEG",
+                "timestamp_clock": "CLOCK_MONOTONIC",
+            }
+
+        optional_protocol: dict[str, str | None] = {}
+        for field in ("task_variant", "soil_reset_block_id", "dig_point_id"):
+            value = request.get(field)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(f"{field} must be non-empty text when provided")
+            optional_protocol[field] = value
         path = self._recorder.start(
             EpisodeStart(
                 task=self._text(request, "task"),
@@ -50,15 +76,21 @@ class EpisodeController:
                 dig_target_m=target_values,
                 material_id=material_id,
                 provenance=self._defaults.provenance,
-                camera_front={
-                    "device_id": self._camera.device,
-                    "width": self._camera.width,
-                    "height": self._camera.height,
-                    "nominal_fps": self._camera.nominal_fps,
-                    "pixel_format": "RGB8",
-                    "storage_encoding": "JPEG",
-                    "timestamp_clock": "CLOCK_MONOTONIC",
-                },
+                camera_front=camera_metadata("front"),
+                camera_dump=(
+                    None
+                    if "dump" not in self._cameras
+                    else camera_metadata("dump")
+                ),
+                task_variant=optional_protocol["task_variant"],
+                soil_reset_block_id=optional_protocol["soil_reset_block_id"],
+                dig_point_id=optional_protocol["dig_point_id"],
+                recording_purpose=request.get(
+                    "recording_purpose", "demonstration"
+                ),
+                target_source_provenance=request.get(
+                    "target_source_provenance"
+                ),
             ),
             start_wall_ns=self._wall_ns(),
             start_monotonic_ns=self._monotonic_ns(),

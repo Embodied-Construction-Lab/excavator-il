@@ -3,6 +3,8 @@ import io
 import signal
 import subprocess
 import tomllib
+import hashlib
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,6 +28,7 @@ class _FakeOperations:
         self.events = []
         self.episode_index = 0
         self.episode_targets = []
+        self.target_source_requests = []
 
     def preflight(self):
         self.events.append("preflight")
@@ -36,9 +39,23 @@ class _FakeOperations:
     def start_rl_runtime(self):
         self.events.append("start_rl_runtime")
 
-    def run_rl_preposition(self):
+    def run_rl_preposition(self, target_id=None):
         self.events.append("run_rl_preposition")
         return (1.0, 0.0, 0.0)
+
+    def capture_target_source_provenance(self, point_id, expected_target_m):
+        self.events.append("capture_target_source_provenance")
+        self.target_source_requests.append((point_id, expected_target_m))
+        return {
+            "repository": "airylidar",
+            "path": "mission/config/excavation_demo.json",
+            "sha256": "a" * 64,
+            "commit": "b" * 40,
+            "dirty": False,
+        }
+
+    def require_expected_campaign_slot(self, **protocol):
+        self.events.append(("require_expected_campaign_slot", protocol))
 
     def stop_rl_runtime_and_wait_for_serial(self):
         self.events.append("stop_rl_runtime_and_wait_for_serial")
@@ -55,9 +72,14 @@ class _FakeOperations:
     def wait_for_deadman_released(self):
         self.events.append("wait_for_deadman_released")
 
-    def start_episode(self, dig_target_m=None):
+    def start_episode(self, dig_target_m=None, **protocol):
         self.events.append("start_episode")
         self.episode_targets.append(dig_target_m)
+        target_source = protocol.pop("target_source_provenance", None)
+        if target_source is not None:
+            self.events.append(("target_source_provenance", target_source))
+        if protocol:
+            self.events.append(("collection_protocol", protocol))
         self.episode_index += 1
         return f"/data/raw/episode_{self.episode_index:04d}"
 
@@ -85,6 +107,385 @@ class _FakeOperations:
 
     def build_and_validate(self, episode_path):
         self.events.append(("build_and_validate", episode_path))
+
+
+@pytest.mark.parametrize(
+    "mode",
+    (PositioningMode.RL, PositioningMode.MANUAL, PositioningMode.DIRECT),
+)
+def test_formal_collection_validates_and_propagates_live_target_source_before_preflight(
+    tmp_path, mode
+):
+    config = _guided_config(tmp_path)
+    demo_path = tmp_path / "AiryLidar/mission/config/excavation_demo.json"
+    demo_path.parent.mkdir(parents=True, exist_ok=True)
+    demo_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavation_demo.v1",
+                "dig_points": [
+                    {"point_id": "dig_01", "position_m": [1.0, 0.0, 0.0]}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    object.__setattr__(config, "rl_demo_config", demo_path)
+    operations = _FakeOperations()
+    answers = iter(("c", "s") if mode is PositioningMode.MANUAL else ("s",))
+
+    run_guided_episode(
+        config,
+        operations,
+        positioning_mode=mode,
+        input_fn=lambda _prompt: next(answers),
+        output=lambda _message: None,
+        task_variant="dig_only",
+        soil_reset_block_id="block_01",
+        dig_point_id="dig_01",
+    )
+
+    assert operations.events.index("capture_target_source_provenance") < (
+        operations.events.index("preflight")
+    )
+    assert operations.target_source_requests == [
+        ("dig_01", (1.0, 0.0, 0.0)),
+        ("dig_01", (1.0, 0.0, 0.0)),
+    ]
+    capture_indices = [
+        index
+        for index, event in enumerate(operations.events)
+        if event == "capture_target_source_provenance"
+    ]
+    gate_indices = [
+        index
+        for index, event in enumerate(operations.events)
+        if isinstance(event, tuple)
+        and event[0] == "require_expected_campaign_slot"
+    ]
+    expected_gate_count = 1 if mode is PositioningMode.DIRECT else 2
+    assert len(gate_indices) == expected_gate_count
+    if mode is PositioningMode.RL:
+        assert gate_indices[0] < operations.events.index("start_rl_runtime")
+    elif mode is PositioningMode.MANUAL:
+        assert gate_indices[0] < operations.events.index("start_teleop")
+    assert gate_indices[-1] < operations.events.index("start_episode")
+    assert capture_indices[-1] < operations.events.index("start_episode")
+    provenance_event = next(
+        event
+        for event in operations.events
+        if isinstance(event, tuple) and event[0] == "target_source_provenance"
+    )
+    assert provenance_event[1]["dirty"] is False
+
+
+def test_formal_collection_rejects_target_source_drift_before_episode_creation(
+    tmp_path,
+):
+    config = _guided_config(tmp_path)
+    demo_path = tmp_path / "AiryLidar/mission/config/excavation_demo.json"
+    demo_path.parent.mkdir(parents=True, exist_ok=True)
+    demo_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavation_demo.v1",
+                "dig_points": [
+                    {"point_id": "dig_01", "position_m": [1.0, 0.0, 0.0]}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    object.__setattr__(config, "rl_demo_config", demo_path)
+
+    class DriftingSourceOperations(_FakeOperations):
+        def capture_target_source_provenance(self, point_id, expected_target_m):
+            value = super().capture_target_source_provenance(
+                point_id, expected_target_m
+            )
+            if len(self.target_source_requests) == 2:
+                return {**value, "commit": "c" * 40}
+            return value
+
+    operations = DriftingSourceOperations()
+
+    with pytest.raises(ValueError, match="changed before Episode creation"):
+        run_guided_episode(
+            config,
+            operations,
+            positioning_mode=PositioningMode.DIRECT,
+            input_fn=lambda _prompt: "s",
+            output=lambda _message: None,
+            task_variant="dig_only",
+            soil_reset_block_id="block_01",
+            dig_point_id="dig_01",
+        )
+
+    assert "start_episode" not in operations.events
+
+
+def test_formal_collection_rejects_non_next_campaign_slot_before_episode_creation(
+    tmp_path,
+):
+    config = _guided_config(tmp_path)
+    demo_path = tmp_path / "AiryLidar/mission/config/excavation_demo.json"
+    demo_path.parent.mkdir(parents=True, exist_ok=True)
+    demo_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavation_demo.v1",
+                "dig_points": [
+                    {"point_id": "dig_01", "position_m": [1.0, 0.0, 0.0]}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    object.__setattr__(config, "rl_demo_config", demo_path)
+
+    class RejectingCampaignOperations(_FakeOperations):
+        def require_expected_campaign_slot(self, **protocol):
+            self.events.append(("require_expected_campaign_slot", protocol))
+            raise RuntimeError(
+                "formal collection must match next expected slot slot_002"
+            )
+
+    operations = RejectingCampaignOperations()
+
+    with pytest.raises(RuntimeError, match="next expected slot slot_002"):
+        run_guided_episode(
+            config,
+            operations,
+            positioning_mode=PositioningMode.DIRECT,
+            input_fn=lambda _prompt: "s",
+            output=lambda _message: None,
+            task_variant="dig_only",
+            soil_reset_block_id="block_01",
+            dig_point_id="dig_01",
+        )
+
+    assert (
+        "require_expected_campaign_slot",
+        {
+            "task_variant": "dig_only",
+            "soil_reset_block_id": "block_01",
+            "dig_point_id": "dig_01",
+        },
+    ) in operations.events
+    assert "start_episode" not in operations.events
+
+
+@pytest.mark.parametrize(
+    ("mode", "motion_events"),
+    (
+        (PositioningMode.RL, {"start_rl_runtime", "run_rl_preposition"}),
+        (PositioningMode.MANUAL, {"start_teleop"}),
+    ),
+)
+def test_formal_collection_rejects_non_next_slot_before_positioning_motion(
+    tmp_path,
+    mode,
+    motion_events,
+):
+    config = _guided_config(tmp_path)
+    demo_path = tmp_path / "AiryLidar/mission/config/excavation_demo.json"
+    demo_path.parent.mkdir(parents=True, exist_ok=True)
+    demo_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavation_demo.v1",
+                "dig_points": [
+                    {"point_id": "dig_01", "position_m": [1.0, 0.0, 0.0]}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    object.__setattr__(config, "rl_demo_config", demo_path)
+
+    class RejectingCampaignOperations(_FakeOperations):
+        def require_expected_campaign_slot(self, **protocol):
+            self.events.append(("require_expected_campaign_slot", protocol))
+            raise RuntimeError(
+                "formal collection must match next expected slot slot_002"
+            )
+
+    operations = RejectingCampaignOperations()
+
+    with pytest.raises(RuntimeError, match="next expected slot slot_002"):
+        run_guided_episode(
+            config,
+            operations,
+            positioning_mode=mode,
+            input_fn=lambda _prompt: "c",
+            output=lambda _message: None,
+            task_variant="dig_only",
+            soil_reset_block_id="block_01",
+            dig_point_id="dig_01",
+        )
+
+    assert "preflight" in operations.events
+    assert not any(event in operations.events for event in motion_events)
+    assert "start_episode" not in operations.events
+
+
+def test_guided_episode_passes_collection_protocol_to_every_recording_attempt(tmp_path):
+    config = _guided_config(tmp_path)
+    demo_path = tmp_path / "AiryLidar/mission/config/excavation_demo.json"
+    demo_path.parent.mkdir(parents=True, exist_ok=True)
+    demo_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavation_demo.v1",
+                "dig_points": [
+                    {"point_id": "dig_03", "position_m": [1.0, -0.2, 0.0]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    object.__setattr__(config, "rl_demo_config", demo_path)
+    operations = _FakeOperations()
+    answers = iter(("r", "s"))
+
+    completed = run_guided_episode(
+        config,
+        operations,
+        positioning_mode=PositioningMode.DIRECT,
+        input_fn=lambda _prompt: next(answers),
+        task_variant="dig_transport_dump",
+        soil_reset_block_id="block_06",
+        dig_point_id="dig_03",
+    )
+
+    assert completed == "/data/raw/episode_0001"
+    protocol_events = [
+        event
+        for event in operations.events
+        if isinstance(event, tuple) and event[0] == "collection_protocol"
+    ]
+    assert protocol_events == [
+        (
+            "collection_protocol",
+            {
+                "task_variant": "dig_transport_dump",
+                "soil_reset_block_id": "block_06",
+                "dig_point_id": "dig_03",
+            },
+        ),
+        (
+            "collection_protocol",
+            {
+                "task_variant": "dig_transport_dump",
+                "soil_reset_block_id": "block_06",
+                "dig_point_id": "dig_03",
+            },
+        ),
+    ]
+    gate_indices = [
+        index
+        for index, event in enumerate(operations.events)
+        if isinstance(event, tuple)
+        and event[0] == "require_expected_campaign_slot"
+    ]
+    start_indices = [
+        index
+        for index, event in enumerate(operations.events)
+        if event == "start_episode"
+    ]
+    assert len(gate_indices) == len(start_indices) == 2
+    assert all(
+        gate_index < start_index
+        for gate_index, start_index in zip(gate_indices, start_indices)
+    )
+
+
+def test_direct_collection_persists_selected_dig_point_coordinates(tmp_path):
+    config = _guided_config(tmp_path)
+    demo_path = tmp_path / "AiryLidar/mission/config/excavation_demo.json"
+    demo_path.parent.mkdir(parents=True, exist_ok=True)
+    demo_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavation_demo.v1",
+                "demo_id": "field_demo_001",
+                "dig_points": [
+                    {"point_id": "dig_01", "position_m": [1.0, 0.2, 0.0]},
+                    {"point_id": "dig_02", "position_m": [1.0, 0.0, 0.0]},
+                    {"point_id": "dig_03", "position_m": [1.0, -0.2, 0.0]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    object.__setattr__(config, "rl_demo_config", demo_path)
+    operations = _FakeOperations()
+
+    run_guided_episode(
+        config,
+        operations,
+        positioning_mode=PositioningMode.DIRECT,
+        input_fn=lambda _prompt: "s",
+        output=lambda _message: None,
+        task_variant="dig_only",
+        soil_reset_block_id="block_01",
+        dig_point_id="dig_03",
+    )
+
+    assert operations.episode_targets == [(1.0, -0.2, 0.0)]
+
+
+def test_manual_collection_persists_selected_dig_point_coordinates(tmp_path):
+    config = _guided_config(tmp_path)
+    demo_path = tmp_path / "AiryLidar/mission/config/excavation_demo.json"
+    demo_path.parent.mkdir(parents=True, exist_ok=True)
+    demo_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavation_demo.v1",
+                "dig_points": [
+                    {"point_id": "dig_02", "position_m": [1.1, 0.0, 0.05]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    object.__setattr__(config, "rl_demo_config", demo_path)
+    operations = _FakeOperations()
+    answers = iter(("c", "s"))
+
+    run_guided_episode(
+        config,
+        operations,
+        positioning_mode=PositioningMode.MANUAL,
+        input_fn=lambda _prompt: next(answers),
+        output=lambda _message: None,
+        task_variant="dig_transport_dump",
+        soil_reset_block_id="block_02",
+        dig_point_id="dig_02",
+    )
+
+    assert operations.episode_targets == [(1.1, 0.0, 0.05)]
+
+
+def test_protocol_free_cli_collection_keeps_configured_legacy_target(tmp_path):
+    config = _guided_config(tmp_path)
+    operations = _FakeOperations()
+
+    run_guided_episode(
+        config,
+        operations,
+        positioning_mode=PositioningMode.DIRECT,
+        input_fn=lambda _prompt: "s",
+        output=lambda _message: None,
+    )
+
+    assert operations.episode_targets == [config.dig_target_m]
+    assert not any(
+        isinstance(event, tuple)
+        and event[0] == "require_expected_campaign_slot"
+        for event in operations.events
+    )
 
 
 def test_standalone_teleop_never_creates_episode_and_cleans_up_on_interrupt(tmp_path):
@@ -179,6 +580,17 @@ def test_guided_episode_config_resolves_pc_paths_and_validates_contract(tmp_path
     assert config.rl_mission_config == tmp_path.parent / "AiryLidar/mission/config/excavation_cycle.json"
     assert config.rl_phase == "dig"
     assert str(config.rl_serial_port) == "/dev/ttyTHS1"
+    assert config.orin_experiment_run_config is None
+
+    configured_root = json.loads(config_path.read_text(encoding="utf-8"))
+    configured_root["orin"]["experiment_run_config"] = (
+        "config/collection_evidence.orin.json"
+    )
+    config_path.write_text(json.dumps(configured_root), encoding="utf-8")
+    configured = GuidedEpisodeConfig.load(config_path)
+    assert str(configured.orin_experiment_run_config) == (
+        "config/collection_evidence.orin.json"
+    )
 
 
 def test_guided_episode_config_rejects_unsafe_or_inconsistent_values(tmp_path):
@@ -260,6 +672,179 @@ def _guided_config(tmp_path):
         rl_pc_host="192.0.2.20",
         rl_ready_timeout_s=15,
     )
+
+
+def _prepare_clean_airy_repo(tmp_path):
+    repo = tmp_path / "AiryLidar"
+    demo_path = repo / "mission/config/excavation_demo.json"
+    demo_path.parent.mkdir(parents=True, exist_ok=True)
+    demo_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavation_demo.v1",
+                "dig_points": [
+                    {"point_id": "dig_01", "position_m": [1.0, 0.2, 0.0]},
+                    {"point_id": "dig_02", "position_m": [1.0, 0.0, 0.0]},
+                    {"point_id": "dig_03", "position_m": [1.0, -0.2, 0.0]},
+                ],
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    for command in (
+        ("git", "init", "-b", "main"),
+        ("git", "config", "user.name", "Fixture"),
+        ("git", "config", "user.email", "fixture@example.invalid"),
+        ("git", "add", "mission/config/excavation_demo.json"),
+        ("git", "commit", "-m", "fixture"),
+    ):
+        subprocess.run(command, cwd=repo, check=True, capture_output=True)
+    return repo, demo_path
+
+
+def test_system_operations_captures_actual_clean_airy_target_source(tmp_path):
+    repo, demo_path = _prepare_clean_airy_repo(tmp_path)
+    config = _guided_config(tmp_path)
+    object.__setattr__(config, "rl_airy_repo", repo)
+    object.__setattr__(config, "rl_demo_config", demo_path)
+    operations = SystemGuidedEpisodeOperations(config, output=lambda _message: None)
+
+    provenance = operations.capture_target_source_provenance(
+        "dig_02", (1.0, 0.0, 0.0)
+    )
+
+    assert dict(provenance) == {
+        "repository": "airylidar",
+        "path": "mission/config/excavation_demo.json",
+        "sha256": hashlib.sha256(demo_path.read_bytes()).hexdigest(),
+        "commit": subprocess.run(
+            ("git", "rev-parse", "HEAD"),
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip(),
+        "dirty": False,
+    }
+
+
+def test_system_operations_rejects_dirty_airy_source(tmp_path):
+    repo, demo_path = _prepare_clean_airy_repo(tmp_path)
+    (repo / "untracked.txt").write_text("drift", encoding="utf-8")
+    config = _guided_config(tmp_path)
+    object.__setattr__(config, "rl_airy_repo", repo)
+    object.__setattr__(config, "rl_demo_config", demo_path)
+    operations = SystemGuidedEpisodeOperations(config, output=lambda _message: None)
+
+    with pytest.raises(ValueError, match="clean AiryLidar repository"):
+        operations.capture_target_source_provenance(
+            "dig_02", (1.0, 0.0, 0.0)
+        )
+
+
+def test_system_operations_rejects_missing_airy_source(tmp_path):
+    repo, demo_path = _prepare_clean_airy_repo(tmp_path)
+    demo_path.unlink()
+    config = _guided_config(tmp_path)
+    object.__setattr__(config, "rl_airy_repo", repo)
+    object.__setattr__(config, "rl_demo_config", demo_path)
+    operations = SystemGuidedEpisodeOperations(config, output=lambda _message: None)
+
+    with pytest.raises(ValueError, match="must be a file inside"):
+        operations.capture_target_source_provenance(
+            "dig_02", (1.0, 0.0, 0.0)
+        )
+
+
+def test_system_campaign_gate_uses_authoritative_inspector_and_rejects_non_next_slot(
+    tmp_path,
+):
+    operations = SystemGuidedEpisodeOperations(
+        _guided_config(tmp_path), output=lambda _message: None
+    )
+    calls = []
+
+    def run_ssh(command, *, accepted_returncodes=(0,)):
+        calls.append((command, accepted_returncodes))
+        return json.dumps(
+            {
+                "schema_version": "excavator_collection_campaign.v1",
+                "raw_root": "/data/excavator_il/raw",
+                "complete_and_valid": False,
+                "summary": {
+                    "planned": 200,
+                    "completed": 1,
+                    "ignored_diagnostics": 0,
+                    "complete_and_valid": False,
+                },
+                "next_expected_slot": {
+                    "slot_id": "slot_002",
+                    "task_variant": "dig_only",
+                    "soil_reset_block_id": "block_01",
+                    "dig_point_id": "dig_02",
+                },
+            }
+        )
+
+    operations._run_ssh = run_ssh
+
+    with pytest.raises(RuntimeError, match="next expected slot slot_002"):
+        operations.require_expected_campaign_slot(
+            task_variant="dig_only",
+            soil_reset_block_id="block_01",
+            dig_point_id="dig_01",
+        )
+
+    assert len(calls) == 1
+    command, accepted_returncodes = calls[0]
+    assert "scripts/inspect_collection_campaign.py" in command
+    assert "--collection-config config/collection.orin.json --next" in command
+    assert accepted_returncodes == (0, 2)
+
+
+def test_system_campaign_gate_accepts_exact_next_slot(tmp_path):
+    operations = SystemGuidedEpisodeOperations(
+        _guided_config(tmp_path), output=lambda _message: None
+    )
+    operations._run_ssh = lambda *_args, **_kwargs: json.dumps(
+        {
+            "schema_version": "excavator_collection_campaign.v1",
+            "summary": {"complete_and_valid": False},
+            "next_expected_slot": {
+                "slot_id": "slot_002",
+                "task_variant": "dig_only",
+                "soil_reset_block_id": "block_01",
+                "dig_point_id": "dig_02",
+            },
+        }
+    )
+
+    operations.require_expected_campaign_slot(
+        task_variant="dig_only",
+        soil_reset_block_id="block_01",
+        dig_point_id="dig_02",
+    )
+
+
+def test_system_campaign_gate_rejects_completed_campaign(tmp_path):
+    operations = SystemGuidedEpisodeOperations(
+        _guided_config(tmp_path), output=lambda _message: None
+    )
+    operations._run_ssh = lambda *_args, **_kwargs: json.dumps(
+        {
+            "schema_version": "excavator_collection_campaign.v1",
+            "summary": {"complete_and_valid": True},
+            "next_expected_slot": None,
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="campaign is already complete"):
+        operations.require_expected_campaign_slot(
+            task_variant="dig_only",
+            soil_reset_block_id="block_01",
+            dig_point_id="dig_02",
+        )
 
 
 def test_preflight_reclaims_only_known_stale_serial_owner(tmp_path):
@@ -537,6 +1122,117 @@ def test_selected_rl_target_is_persisted_as_episode_target(tmp_path):
 
     assert ("run_rl_preposition", "dig_03") in operations.events
     assert operations.episode_targets == [(1.0, -0.2, 0.0)]
+
+
+def test_campaign_rl_collection_uses_protocol_dig_point_for_follow_and_provenance(
+    tmp_path,
+):
+    config = _guided_config(tmp_path)
+    demo_path = tmp_path / "AiryLidar/mission/config/excavation_demo.json"
+    demo_path.parent.mkdir(parents=True, exist_ok=True)
+    demo_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavation_demo.v1",
+                "dig_points": [
+                    {"point_id": "dig_02", "position_m": [1.05, 0.0, 0.02]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    object.__setattr__(config, "rl_demo_config", demo_path)
+
+    class SelectedTargetOperations(_FakeOperations):
+        def run_rl_preposition(self, target_id=None):
+            self.events.append(("run_rl_preposition", target_id))
+            return (1.05, 0.0, 0.02)
+
+    operations = SelectedTargetOperations()
+
+    run_guided_episode(
+        config,
+        operations,
+        positioning_mode=PositioningMode.RL,
+        input_fn=lambda _prompt: "s",
+        output=lambda _message: None,
+        task_variant="dig_only",
+        soil_reset_block_id="block_03",
+        dig_point_id="dig_02",
+    )
+
+    assert ("run_rl_preposition", "dig_02") in operations.events
+    assert operations.episode_targets == [(1.05, 0.0, 0.02)]
+
+
+def test_collection_rejects_unknown_protocol_dig_point_before_preflight(tmp_path):
+    config = _guided_config(tmp_path)
+    demo_path = tmp_path / "AiryLidar/mission/config/excavation_demo.json"
+    demo_path.parent.mkdir(parents=True, exist_ok=True)
+    demo_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavation_demo.v1",
+                "dig_points": [
+                    {"point_id": "dig_01", "position_m": [1.0, 0.2, 0.0]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    object.__setattr__(config, "rl_demo_config", demo_path)
+    operations = _FakeOperations()
+
+    with pytest.raises(ValueError, match="not configured.*dig_missing"):
+        run_guided_episode(
+            config,
+            operations,
+            positioning_mode=PositioningMode.DIRECT,
+            input_fn=lambda _prompt: "s",
+            output=lambda _message: None,
+            task_variant="dig_only",
+            soil_reset_block_id="block_01",
+            dig_point_id="dig_missing",
+        )
+
+    assert operations.events == []
+
+
+def test_collection_rejects_mismatched_rl_and_protocol_point_ids_before_preflight(
+    tmp_path,
+):
+    config = _guided_config(tmp_path)
+    demo_path = tmp_path / "AiryLidar/mission/config/excavation_demo.json"
+    demo_path.parent.mkdir(parents=True, exist_ok=True)
+    demo_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavation_demo.v1",
+                "dig_points": [
+                    {"point_id": "dig_01", "position_m": [1.0, 0.2, 0.0]},
+                    {"point_id": "dig_02", "position_m": [1.0, 0.0, 0.0]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    object.__setattr__(config, "rl_demo_config", demo_path)
+    operations = _FakeOperations()
+
+    with pytest.raises(ValueError, match="must match.*dig_point_id"):
+        run_guided_episode(
+            config,
+            operations,
+            positioning_mode=PositioningMode.RL,
+            rl_target_id="dig_01",
+            input_fn=lambda _prompt: "s",
+            output=lambda _message: None,
+            task_variant="dig_only",
+            soil_reset_block_id="block_01",
+            dig_point_id="dig_02",
+        )
+
+    assert operations.events == []
 
 
 def test_guided_episode_reports_operator_relevant_stages_through_one_callback(tmp_path):
@@ -1202,6 +1898,73 @@ def test_inspect_zero_soak_preserves_failed_quality_report(tmp_path, monkeypatch
     assert operations.inspect_zero_soak("/data/raw/episode_0001") == report
 
 
+def test_build_and_validate_records_collection_evidence_after_quality_check(tmp_path):
+    config = replace(
+        _guided_config(tmp_path),
+        orin_experiment_run_config="config/collection_evidence.orin.json",
+    )
+    operations = SystemGuidedEpisodeOperations(config, output=lambda _message: None)
+    events = []
+
+    def remote_cli(argv, *, accepted_returncodes=(0,)):
+        events.append(("remote_cli", tuple(argv), accepted_returncodes))
+        return {"command": argv[0]}
+
+    def run_ssh(command, *, accepted_returncodes=(0,)):
+        events.append(("quality", command, accepted_returncodes))
+        return json.dumps({"episode_id": "episode_0001", "passed": True})
+
+    operations._remote_cli = remote_cli
+    operations._run_ssh = run_ssh
+
+    operations.build_and_validate("/data/raw/episode_0001")
+
+    assert [event[0] for event in events] == [
+        "remote_cli",
+        "remote_cli",
+        "quality",
+        "remote_cli",
+    ]
+    assert events[-1][1] == (
+        "record-collection-run",
+        "/data/raw/episode_0001",
+        "--config",
+        "config/collection_evidence.orin.json",
+    )
+
+
+def test_collection_evidence_failure_fails_validation_without_deleting_raw_episode(
+    tmp_path,
+):
+    config = replace(
+        _guided_config(tmp_path),
+        orin_experiment_run_config="config/collection_evidence.orin.json",
+    )
+    operations = SystemGuidedEpisodeOperations(config, output=lambda _message: None)
+    remote_calls = []
+
+    def remote_cli(argv, *, accepted_returncodes=(0,)):
+        remote_calls.append(tuple(argv))
+        if argv[0] == "record-collection-run":
+            raise RuntimeError("evidence write failed")
+        return {"command": argv[0]}
+
+    operations._remote_cli = remote_cli
+    operations._run_ssh = lambda *_args, **_kwargs: json.dumps(
+        {"episode_id": "episode_0001", "passed": True}
+    )
+
+    with pytest.raises(RuntimeError, match="evidence write failed"):
+        operations.build_and_validate("/data/raw/episode_0001")
+
+    assert [call[0] for call in remote_calls] == [
+        "build-steps",
+        "validate",
+        "record-collection-run",
+    ]
+    assert all("rm" not in call for call in remote_calls)
+
+
 def test_system_operations_only_discard_retake_episode_started_by_this_run(
     tmp_path, monkeypatch
 ):
@@ -1245,6 +2008,44 @@ def test_system_operations_only_discard_retake_episode_started_by_this_run(
 
     with pytest.raises(RuntimeError, match="unapproved"):
         operations.discard_episode("/data/raw/episode_0007")
+
+
+def test_system_start_episode_sends_target_source_as_one_immutable_json_argument(
+    tmp_path,
+):
+    operations = SystemGuidedEpisodeOperations(
+        _guided_config(tmp_path), output=lambda _message: None
+    )
+    calls = []
+
+    def remote_cli(command, *, accepted_returncodes=(0,)):
+        calls.append((tuple(command), accepted_returncodes))
+        return {
+            "ok": True,
+            "active": True,
+            "path": "/data/raw/episode_0001",
+        }
+
+    operations._remote_cli = remote_cli
+    provenance = {
+        "repository": "airylidar",
+        "path": "mission/config/excavation_demo.json",
+        "sha256": "a" * 64,
+        "commit": "b" * 40,
+        "dirty": False,
+    }
+
+    operations.start_episode(
+        (1.0, 0.0, 0.0),
+        task_variant="dig_only",
+        soil_reset_block_id="block_01",
+        dig_point_id="dig_02",
+        target_source_provenance=provenance,
+    )
+
+    command = calls[0][0]
+    wire_index = command.index("--target-source-provenance-json")
+    assert json.loads(command[wire_index + 1]) == provenance
 
 
 def test_stop_collector_does_not_kill_remote_pid_after_collector_exited(

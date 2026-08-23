@@ -12,10 +12,46 @@ def test_build_steps_uses_only_new_state_and_latest_causal_action_and_image(tmp_
     episode = tmp_path / "episode_0001"
     camera = episode / "camera_front"
     camera.mkdir(parents=True)
+    dump_camera = episode / "camera_dump"
+    dump_camera.mkdir()
     Image.new("RGB", (32, 24), color=(10, 20, 30)).save(camera / "000000.jpg")
+    Image.new("RGB", (32, 24), color=(40, 50, 60)).save(
+        dump_camera / "000000.jpg"
+    )
     (episode / "camera_front_timestamps.csv").write_text(
         "camera_frame_index,camera_stamp_monotonic_ns,image_path\n"
         "0,950000000,camera_front/000000.jpg\n",
+        encoding="utf-8",
+    )
+    (episode / "camera_dump_timestamps.csv").write_text(
+        "camera_frame_index,camera_stamp_monotonic_ns,image_path\n"
+        "0,960000000,camera_dump/000000.jpg\n",
+        encoding="utf-8",
+    )
+    camera_metadata = {
+        "device_id": "fixture",
+        "width": 32,
+        "height": 24,
+        "nominal_fps": 30,
+        "pixel_format": "RGB8",
+        "timestamp_clock": "CLOCK_MONOTONIC",
+    }
+    (episode / "episode.json").write_text(
+        json.dumps(
+            {
+                "episode_id": "episode_0001",
+                "schema_version": "excavator_demo_raw.v2",
+                "cameras": {
+                    "front": camera_metadata,
+                    "dump": {**camera_metadata, "device_id": "fixture-dump"},
+                },
+                "collection_protocol": {
+                    "task_variant": "dig_transport_dump",
+                    "soil_reset_block_id": "block_01",
+                    "dig_point_id": "dig_01",
+                },
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -133,9 +169,13 @@ def test_build_steps_uses_only_new_state_and_latest_causal_action_and_image(tmp_
     assert report.joystick_timeout_count == 1
     assert report.action_age_ms["p95"] == 20.0
     assert report.camera_age_ms["p95"] == 50.0
+    assert report.camera_streams["front"]["age_ms"]["max"] == 50.0
+    assert report.camera_streams["dump"]["age_ms"]["max"] == 40.0
+    assert report.camera_streams["dump"]["frame_count"] == 1
     quality = json.loads((episode / "quality_report.json").read_text(encoding="utf-8"))
     assert quality["training_step_count"] == 1
     assert quality["camera_queue_drop_count"] == 0
+    assert tuple(quality["camera_streams"]) == ("front", "dump")
     assert quality["joystick_timeout_count"] == 1
 
 

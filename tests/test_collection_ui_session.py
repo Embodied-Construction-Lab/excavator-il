@@ -12,10 +12,22 @@ from excavator_il.collection_ui_session import (
 
 
 def _scripted_manual_collection(
-    _config_path, positioning_mode, dig_target_id, commands, events
+    _config_path,
+    positioning_mode,
+    dig_target_id,
+    commands,
+    events,
+    task_variant=None,
+    soil_reset_block_id=None,
+    dig_point_id=None,
 ):
     assert positioning_mode == "manual"
     assert dig_target_id is None
+    assert (task_variant, soil_reset_block_id, dig_point_id) == (
+        "dig_only",
+        "block_04",
+        "dig_02",
+    )
     events.put({"kind": "stage", "stage": "manual_positioning"})
     assert commands.get(timeout=1.0) == {"command": "complete_manual_positioning"}
     events.put({"kind": "stage", "stage": "review"})
@@ -33,7 +45,12 @@ def _scripted_manual_collection(
 
 
 def _cancellable_collection(
-    _config_path, _positioning_mode, _dig_target_id, _commands, events
+    _config_path,
+    _positioning_mode,
+    _dig_target_id,
+    _commands,
+    events,
+    *_protocol,
 ):
     events.put({"kind": "stage", "stage": "recording"})
     try:
@@ -44,7 +61,12 @@ def _cancellable_collection(
 
 
 def _scripted_standalone_teleop(
-    _config_path, positioning_mode, dig_target_id, _commands, events
+    _config_path,
+    positioning_mode,
+    dig_target_id,
+    _commands,
+    events,
+    *_protocol,
 ):
     assert positioning_mode == "teleop"
     assert dig_target_id is None
@@ -74,7 +96,12 @@ def test_guided_collection_supervisor_exposes_one_stateful_control_interface(tmp
     try:
         assert supervisor.snapshot().stage == "idle"
 
-        supervisor.start("manual")
+        supervisor.start(
+            "manual",
+            task_variant="dig_only",
+            soil_reset_block_id="block_04",
+            dig_point_id="dig_02",
+        )
         _wait_for_stage(supervisor, "manual_positioning")
         supervisor.complete_manual_positioning()
         _wait_for_stage(supervisor, "review")
@@ -83,10 +110,18 @@ def test_guided_collection_supervisor_exposes_one_stateful_control_interface(tmp
 
         assert completed.episode_path == "/data/episode_0001"
         assert completed.positioning_mode == "manual"
+        assert completed.task_variant == "dig_only"
+        assert completed.soil_reset_block_id == "block_04"
+        assert completed.dig_point_id == "dig_02"
         assert completed.completed_count == 1
         assert completed.error == ""
 
-        supervisor.start("manual")
+        supervisor.start(
+            "manual",
+            task_variant="dig_only",
+            soil_reset_block_id="block_04",
+            dig_point_id="dig_02",
+        )
         _wait_for_stage(supervisor, "manual_positioning")
         supervisor.complete_manual_positioning()
         _wait_for_stage(supervisor, "review")
@@ -231,9 +266,31 @@ def test_guided_collection_worker_passes_selected_rl_target(monkeypatch):
         or "/data/episode_0003",
     )
 
-    run_guided_collection_worker("guided.json", "rl", "dig_03", commands, events)
+    run_guided_collection_worker(
+        "guided.json",
+        "rl",
+        "dig_03",
+        commands,
+        events,
+        "dig_transport_dump",
+        "block_09",
+        "dig_03",
+    )
 
     assert calls[0]["rl_target_id"] == "dig_03"
+    assert calls[0]["task_variant"] == "dig_transport_dump"
+    assert calls[0]["soil_reset_block_id"] == "block_09"
+    assert calls[0]["dig_point_id"] == "dig_03"
+
+
+def test_guided_collection_supervisor_rejects_partial_protocol_metadata(tmp_path):
+    supervisor = GuidedCollectionSupervisor(config_path=tmp_path / "guided.json")
+
+    with pytest.raises(ValueError, match="must be provided together"):
+        supervisor.start("direct", task_variant="dig_only")
+
+    assert supervisor.snapshot().stage == "idle"
+    supervisor.close()
 
 
 def test_guided_collection_worker_runs_teleop_without_episode_lifecycle(monkeypatch):

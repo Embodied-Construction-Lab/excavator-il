@@ -2,23 +2,34 @@
 
 from __future__ import annotations
 
-import json
-import re
 import csv
+import json
 import queue
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, TextIO
 
 from ..stm32_protocol import STM32_TELEMETRY_FIELDS
+from .config import (
+    validate_collection_protocol,
+    validate_recording_purpose,
+    validate_target_source_provenance,
+)
 
 
-EPISODE_SCHEMA_VERSION = "excavator_demo_raw.v1"
+EPISODE_SCHEMA_VERSION = "excavator_demo_raw.v2"
+LEGACY_EPISODE_SCHEMA_VERSION = "excavator_demo_raw.v1"
 JSON_STREAMS = ("stm32_raw", "joystick_raw", "expert_action", "command_tx")
 _EPISODE_NAME = re.compile(r"episode_(\d{4,})$")
 _WRITER_QUEUE_CAPACITY = 4096
 _WRITER_STOP = object()
+CAMERA_FIELDS = (
+    "camera_frame_index",
+    "camera_stamp_monotonic_ns",
+    "image_path",
+)
 
 
 @dataclass(frozen=True)
@@ -29,6 +40,12 @@ class EpisodeStart:
     material_id: str
     provenance: Mapping[str, Any]
     camera_front: Mapping[str, Any]
+    camera_dump: Mapping[str, Any] | None = None
+    task_variant: str | None = None
+    soil_reset_block_id: str | None = None
+    dig_point_id: str | None = None
+    recording_purpose: str = "demonstration"
+    target_source_provenance: Mapping[str, Any] | None = None
 
 
 class EpisodeRecorder:
@@ -41,9 +58,9 @@ class EpisodeRecorder:
         self._streams: dict[str, TextIO] = {}
         self._control_handle: TextIO | None = None
         self._control_writer: csv.DictWriter | None = None
-        self._camera_handle: TextIO | None = None
-        self._camera_writer: csv.DictWriter | None = None
-        self._camera_frame_index = 0
+        self._camera_handles: dict[str, TextIO] = {}
+        self._camera_writers: dict[str, csv.DictWriter] = {}
+        self._camera_frame_indices: dict[str, int] = {}
         self._lock = threading.RLock()
         self._writer_queue: queue.Queue[object] | None = None
         self._writer_thread: threading.Thread | None = None
@@ -75,6 +92,12 @@ class EpisodeRecorder:
         if not isinstance(value, str) or not value:
             raise ValueError(f"{field} must be non-empty text")
         return value
+
+    @staticmethod
+    def _camera_stream_name(camera_id: str) -> str:
+        if camera_id not in {"front", "dump"}:
+            raise ValueError("camera_id must be 'front' or 'dump'")
+        return f"camera_{camera_id}"
 
     @staticmethod
     def _write_metadata(episode_path: Path, value: Mapping[str, Any]) -> None:
@@ -111,9 +134,46 @@ class EpisodeRecorder:
             raise RuntimeError("an Episode is already recording")
         if len(request.dig_target_m) != 3:
             raise ValueError("dig_target_m must contain three coordinates")
+        task = self._require_text(request.task, "task")
+        operator_id = self._require_text(request.operator_id, "operator_id")
+        material_id = self._require_text(request.material_id, "material_id")
+        recording_purpose = validate_recording_purpose(request.recording_purpose)
+        collection_protocol = validate_collection_protocol(
+            task_variant=request.task_variant,
+            soil_reset_block_id=request.soil_reset_block_id,
+            dig_point_id=request.dig_point_id,
+        )
+        target_source_provenance = (
+            None
+            if request.target_source_provenance is None
+            else validate_target_source_provenance(
+                request.target_source_provenance
+            )
+        )
+        if (
+            recording_purpose == "demonstration"
+            and collection_protocol
+            and target_source_provenance is None
+        ):
+            raise ValueError(
+                "formal demonstration requires target_source_provenance"
+            )
+        camera_metadata = {"front": dict(request.camera_front)}
+        if request.camera_dump is not None:
+            camera_metadata["dump"] = dict(request.camera_dump)
+        if (
+            recording_purpose == "demonstration"
+            and request.camera_dump is not None
+            and not collection_protocol
+        ):
+            raise ValueError(
+                "dual-camera Episode requires task_variant, "
+                "soil_reset_block_id and dig_point_id"
+            )
+        use_v2 = len(camera_metadata) > 1 or bool(collection_protocol)
         episode_id = self._next_episode_id()
         episode_path = self._root / episode_id
-        (episode_path / "camera_front").mkdir(parents=True, exist_ok=False)
+        episode_path.mkdir(parents=True, exist_ok=False)
         streams = {
             name: (episode_path / f"{name}.jsonl").open("x", encoding="utf-8")
             for name in JSON_STREAMS
@@ -129,42 +189,61 @@ class EpisodeRecorder:
         )
         control_writer = csv.DictWriter(control_handle, fieldnames=control_fields)
         control_writer.writeheader()
-        camera_handle = (episode_path / "camera_front_timestamps.csv").open(
-            "x", newline="", encoding="utf-8"
-        )
-        camera_writer = csv.DictWriter(
-            camera_handle,
-            fieldnames=(
-                "camera_frame_index",
-                "camera_stamp_monotonic_ns",
-                "image_path",
-            ),
-        )
-        camera_writer.writeheader()
+        camera_handles: dict[str, TextIO] = {}
+        camera_writers: dict[str, csv.DictWriter] = {}
+        camera_frame_indices: dict[str, int] = {}
+        for camera_id, metadata in (
+            ("front", request.camera_front),
+            ("dump", request.camera_dump),
+        ):
+            if metadata is None:
+                continue
+            stream_name = self._camera_stream_name(camera_id)
+            (episode_path / stream_name).mkdir(parents=True, exist_ok=False)
+            handle = (episode_path / f"{stream_name}_timestamps.csv").open(
+                "x", newline="", encoding="utf-8"
+            )
+            writer = csv.DictWriter(handle, fieldnames=CAMERA_FIELDS)
+            writer.writeheader()
+            camera_handles[camera_id] = handle
+            camera_writers[camera_id] = writer
+            camera_frame_indices[camera_id] = 0
         metadata = {
-            "schema_version": EPISODE_SCHEMA_VERSION,
+            "schema_version": (
+                EPISODE_SCHEMA_VERSION if use_v2 else LEGACY_EPISODE_SCHEMA_VERSION
+            ),
             "episode_id": episode_id,
-            "task": self._require_text(request.task, "task"),
-            "operator_id": self._require_text(request.operator_id, "operator_id"),
+            "task": task,
+            "operator_id": operator_id,
             "dig_target_m": [float(value) for value in request.dig_target_m],
-            "material_id": self._require_text(request.material_id, "material_id"),
+            "material_id": material_id,
+            "recording_purpose": recording_purpose,
             "status": "recording",
             "success": None,
             "failure_reason": "",
             "intervention": False,
             "start_wall_ns": int(start_wall_ns),
             "start_monotonic_ns": int(start_monotonic_ns),
-            "camera_front": dict(request.camera_front),
             **dict(request.provenance),
         }
+        if use_v2:
+            metadata["cameras"] = camera_metadata
+            if collection_protocol:
+                metadata["collection_protocol"] = dict(collection_protocol)
+                if target_source_provenance is not None:
+                    metadata["target_source_provenance"] = dict(
+                        target_source_provenance
+                    )
+        else:
+            metadata["camera_front"] = camera_metadata["front"]
         self._episode_path = episode_path
         self._metadata = metadata
         self._streams = streams
         self._control_handle = control_handle
         self._control_writer = control_writer
-        self._camera_handle = camera_handle
-        self._camera_writer = camera_writer
-        self._camera_frame_index = 0
+        self._camera_handles = camera_handles
+        self._camera_writers = camera_writers
+        self._camera_frame_indices = camera_frame_indices
         self._write_metadata(episode_path, metadata)
         self._writer_queue = queue.Queue(maxsize=_WRITER_QUEUE_CAPACITY)
         self._writer_error = None
@@ -208,7 +287,9 @@ class EpisodeRecorder:
         try:
             self._writer_queue.put_nowait(operation)
         except queue.Full as exc:
-            raise RuntimeError("Episode writer queue is full; Episode must be aborted") from exc
+            raise RuntimeError(
+                "Episode writer queue is full; Episode must be aborted"
+            ) from exc
 
     def record_json(self, stream: str, record: Mapping[str, Any]) -> None:
         with self._lock:
@@ -243,6 +324,7 @@ class EpisodeRecorder:
     def record_camera(
         self,
         *,
+        camera_id: str = "front",
         encoded_image: bytes,
         capture_monotonic_ns: int,
         extension: str,
@@ -256,23 +338,26 @@ class EpisodeRecorder:
             if not self.active:
                 return None
             assert self._episode_path is not None
-            assert self._camera_writer is not None
-            assert self._camera_handle is not None
-            frame_index = self._camera_frame_index
-            relative_path = f"camera_front/{frame_index:06d}.{extension}"
+            camera_writer = self._camera_writers.get(camera_id)
+            camera_handle = self._camera_handles.get(camera_id)
+            if camera_writer is None or camera_handle is None:
+                raise ValueError(f"camera role {camera_id!r} is not configured")
+            stream_name = self._camera_stream_name(camera_id)
+            frame_index = self._camera_frame_indices[camera_id]
+            relative_path = f"{stream_name}/{frame_index:06d}.{extension}"
             target = self._episode_path / relative_path
             temporary = target.with_suffix(target.suffix + ".pending")
             temporary.write_bytes(encoded_image)
             temporary.replace(target)
-            self._camera_writer.writerow(
+            camera_writer.writerow(
                 {
                     "camera_frame_index": frame_index,
                     "camera_stamp_monotonic_ns": int(capture_monotonic_ns),
                     "image_path": relative_path,
                 }
             )
-            self._camera_handle.flush()
-            self._camera_frame_index += 1
+            camera_handle.flush()
+            self._camera_frame_indices[camera_id] = frame_index + 1
             return relative_path
 
     def stop(
@@ -336,18 +421,21 @@ class EpisodeRecorder:
         for handle in self._streams.values():
             handle.flush()
             handle.close()
-        for handle in (self._control_handle, self._camera_handle):
-            if handle is not None:
-                handle.flush()
-                handle.close()
+        if self._control_handle is not None:
+            self._control_handle.flush()
+            self._control_handle.close()
+        for handle in self._camera_handles.values():
+            handle.flush()
+            handle.close()
         self._write_metadata(episode_path, final_metadata)
         self._episode_path = None
         self._metadata = None
         self._streams = {}
         self._control_handle = None
         self._control_writer = None
-        self._camera_handle = None
-        self._camera_writer = None
+        self._camera_handles = {}
+        self._camera_writers = {}
+        self._camera_frame_indices = {}
         self._writer_queue = None
         self._writer_thread = None
         self._writer_error = None

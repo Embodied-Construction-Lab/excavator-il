@@ -1,14 +1,73 @@
 from pathlib import Path
+import sys
 import threading
 import time
 from types import SimpleNamespace
+import types
 
 import numpy as np
 import pytest
 
+_lerobot = types.ModuleType("lerobot")
+_lerobot.__path__ = []
+_lerobot_configs = types.ModuleType("lerobot.configs")
+_lerobot_configs.__path__ = []
+_lerobot_config_types = types.ModuleType("lerobot.configs.types")
+_lerobot_config_types.FeatureType = object
+_lerobot_config_types.PolicyFeature = object
+_lerobot_policies = types.ModuleType("lerobot.policies")
+_lerobot_policies.__path__ = []
+_lerobot_policies.get_policy_class = lambda *_args, **_kwargs: None
+_lerobot_policies.make_pre_post_processors = (
+    lambda *_args, **_kwargs: (None, None)
+)
+_lerobot_policies_act = types.ModuleType("lerobot.policies.act")
+_lerobot_policies_act.__path__ = []
+_lerobot_policies_act_config = types.ModuleType(
+    "lerobot.policies.act.configuration_act"
+)
+_lerobot_policies_act_config.ACTConfig = object
+_lerobot_policies_act_model = types.ModuleType(
+    "lerobot.policies.act.modeling_act"
+)
+_lerobot_policies_act_model.ACTPolicy = object
+_lerobot_datasets = types.ModuleType("lerobot.datasets")
+_lerobot_datasets.__path__ = []
+_lerobot_dataset_metadata = types.ModuleType("lerobot.datasets.dataset_metadata")
+_lerobot_dataset_metadata.LeRobotDatasetMetadata = object
+_lerobot_dataset_factory = types.ModuleType("lerobot.datasets.factory")
+_lerobot_dataset_factory.resolve_delta_timestamps = (
+    lambda *_args, **_kwargs: None
+)
+_lerobot_dataset_module = types.ModuleType("lerobot.datasets.lerobot_dataset")
+_lerobot_dataset_module.LeRobotDataset = object
+_lerobot.policies = _lerobot_policies
+_lerobot.configs = _lerobot_configs
+_lerobot.datasets = _lerobot_datasets
+sys.modules.setdefault("lerobot", _lerobot)
+sys.modules.setdefault("lerobot.configs", _lerobot_configs)
+sys.modules.setdefault("lerobot.configs.types", _lerobot_config_types)
+sys.modules.setdefault("lerobot.policies", _lerobot_policies)
+sys.modules.setdefault("lerobot.policies.act", _lerobot_policies_act)
+sys.modules.setdefault(
+    "lerobot.policies.act.configuration_act", _lerobot_policies_act_config
+)
+sys.modules.setdefault(
+    "lerobot.policies.act.modeling_act", _lerobot_policies_act_model
+)
+sys.modules.setdefault("lerobot.datasets", _lerobot_datasets)
+sys.modules.setdefault(
+    "lerobot.datasets.dataset_metadata", _lerobot_dataset_metadata
+)
+sys.modules.setdefault("lerobot.datasets.factory", _lerobot_dataset_factory)
+sys.modules.setdefault(
+    "lerobot.datasets.lerobot_dataset", _lerobot_dataset_module
+)
+
 import excavator_il.resident_act_runtime as resident_runtime_module
 from excavator_il.act_runtime import ActRuntimeDecision
 from excavator_il.collector.camera import RgbCameraFrame
+from excavator_il.dig_policy import DigPolicyDescriptor, DigPolicyFactory
 from excavator_il.resident_act_runtime import (
     ResidentActRuntime,
     ResidentActWorker,
@@ -670,7 +729,11 @@ def test_worker_factory_loads_the_model_and_opens_the_camera_exactly_once(
     )
     observation_config = SimpleNamespace(
         camera=SimpleNamespace(
-            device="/dev/video0",
+            # Collection uses the stable host path.  The launcher maps this
+            # device into the ACT container as config.camera.device.
+            device=(
+                "/dev/v4l/by-path/platform-3610000.usb-usb-0:2.1:1.0-video-index0"
+            ),
             width=640,
             height=480,
             nominal_fps=30,
@@ -741,6 +804,175 @@ def test_worker_factory_loads_the_model_and_opens_the_camera_exactly_once(
     assert "ACT resident build: CUDA transfer passed" in lifecycle_output
     assert "ACT resident build: processors ready" in lifecycle_output
     assert "ACT resident build: deployment recheck passed" in lifecycle_output
+
+
+def test_worker_factory_rejects_operator_camera_format_mismatch(monkeypatch):
+    act_config = SimpleNamespace(
+        camera=SimpleNamespace(
+            device="/dev/video0", width=640, height=480, nominal_fps=30
+        )
+    )
+    observation_config = SimpleNamespace(
+        camera=SimpleNamespace(
+            device=(
+                "/dev/v4l/by-path/platform-3610000.usb-usb-0:2.1:1.0-video-index0"
+            ),
+            width=1280,
+            height=720,
+            nominal_fps=30,
+        ),
+        camera_preview=SimpleNamespace(bind_host="0.0.0.0", port=18092),
+    )
+    monkeypatch.setattr(
+        resident_runtime_module, "load_act_runtime_config", lambda _: act_config
+    )
+    monkeypatch.setattr(
+        resident_runtime_module,
+        "load_collection_config",
+        lambda _: observation_config,
+    )
+
+    with pytest.raises(ValueError, match="camera formats must match"):
+        build_resident_act_worker(
+            "/config.json",
+            socket_path="/tmp/resident-act-test.sock",
+            operator_observation_config="/operator.json",
+        )
+
+
+def test_worker_factory_default_provider_fails_closed_for_unknown_backend(
+    monkeypatch,
+):
+    config = SimpleNamespace(
+        dig_policy_backend="diffusion_policy",
+        camera=SimpleNamespace(
+            device="/dev/video0", width=640, height=480, nominal_fps=30
+        ),
+        max_inference_state_age_ms=100.0,
+        max_camera_age_ms=120.0,
+        max_inference_ms=100.0,
+    )
+    load_calls = []
+    monkeypatch.setattr(
+        resident_runtime_module, "load_act_runtime_config", lambda _: config
+    )
+
+    def commissioned_loader(_config):
+        load_calls.append(_config)
+        return object()
+
+    with pytest.raises(ValueError, match="unknown dig policy backend"):
+        build_resident_act_worker(
+            "/config.json",
+            socket_path="/tmp/resident-act-test.sock",
+            commissioned_lerobot_act_loader=commissioned_loader,
+        )
+
+    assert load_calls == []
+
+
+def test_worker_factory_uses_injected_provider_without_commissioned_act_loader(
+    monkeypatch,
+):
+    class _AlternatePolicy:
+        descriptor = DigPolicyDescriptor(
+            backend_id="diffusion_policy",
+            implementation="tests.AlternatePolicy",
+        )
+
+        def select_action(self, observation):
+            return (0.0, 0.0, 0.0, 0.0)
+
+        def warmup(self):
+            return (0.0, 0.0, 0.0, 0.0)
+
+        def reset(self):
+            return None
+
+    config = SimpleNamespace(
+        dig_policy_backend="diffusion_policy",
+        camera=SimpleNamespace(
+            device="/dev/video0", width=640, height=480, nominal_fps=30
+        ),
+        max_inference_state_age_ms=100.0,
+        max_camera_age_ms=120.0,
+        max_inference_ms=100.0,
+    )
+    monkeypatch.setattr(
+        resident_runtime_module, "load_act_runtime_config", lambda _: config
+    )
+    monkeypatch.setattr(
+        resident_runtime_module,
+        "ResidentActDataClient",
+        lambda socket_path: SimpleNamespace(socket_path=socket_path, close=lambda: None),
+    )
+    monkeypatch.setattr(
+        resident_runtime_module,
+        "UvcCamera",
+        lambda camera_config: SimpleNamespace(camera_config=camera_config, close=lambda: None),
+    )
+
+    worker = build_resident_act_worker(
+        "/config.json",
+        socket_path="/tmp/resident-act-test.sock",
+        dig_policy_provider=lambda loaded_config: DigPolicyFactory(
+            {
+                "diffusion_policy": lambda: _AlternatePolicy(),
+            }
+        ),
+        commissioned_lerobot_act_loader=lambda _config: pytest.fail(
+            "commissioned ACT loader must not run for alternate provider"
+        ),
+    )
+
+    assert isinstance(worker, ResidentActWorker)
+    assert worker.runtime.status.completed_steps == 0
+
+
+def test_worker_factory_rejects_injected_provider_descriptor_mismatch(
+    monkeypatch,
+):
+    class _MismatchedPolicy:
+        descriptor = DigPolicyDescriptor(
+            backend_id="lerobot_act",
+            implementation="tests.MismatchedPolicy",
+        )
+
+        def select_action(self, observation):
+            return (0.0, 0.0, 0.0, 0.0)
+
+        def warmup(self):
+            return (0.0, 0.0, 0.0, 0.0)
+
+        def reset(self):
+            return None
+
+    config = SimpleNamespace(
+        dig_policy_backend="diffusion_policy",
+        camera=SimpleNamespace(
+            device="/dev/video0", width=640, height=480, nominal_fps=30
+        ),
+        max_inference_state_age_ms=100.0,
+        max_camera_age_ms=120.0,
+        max_inference_ms=100.0,
+    )
+    monkeypatch.setattr(
+        resident_runtime_module, "load_act_runtime_config", lambda _: config
+    )
+
+    with pytest.raises(ValueError, match="descriptor backend_id"):
+        build_resident_act_worker(
+            "/config.json",
+            socket_path="/tmp/resident-act-test.sock",
+            dig_policy_provider=lambda loaded_config: DigPolicyFactory(
+                {
+                    "diffusion_policy": lambda: _MismatchedPolicy(),
+                }
+            ),
+            commissioned_lerobot_act_loader=lambda _config: pytest.fail(
+                "commissioned ACT loader must not run for injected providers"
+            ),
+        )
 
 
 def test_runner_builds_once_and_runs_the_resident_worker(monkeypatch):

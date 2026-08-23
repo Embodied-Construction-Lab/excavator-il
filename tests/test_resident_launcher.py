@@ -27,7 +27,11 @@ def test_resident_act_launcher_requires_exact_hybrid_authorization_and_direct_do
 def test_resident_act_launcher_maps_camera_and_shared_runtime_dir_but_not_serial():
     script = (ROOT / "scripts" / "run_act_resident.sh").read_text(encoding="utf-8")
 
-    assert "--device /dev/video0" in script
+    assert 'front_camera_device=' in script
+    assert '"camera_front"' in script
+    assert 'test -c "${front_camera_device}"' in script
+    assert '--device "${front_camera_device}:/dev/video0"' in script
+    assert "--device /dev/video0" not in script
     assert "--device /dev/ttyTHS1" not in script
     assert "fuser /dev/ttyTHS1" not in script
     assert "/opt/excavator-resident" in script

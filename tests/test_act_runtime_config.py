@@ -35,8 +35,10 @@ def _config():
 
 
 def test_runtime_config_loads_checkpoint_hardware_and_timing_contract(tmp_path):
+    raw = _config()
+    raw["dig_policy_backend"] = "lerobot_act"
     path = tmp_path / "runtime.json"
-    path.write_text(json.dumps(_config()), encoding="utf-8")
+    path.write_text(json.dumps(raw), encoding="utf-8")
 
     config = load_act_runtime_config(path)
 
@@ -46,11 +48,43 @@ def test_runtime_config_loads_checkpoint_hardware_and_timing_contract(tmp_path):
     assert config.deployment_manifest_path.as_posix() == "/deployment/act.json"
     assert config.machine_profile_path.as_posix() == "/config/machine_profile.json"
     assert config.device == "cuda"
+    assert config.dig_policy_backend == "lerobot_act"
     assert config.serial.baudrate == 460800
     assert config.camera.shape == (480, 640)
     assert config.max_inference_state_age_ms == 100
     assert config.state_silence_timeout_ms == 250
     assert config.max_inference_ms == 100
+
+
+def test_runtime_config_keeps_legacy_configs_on_the_act_backend(tmp_path):
+    path = tmp_path / "runtime.json"
+    path.write_text(json.dumps(_config()), encoding="utf-8")
+
+    config = load_act_runtime_config(path)
+
+    assert config.dig_policy_backend == "lerobot_act"
+
+
+def test_runtime_config_normalizes_unknown_dig_policy_backend_identifier(tmp_path):
+    raw = _config()
+    raw["dig_policy_backend"] = " Diffusion-Policy "
+    path = tmp_path / "runtime.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    config = load_act_runtime_config(path)
+
+    assert config.dig_policy_backend == "diffusion_policy"
+
+
+@pytest.mark.parametrize("backend", ["act typo", "act/policy", "1policy"])
+def test_runtime_config_rejects_malformed_dig_policy_backend(tmp_path, backend):
+    raw = _config()
+    raw["dig_policy_backend"] = backend
+    path = tmp_path / "runtime.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="dig_policy_backend"):
+        load_act_runtime_config(path)
 
 
 def test_runtime_config_requires_separate_state_freshness_and_silence_limits(tmp_path):

@@ -50,6 +50,180 @@ def _split_first_episode_into_two_segments(episode):
     )
 
 
+def _set_collection_protocol(
+    episode: Path,
+    *,
+    task_variant: str,
+    soil_reset_block_id: str,
+    dig_point_id: str = "dig_01",
+) -> None:
+    metadata_path = episode / "episode.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["collection_protocol"] = {
+        "task_variant": task_variant,
+        "soil_reset_block_id": soil_reset_block_id,
+        "dig_point_id": dig_point_id,
+    }
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+
+def test_prepare_training_split_groups_by_soil_block_and_stratifies_task_variant(
+    tmp_path, rgb_episode_factory
+):
+    episodes = []
+    expected_source_to_block = {}
+    expected_block_to_variant = {}
+    episode_index = 1
+    for variant, blocks in (
+        ("dig_only", ("block_01", "block_02")),
+        ("dig_transport_dump", ("block_03", "block_04")),
+    ):
+        for block_id in blocks:
+            expected_block_to_variant[block_id] = variant
+            for _ in range(2):
+                episode_id = f"episode_{episode_index:04d}"
+                episode = rgb_episode_factory(
+                    episode_id=episode_id,
+                    step_count=2,
+                    dual_camera=True,
+                )
+                _set_collection_protocol(
+                    episode,
+                    task_variant=variant,
+                    soil_reset_block_id=block_id,
+                )
+                episodes.append(episode)
+                expected_source_to_block[episode_id] = block_id
+                episode_index += 1
+
+    dataset_root = tmp_path / "dataset"
+    repo_id = "local/soil_block_split"
+    convert_episodes(episodes, dataset_root, repo_id)
+    manifest_path = tmp_path / "training_split.json"
+
+    split = prepare_training_split(
+        dataset_root=dataset_root,
+        repo_id=repo_id,
+        output_path=manifest_path,
+        train_ratio=0.5,
+        seed=17,
+    )
+
+    assert split.schema_version == "excavator_training_split.v2"
+    assert split.grouping_key == "source.soil_reset_block_id"
+    assert split.source_episode_to_group == expected_source_to_block
+    assert split.group_to_task_variant == expected_block_to_variant
+    assert set(split.train_group_ids).isdisjoint(split.validation_group_ids)
+    assert set(split.train_group_ids) | set(split.validation_group_ids) == set(
+        expected_block_to_variant
+    )
+    for variant in ("dig_only", "dig_transport_dump"):
+        assert variant in {
+            split.group_to_task_variant[group_id]
+            for group_id in split.train_group_ids
+        }
+        assert variant in {
+            split.group_to_task_variant[group_id]
+            for group_id in split.validation_group_ids
+        }
+    train_sources = set(split.train_source_episode_ids)
+    validation_sources = set(split.validation_source_episode_ids)
+    for source_id, block_id in expected_source_to_block.items():
+        sources_for_block = {
+            candidate
+            for candidate, candidate_block in expected_source_to_block.items()
+            if candidate_block == block_id
+        }
+        assert (
+            sources_for_block <= train_sources
+            or sources_for_block <= validation_sources
+        )
+
+    materialized = materialize_training_split(
+        manifest_path=manifest_path,
+        output_root=tmp_path / "splits",
+    )
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    train = LeRobotDataset(
+        repo_id=materialized.train_repo_id,
+        root=materialized.train_root,
+    )
+    validation = LeRobotDataset(
+        repo_id=materialized.validation_repo_id,
+        root=materialized.validation_root,
+    )
+    train_blocks = set(train.hf_dataset["source.soil_reset_block_id"])
+    validation_blocks = set(validation.hf_dataset["source.soil_reset_block_id"])
+    assert train_blocks == set(split.train_group_ids)
+    assert validation_blocks == set(split.validation_group_ids)
+    assert train_blocks.isdisjoint(validation_blocks)
+
+
+def test_prepare_training_split_rejects_mixed_task_variant_within_soil_block(
+    tmp_path, rgb_episode_factory
+):
+    episodes = []
+    for index, (variant, block_id) in enumerate(
+        (
+            ("dig_only", "block_01"),
+            ("dig_transport_dump", "block_01"),
+            ("dig_only", "block_02"),
+        ),
+        start=1,
+    ):
+        episode = rgb_episode_factory(
+            episode_id=f"episode_{index:04d}",
+            step_count=2,
+            dual_camera=True,
+        )
+        _set_collection_protocol(
+            episode,
+            task_variant=variant,
+            soil_reset_block_id=block_id,
+        )
+        episodes.append(episode)
+    dataset_root = tmp_path / "dataset"
+    repo_id = "local/mixed_block"
+    convert_episodes(episodes, dataset_root, repo_id)
+
+    with pytest.raises(ValueError, match="contains multiple task variants"):
+        prepare_training_split(
+            dataset_root=dataset_root,
+            repo_id=repo_id,
+            output_path=tmp_path / "training_split.json",
+            train_ratio=0.5,
+        )
+
+
+def test_prepare_training_split_rejects_partially_populated_soil_blocks(
+    tmp_path, rgb_episode_factory
+):
+    episodes = []
+    for index, block_id in enumerate(("block_01", "unknown"), start=1):
+        episode = rgb_episode_factory(
+            episode_id=f"episode_{index:04d}",
+            step_count=2,
+        )
+        if block_id != "unknown":
+            _set_collection_protocol(
+                episode,
+                task_variant="dig_only",
+                soil_reset_block_id=block_id,
+            )
+        episodes.append(episode)
+    dataset_root = tmp_path / "dataset"
+    repo_id = "local/partial_soil_metadata"
+    convert_episodes(episodes, dataset_root, repo_id)
+
+    with pytest.raises(ValueError, match="only partially populated"):
+        prepare_training_split(
+            dataset_root=dataset_root,
+            repo_id=repo_id,
+            output_path=tmp_path / "training_split.json",
+        )
+
+
 def test_prepare_training_split_keeps_parent_episode_segments_together(
     tmp_path, rgb_episode_factory
 ):
@@ -92,7 +266,8 @@ def test_prepare_training_split_keeps_parent_episode_segments_together(
     )
 
     persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert persisted["schema_version"] == "excavator_training_split.v1"
+    assert persisted["schema_version"] == "excavator_training_split.v2"
+    assert persisted["grouping_key"] == "source.episode_id"
     assert len(persisted["source_dataset_sha256"]) == 64
     assert persisted["train_lerobot_episode_indices"] == list(
         split.train_lerobot_episode_indices
@@ -211,6 +386,56 @@ def test_materialize_training_split_recomputes_subset_stats(
     assert materialized.provenance_path.is_file()
 
 
+def test_materialize_training_split_accepts_legacy_v1_manifest(
+    tmp_path, rgb_episode_factory
+):
+    episodes = [
+        rgb_episode_factory(episode_id=f"episode_{index:04d}", step_count=3)
+        for index in range(4)
+    ]
+    dataset_root = tmp_path / "dataset"
+    repo_id = "local/legacy_v1_split"
+    convert_episodes(episodes, dataset_root, repo_id)
+    manifest_path = tmp_path / "training_split.json"
+    prepare_training_split(
+        dataset_root=dataset_root,
+        repo_id=repo_id,
+        output_path=manifest_path,
+        train_ratio=0.5,
+        seed=5,
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    legacy_fields = {
+        "schema_version",
+        "dataset_root",
+        "repo_id",
+        "seed",
+        "train_ratio",
+        "train_source_episode_ids",
+        "validation_source_episode_ids",
+        "train_lerobot_episode_indices",
+        "validation_lerobot_episode_indices",
+        "lerobot_episode_to_source",
+        "source_dataset_sha256",
+    }
+    legacy_manifest = {
+        key: value for key, value in manifest.items() if key in legacy_fields
+    }
+    legacy_manifest["schema_version"] = "excavator_training_split.v1"
+    manifest_path.write_text(json.dumps(legacy_manifest), encoding="utf-8")
+
+    materialized = materialize_training_split(
+        manifest_path=manifest_path,
+        output_root=tmp_path / "splits",
+    )
+
+    provenance = json.loads(materialized.provenance_path.read_text(encoding="utf-8"))
+    assert provenance["schema_version"] == "excavator_materialized_training_split.v1"
+    assert set(provenance["train_source_episode_ids"]) == set(
+        legacy_manifest["train_source_episode_ids"]
+    )
+
+
 def test_materialize_training_split_cleans_staging_after_failure(
     tmp_path, rgb_episode_factory, monkeypatch
 ):
@@ -267,7 +492,76 @@ def test_materialize_training_split_rejects_tampered_episode_mapping(
     manifest["lerobot_episode_to_source"]["0"] = "episode_tampered"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="mapping no longer matches"):
+    with pytest.raises(
+        ValueError, match="invalid training split manifest|mapping no longer matches"
+    ):
+        materialize_training_split(
+            manifest_path=manifest_path,
+            output_root=tmp_path / "splits",
+        )
+
+
+def test_materialize_training_split_rejects_tampered_soil_group_mapping(
+    tmp_path, rgb_episode_factory
+):
+    episodes = []
+    for index in range(1, 5):
+        episode = rgb_episode_factory(
+            episode_id=f"episode_{index:04d}",
+            step_count=2,
+            dual_camera=True,
+        )
+        _set_collection_protocol(
+            episode,
+            task_variant="dig_only",
+            soil_reset_block_id=f"block_{index:02d}",
+        )
+        episodes.append(episode)
+    dataset_root = tmp_path / "dataset"
+    repo_id = "local/tampered_soil_groups"
+    convert_episodes(episodes, dataset_root, repo_id)
+    manifest_path = tmp_path / "training_split.json"
+    prepare_training_split(
+        dataset_root=dataset_root,
+        repo_id=repo_id,
+        output_path=manifest_path,
+        train_ratio=0.5,
+        seed=3,
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    group_id = next(iter(manifest["group_to_task_variant"]))
+    manifest["group_to_task_variant"][group_id] = "tampered_variant"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="grouping no longer matches"):
+        materialize_training_split(
+            manifest_path=manifest_path,
+            output_root=tmp_path / "splits",
+        )
+
+
+def test_materialize_training_split_rejects_source_dataset_content_drift(
+    tmp_path, rgb_episode_factory
+):
+    episodes = [
+        rgb_episode_factory(episode_id=f"episode_{index:04d}", step_count=2)
+        for index in range(2)
+    ]
+    dataset_root = tmp_path / "dataset"
+    repo_id = "local/source_content_drift"
+    convert_episodes(episodes, dataset_root, repo_id)
+    manifest_path = tmp_path / "training_split.json"
+    prepare_training_split(
+        dataset_root=dataset_root,
+        repo_id=repo_id,
+        output_path=manifest_path,
+    )
+    (dataset_root / "unexpected_after_split.txt").write_text(
+        "dataset changed",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="content no longer matches"):
         materialize_training_split(
             manifest_path=manifest_path,
             output_root=tmp_path / "splits",
@@ -328,6 +622,10 @@ def test_materialize_training_split_rejects_parent_leak_in_manifest(
         ("validation_lerobot_episode_indices", [0.5]),
         ("lerobot_episode_to_source", []),
         ("source_dataset_sha256", "not-a-sha256"),
+        ("grouping_key", 42),
+        ("train_group_ids", "episode_0001"),
+        ("source_episode_to_group", []),
+        ("group_to_task_variant", {"episode_0001": ""}),
     ],
 )
 def test_materialize_training_split_rejects_malformed_manifest_types(

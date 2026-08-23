@@ -42,7 +42,7 @@ class ZeroSoakOperations(Protocol):
 
     def start_collector(self) -> None: ...
 
-    def start_episode(self) -> str: ...
+    def start_episode(self, *, recording_purpose: str) -> str: ...
 
     def start_teleop(self) -> None: ...
 
@@ -77,7 +77,7 @@ def run_zero_command_soak(
         operations.preflight()
         operations.start_collector()
         collector_started = True
-        episode_path = operations.start_episode()
+        episode_path = operations.start_episode(recording_purpose="diagnostic")
         episode_active = True
         operations.start_teleop()
         teleop_started = True
@@ -186,10 +186,21 @@ def _outside_rate(name: str, value: float) -> bool:
         "stm32_telemetry": (18.0, 22.0),
         "new_sensor_state": (8.0, 12.0),
         "expert_action": (18.0, 22.0),
-        "camera_front": (25.0, 35.0),
     }
-    lower, upper = limits[name]
+    lower, upper = (25.0, 35.0) if name.startswith("camera_") else limits[name]
     return not lower <= value <= upper
+
+
+def _read_camera_rows(episode: Path, camera_id: str) -> list[dict[str, str]]:
+    path = episode / f"camera_{camera_id}_timestamps.csv"
+    try:
+        with path.open(newline="", encoding="utf-8") as stream:
+            rows = list(csv.DictReader(stream))
+    except OSError as exc:
+        raise ValueError(f"cannot read {path.name}: {exc}") from exc
+    if not rows:
+        raise ValueError(f"{path.name} contains no records")
+    return rows
 
 
 def inspect_zero_command_episode(episode_path: str | Path) -> ZeroSoakReport:
@@ -200,15 +211,17 @@ def inspect_zero_command_episode(episode_path: str | Path) -> ZeroSoakReport:
     joystick = _read_jsonl(episode / "joystick_raw.jsonl")
     actions = _read_jsonl(episode / "expert_action.jsonl")
     commands = _read_jsonl(episode / "command_tx.jsonl")
-    try:
-        with (episode / "camera_front_timestamps.csv").open(
-            newline="", encoding="utf-8"
-        ) as stream:
-            cameras = list(csv.DictReader(stream))
-    except OSError as exc:
-        raise ValueError(f"cannot read camera_front_timestamps.csv: {exc}") from exc
-    if not cameras:
-        raise ValueError("camera_front_timestamps.csv contains no records")
+    metadata_cameras = metadata.get("cameras")
+    camera_ids = ["front"]
+    if (
+        isinstance(metadata_cameras, dict)
+        and "dump" in metadata_cameras
+    ) or (episode / "camera_dump_timestamps.csv").is_file():
+        camera_ids.append("dump")
+    camera_rows = {
+        camera_id: _read_camera_rows(episode, camera_id)
+        for camera_id in camera_ids
+    }
 
     parsed_stm32 = [
         record
@@ -229,9 +242,15 @@ def inspect_zero_command_episode(episode_path: str | Path) -> ZeroSoakReport:
         "expert_action": _rate_hz(
             [int(record["action_stamp_monotonic_ns"]) for record in actions]
         ),
-        "camera_front": _rate_hz(
-            [int(record["camera_stamp_monotonic_ns"]) for record in cameras]
-        ),
+        **{
+            f"camera_{camera_id}": _rate_hz(
+                [
+                    int(record["camera_stamp_monotonic_ns"])
+                    for record in rows
+                ]
+            )
+            for camera_id, rows in camera_rows.items()
+        },
     }
     telemetry_stamps_ns = [
         int(record["orin_receive_monotonic_ns"]) for record in parsed_stm32
@@ -294,13 +313,18 @@ def inspect_zero_command_episode(episode_path: str | Path) -> ZeroSoakReport:
                     and record.get("joystick_sample_seq") is not None
                 ]
             ),
-            _sequence_issues(
-                [int(record["camera_frame_index"]) for record in cameras]
+            *(
+                _sequence_issues(
+                    [int(record["camera_frame_index"]) for record in rows]
+                )
+                for rows in camera_rows.values()
             ),
         )
     )
 
     failures: list[str] = []
+    if metadata.get("recording_purpose") != "diagnostic":
+        failures.append("Episode recording_purpose must be diagnostic")
     if (
         metadata.get("status") != "aborted"
         or metadata.get("failure_reason") != "zero_command_soak_complete"

@@ -7,9 +7,8 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-from .raw_episode import ACTION_FIELDS, validate_episode
+from .raw_episode import ACTION_FIELDS, EpisodeValidationReport, validate_episode
 
 
 STATE_FIELDS = (
@@ -25,6 +24,23 @@ STATE_FIELDS = (
     "swing_angle_rad",
     "swing_vel_radps",
 )
+
+
+def _load_lerobot_dataset_class():
+    """Import the optional training dependency only for dataset conversion."""
+
+    override = globals().get("LeRobotDataset")
+    if override is not None:
+        return override
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    return LeRobotDataset
+
+
+def __getattr__(name: str):
+    if name == "LeRobotDataset":
+        return _load_lerobot_dataset_class()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 @dataclass(frozen=True)
@@ -65,7 +81,7 @@ def _verify_converted_dataset(
     expected_frame_count: int,
     expected_source_episode_ids: set[str],
 ) -> None:
-    converted = LeRobotDataset(repo_id=repo_id, root=root)
+    converted = _load_lerobot_dataset_class()(repo_id=repo_id, root=root)
     if converted.num_episodes != expected_episode_count:
         raise RuntimeError(
             "converted dataset episode count mismatch: "
@@ -85,6 +101,29 @@ def _verify_converted_dataset(
         )
 
 
+def _resolve_camera_roles(
+    reports: list[EpisodeValidationReport],
+    requested: tuple[str, ...] | None,
+) -> tuple[str, ...]:
+    if requested is not None:
+        if requested not in {("front",), ("front", "dump")}:
+            raise ValueError(
+                "camera_roles must be None, ('front',) or ('front', 'dump')"
+            )
+        return requested
+
+    role_sets = {frozenset(report.cameras) for report in reports}
+    if role_sets == {frozenset({"front"})}:
+        return ("front",)
+    if role_sets == {frozenset({"front", "dump"})}:
+        return ("front", "dump")
+    if len(role_sets) > 1:
+        raise ValueError(
+            "mixed camera contracts require explicit camera_roles"
+        )
+    raise ValueError("unsupported camera contract in validated Episodes")
+
+
 def convert_episodes(
     episode_paths: list[str | Path],
     output_root: str | Path,
@@ -92,10 +131,18 @@ def convert_episodes(
     *,
     fps: int = 10,
     allow_synthetic: bool = False,
+    camera_roles: tuple[str, ...] | None = None,
 ) -> ConversionSummary:
     """Convert validated raw RGB episodes into a local LeRobotDataset v3."""
     if not episode_paths:
         raise ValueError("at least one episode path is required")
+    if camera_roles is not None and camera_roles not in {
+        ("front",),
+        ("front", "dump"),
+    }:
+        raise ValueError(
+            "camera_roles must be None, ('front',) or ('front', 'dump')"
+        )
     validated_paths = [Path(path) for path in episode_paths]
     resolved_paths = [path.resolve() for path in validated_paths]
     if len(set(resolved_paths)) != len(resolved_paths):
@@ -104,6 +151,23 @@ def convert_episodes(
         path: json.loads((path / "episode.json").read_text(encoding="utf-8"))
         for path in validated_paths
     }
+    for path, metadata in metadata_by_path.items():
+        recording_purpose = metadata.get(
+            "recording_purpose", "demonstration"
+        )
+        if recording_purpose != "demonstration":
+            raise ValueError(
+                f"{recording_purpose} Episode is not eligible for training "
+                f"conversion: {path}"
+            )
+        if (
+            metadata.get("status") != "complete"
+            or metadata.get("success") is not True
+        ):
+            raise ValueError(
+                "only a successful complete demonstration is eligible for "
+                f"training conversion: {path}"
+            )
     episode_ids = [metadata.get("episode_id") for metadata in metadata_by_path.values()]
     if len(set(episode_ids)) != len(episode_ids):
         raise ValueError("duplicate episode_id is not allowed")
@@ -129,9 +193,27 @@ def convert_episodes(
     if synthetic_paths and len(synthetic_paths) != len(validated_paths):
         raise ValueError("real and synthetic Episodes must not be mixed in one dataset")
     reports = [validate_episode(path) for path in validated_paths]
-    image_shape = reports[0].image_shape
-    if any(report.image_shape != image_shape for report in reports[1:]):
-        raise ValueError("all episodes must use the same RGB image shape")
+    camera_roles = _resolve_camera_roles(reports, camera_roles)
+    image_shapes: dict[str, tuple[int, int, int]] = {}
+    for camera_role in camera_roles:
+        missing = [
+            report.episode_id
+            for report in reports
+            if camera_role not in report.cameras
+        ]
+        if missing:
+            raise ValueError(
+                f"camera role {camera_role!r} is missing from Episode {missing[0]}"
+            )
+        image_shape = reports[0].cameras[camera_role].image_shape
+        if any(
+            report.cameras[camera_role].image_shape != image_shape
+            for report in reports[1:]
+        ):
+            raise ValueError(
+                f"all episodes must use the same {camera_role} RGB image shape"
+            )
+        image_shapes[camera_role] = image_shape
 
     root = Path(output_root)
     features = {
@@ -145,10 +227,13 @@ def convert_episodes(
             "shape": (len(ACTION_FIELDS),),
             "names": list(ACTION_FIELDS),
         },
-        "observation.images.front": {
-            "dtype": "image",
-            "shape": image_shape,
-            "names": ["height", "width", "channel"],
+        **{
+            f"observation.images.{camera_role}": {
+                "dtype": "image",
+                "shape": image_shapes[camera_role],
+                "names": ["height", "width", "channel"],
+            }
+            for camera_role in camera_roles
         },
         "source.episode_id": {
             "dtype": "string",
@@ -165,8 +250,23 @@ def convert_episodes(
             "shape": (1,),
             "names": None,
         },
+        "source.task_variant": {
+            "dtype": "string",
+            "shape": (1,),
+            "names": None,
+        },
+        "source.soil_reset_block_id": {
+            "dtype": "string",
+            "shape": (1,),
+            "names": None,
+        },
+        "source.dig_point_id": {
+            "dtype": "string",
+            "shape": (1,),
+            "names": None,
+        },
     }
-    dataset = LeRobotDataset.create(
+    dataset = _load_lerobot_dataset_class().create(
         repo_id=repo_id,
         fps=fps,
         features=features,
@@ -180,37 +280,65 @@ def convert_episodes(
     frame_count = 0
     try:
         for episode_path, report in zip(validated_paths, reports, strict=True):
-            metadata = json.loads((episode_path / "episode.json").read_text(encoding="utf-8"))
+            metadata = json.loads(
+                (episode_path / "episode.json").read_text(encoding="utf-8")
+            )
             steps = _read_rows(episode_path / "steps.csv")
-            camera_rows = _read_rows(episode_path / "camera_front_timestamps.csv")
-            image_paths = _causal_image_paths(episode_path, steps, camera_rows)
+            image_paths_by_role = {
+                camera_role: _causal_image_paths(
+                    episode_path,
+                    steps,
+                    _read_rows(
+                        episode_path
+                        / f"camera_{camera_role}_timestamps.csv"
+                    ),
+                )
+                for camera_role in camera_roles
+            }
+            protocol = metadata.get("collection_protocol", {})
+            if not isinstance(protocol, dict):
+                raise ValueError("episode.json collection_protocol must be an object")
+            task_variant = str(protocol.get("task_variant", "unknown"))
+            soil_reset_block_id = str(
+                protocol.get("soil_reset_block_id", "unknown")
+            )
+            dig_point_id = str(protocol.get("dig_point_id", "unknown"))
             task = f"excavate {metadata['material_id']} at configured dig target"
 
             for segment in report.training_segments:
                 start = segment.start_frame_index
                 end = segment.end_frame_index_exclusive
-                for step, image_path in zip(
-                    steps[start:end], image_paths[start:end], strict=True
-                ):
-                    with Image.open(image_path) as image:
-                        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
-                    dataset.add_frame(
-                        {
-                            "observation.state": np.asarray(
-                                [float(step[field]) for field in STATE_FIELDS],
-                                dtype=np.float32,
-                            ),
-                            "action": np.asarray(
-                                [float(step[field]) for field in ACTION_FIELDS],
-                                dtype=np.float32,
-                            ),
-                            "observation.images.front": rgb,
-                            "source.episode_id": metadata["episode_id"],
-                            "source.segment_id": segment.segment_id,
-                            "source.frame_index": step["frame_index"],
-                            "task": task,
-                        }
-                    )
+                for row_offset, step in enumerate(steps[start:end], start=start):
+                    rgb_by_role: dict[str, np.ndarray] = {}
+                    for camera_role in camera_roles:
+                        with Image.open(
+                            image_paths_by_role[camera_role][row_offset]
+                        ) as image:
+                            rgb_by_role[camera_role] = np.asarray(
+                                image.convert("RGB"), dtype=np.uint8
+                            )
+                    frame = {
+                        "observation.state": np.asarray(
+                            [float(step[field]) for field in STATE_FIELDS],
+                            dtype=np.float32,
+                        ),
+                        "action": np.asarray(
+                            [float(step[field]) for field in ACTION_FIELDS],
+                            dtype=np.float32,
+                        ),
+                        "source.episode_id": metadata["episode_id"],
+                        "source.segment_id": segment.segment_id,
+                        "source.frame_index": step["frame_index"],
+                        "source.task_variant": task_variant,
+                        "source.soil_reset_block_id": soil_reset_block_id,
+                        "source.dig_point_id": dig_point_id,
+                        "task": task,
+                        **{
+                            f"observation.images.{camera_role}": rgb
+                            for camera_role, rgb in rgb_by_role.items()
+                        },
+                    }
+                    dataset.add_frame(frame)
                     frame_count += 1
                 dataset.save_episode()
     finally:

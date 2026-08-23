@@ -5,9 +5,14 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping
 
 from PIL import Image
 
+from .collector.config import (
+    validate_collection_protocol,
+    validate_recording_purpose,
+)
 from .training_segments import TRAINING_SEGMENTS_SCHEMA_VERSION
 
 
@@ -50,6 +55,9 @@ ACTION_FIELDS = (
     "action_bucket",
     "action_swing",
 )
+EPISODE_SCHEMA_VERSION = "excavator_demo_raw.v2"
+LEGACY_EPISODE_SCHEMA_VERSION = "excavator_demo_raw.v1"
+_CAMERA_RATE_TOLERANCE_RATIO = 1.0 / 6.0
 
 
 class EpisodeValidationError(ValueError):
@@ -64,6 +72,15 @@ class TrainingSegment:
 
 
 @dataclass(frozen=True)
+class CameraValidationReport:
+    camera_id: str
+    frame_count: int
+    estimated_rate_hz: float
+    image_shape: tuple[int, int, int]
+    max_age_ms: float
+
+
+@dataclass(frozen=True)
 class EpisodeValidationReport:
     episode_id: str
     step_count: int
@@ -73,6 +90,8 @@ class EpisodeValidationReport:
     max_action_age_ms: float
     training_segment_count: int
     training_segments: tuple[TrainingSegment, ...]
+    cameras: Mapping[str, CameraValidationReport]
+    max_intercamera_skew_ms: float
 
 
 def _read_csv(path: Path, required_fields: tuple[str, ...]) -> list[dict[str, str]]:
@@ -100,8 +119,14 @@ def _load_metadata(path: Path) -> dict:
     episode_id = metadata.get("episode_id")
     if not isinstance(episode_id, str) or not episode_id:
         raise EpisodeValidationError("episode.json episode_id must be non-empty text")
-    if metadata.get("schema_version") != "excavator_demo_raw.v1":
-        raise EpisodeValidationError("episode.json schema_version must be excavator_demo_raw.v1")
+    if metadata.get("schema_version") not in {
+        EPISODE_SCHEMA_VERSION,
+        LEGACY_EPISODE_SCHEMA_VERSION,
+    }:
+        raise EpisodeValidationError(
+            "episode.json schema_version must be "
+            f"{EPISODE_SCHEMA_VERSION} or {LEGACY_EPISODE_SCHEMA_VERSION}"
+        )
     if metadata.get("task") != "ExecuteDig":
         raise EpisodeValidationError("episode.json task must be ExecuteDig")
     status = metadata.get("status")
@@ -113,9 +138,54 @@ def _load_metadata(path: Path) -> dict:
         raise EpisodeValidationError(
             "episode.json status must be complete, failed, or aborted"
         )
-    camera = metadata.get("camera_front")
-    if not isinstance(camera, dict):
-        raise EpisodeValidationError("episode.json camera_front must be an object")
+    schema_version = metadata["schema_version"]
+    try:
+        recording_purpose = validate_recording_purpose(
+            metadata.get("recording_purpose", "demonstration")
+        )
+    except ValueError as exc:
+        raise EpisodeValidationError(str(exc)) from exc
+    if schema_version == LEGACY_EPISODE_SCHEMA_VERSION:
+        camera_front = metadata.get("camera_front")
+        if not isinstance(camera_front, dict):
+            raise EpisodeValidationError("episode.json camera_front must be an object")
+        cameras = {"front": camera_front}
+    else:
+        cameras = metadata.get("cameras")
+        if not isinstance(cameras, dict):
+            raise EpisodeValidationError("episode.json cameras must be an object")
+        if "front" not in cameras:
+            raise EpisodeValidationError("episode.json cameras.front must be an object")
+        unsupported = set(cameras) - {"front", "dump"}
+        if unsupported:
+            raise EpisodeValidationError(
+                "episode.json cameras contains unsupported roles: "
+                + ", ".join(sorted(unsupported))
+            )
+        protocol = metadata.get("collection_protocol")
+        if (
+            recording_purpose == "demonstration"
+            and protocol is None
+            and "dump" in cameras
+        ):
+            raise EpisodeValidationError(
+                "dual-camera episode.json requires collection_protocol"
+            )
+        if protocol is not None:
+            if not isinstance(protocol, dict):
+                raise EpisodeValidationError(
+                    "episode.json collection_protocol must be an object"
+                )
+            try:
+                validate_collection_protocol(
+                    task_variant=protocol.get("task_variant"),
+                    soil_reset_block_id=protocol.get("soil_reset_block_id"),
+                    dig_point_id=protocol.get("dig_point_id"),
+                )
+            except ValueError as exc:
+                raise EpisodeValidationError(
+                    f"invalid collection_protocol: {exc}"
+                ) from exc
     required_camera_fields = (
         "device_id",
         "width",
@@ -124,14 +194,150 @@ def _load_metadata(path: Path) -> dict:
         "pixel_format",
         "timestamp_clock",
     )
-    missing = [field for field in required_camera_fields if field not in camera]
-    if missing:
-        raise EpisodeValidationError(
-            f"episode.json camera_front missing fields: {', '.join(missing)}"
-        )
-    if camera["timestamp_clock"] != "CLOCK_MONOTONIC":
-        raise EpisodeValidationError("camera_front timestamp_clock must be CLOCK_MONOTONIC")
+    for camera_id, camera in cameras.items():
+        if not isinstance(camera, dict):
+            raise EpisodeValidationError(
+                f"episode.json cameras.{camera_id} must be an object"
+            )
+        missing = [name for name in required_camera_fields if name not in camera]
+        if missing:
+            raise EpisodeValidationError(
+                f"episode.json cameras.{camera_id} missing fields: "
+                + ", ".join(missing)
+            )
+        if camera["timestamp_clock"] != "CLOCK_MONOTONIC":
+            raise EpisodeValidationError(
+                f"cameras.{camera_id} timestamp_clock must be CLOCK_MONOTONIC"
+            )
+    metadata["_cameras_by_role"] = cameras
     return metadata
+
+
+def _validate_camera_stream(
+    *,
+    episode_path: Path,
+    camera_id: str,
+    camera_metadata: Mapping[str, object],
+    state_timestamps: list[int],
+    max_camera_age_ms: float,
+) -> tuple[
+    CameraValidationReport,
+    tuple[int, ...],
+]:
+    stream_name = f"camera_{camera_id}"
+    rows = _read_csv(
+        episode_path / f"{stream_name}_timestamps.csv", CAMERA_FIELDS
+    )
+    frame_indices = [
+        _as_int(row["camera_frame_index"], "camera_frame_index") for row in rows
+    ]
+    if frame_indices != list(range(len(rows))):
+        raise EpisodeValidationError(
+            f"{stream_name}_timestamps.csv frame indices must be contiguous from zero"
+        )
+    camera_timestamps = [
+        _as_int(row["camera_stamp_monotonic_ns"], "camera_stamp_monotonic_ns")
+        for row in rows
+    ]
+    if any(
+        current <= previous
+        for previous, current in zip(camera_timestamps, camera_timestamps[1:])
+    ):
+        raise EpisodeValidationError(
+            f"{stream_name}_timestamps.csv camera_stamp_monotonic_ns must strictly increase"
+        )
+
+    image_shape: tuple[int, int, int] | None = None
+    for row in rows:
+        relative_path = Path(row["image_path"])
+        if (
+            relative_path.is_absolute()
+            or ".." in relative_path.parts
+            or not relative_path.parts
+            or relative_path.parts[0] != stream_name
+        ):
+            raise EpisodeValidationError(
+                f"{camera_id} camera image path must be inside {stream_name}"
+            )
+        image_path = episode_path / relative_path
+        if not image_path.is_file():
+            raise EpisodeValidationError(f"camera image does not exist: {row['image_path']}")
+        with Image.open(image_path) as image:
+            rgb = image.convert("RGB")
+            current_shape = (rgb.height, rgb.width, 3)
+        if image_shape is None:
+            image_shape = current_shape
+        elif current_shape != image_shape:
+            raise EpisodeValidationError(
+                f"all {camera_id} camera images must have the same shape"
+            )
+
+    camera_index = 0
+    camera_ages_ms: list[float] = []
+    causal_timestamps: list[int] = []
+    for state_timestamp in state_timestamps:
+        while (
+            camera_index + 1 < len(camera_timestamps)
+            and camera_timestamps[camera_index + 1] <= state_timestamp
+        ):
+            camera_index += 1
+        camera_timestamp = camera_timestamps[camera_index]
+        if camera_timestamp > state_timestamp:
+            raise EpisodeValidationError(
+                f"no causal {camera_id} camera frame exists for the first state"
+            )
+        causal_timestamps.append(camera_timestamp)
+        camera_ages_ms.append((state_timestamp - camera_timestamp) / 1_000_000.0)
+
+    oldest_camera_age_ms = max(camera_ages_ms)
+    if oldest_camera_age_ms > max_camera_age_ms:
+        raise EpisodeValidationError(
+            f"{camera_id} camera frame age {oldest_camera_age_ms:.3f} ms exceeds "
+            f"{max_camera_age_ms:.3f} ms"
+        )
+
+    assert image_shape is not None
+    expected_shape = (
+        _as_int(str(camera_metadata["height"]), f"cameras.{camera_id}.height"),
+        _as_int(str(camera_metadata["width"]), f"cameras.{camera_id}.width"),
+        3,
+    )
+    if image_shape != expected_shape:
+        raise EpisodeValidationError(
+            f"{camera_id} camera image shape {image_shape} does not match metadata "
+            f"{expected_shape}"
+        )
+    estimated_rate_hz = 0.0
+    if len(camera_timestamps) > 1:
+        duration_s = (camera_timestamps[-1] - camera_timestamps[0]) / 1e9
+        if duration_s > 0.0:
+            estimated_rate_hz = (len(camera_timestamps) - 1) / duration_s
+    nominal_rate_hz = _as_float(
+        str(camera_metadata["nominal_fps"]),
+        f"cameras.{camera_id}.nominal_fps",
+    )
+    if nominal_rate_hz <= 0.0:
+        raise EpisodeValidationError(
+            f"cameras.{camera_id}.nominal_fps must be positive"
+        )
+    lower_rate_hz = nominal_rate_hz * (1.0 - _CAMERA_RATE_TOLERANCE_RATIO)
+    upper_rate_hz = nominal_rate_hz * (1.0 + _CAMERA_RATE_TOLERANCE_RATIO)
+    if not lower_rate_hz <= estimated_rate_hz <= upper_rate_hz:
+        raise EpisodeValidationError(
+            f"{camera_id} camera rate {estimated_rate_hz:.3f} Hz is outside "
+            f"[{lower_rate_hz:.3f}, {upper_rate_hz:.3f}] Hz for nominal "
+            f"{nominal_rate_hz:.3f} Hz"
+        )
+    return (
+        CameraValidationReport(
+            camera_id=camera_id,
+            frame_count=len(rows),
+            estimated_rate_hz=estimated_rate_hz,
+            image_shape=image_shape,
+            max_age_ms=oldest_camera_age_ms,
+        ),
+        tuple(causal_timestamps),
+    )
 
 
 def _load_quality_report(path: Path) -> dict:
@@ -320,6 +526,7 @@ def validate_episode(
     *,
     max_camera_age_ms: float = 120.0,
     max_action_age_ms: float = 100.0,
+    max_intercamera_skew_ms: float = 50.0,
 ) -> EpisodeValidationReport:
     """Validate one timestamped RGB demonstration episode."""
     episode_path = Path(path)
@@ -330,8 +537,6 @@ def validate_episode(
     training_segments = _validate_training_segments(
         episode_path, episode_id, steps, quality
     )
-    camera_rows = _read_csv(episode_path / "camera_front_timestamps.csv", CAMERA_FIELDS)
-
     frame_indices = [_as_int(row["frame_index"], "frame_index") for row in steps]
     if frame_indices != list(range(len(steps))):
         raise EpisodeValidationError("steps.csv frame_index must be contiguous from zero")
@@ -373,59 +578,42 @@ def validate_episode(
             f"{max_action_age_ms:.3f} ms"
         )
 
-    camera_timestamps = [
-        _as_int(row["camera_stamp_monotonic_ns"], "camera_stamp_monotonic_ns") for row in camera_rows
-    ]
-    if any(current <= previous for previous, current in zip(camera_timestamps, camera_timestamps[1:])):
-        raise EpisodeValidationError("camera_stamp_monotonic_ns must strictly increase")
-
-    image_shape: tuple[int, int, int] | None = None
-    for row in camera_rows:
-        image_path = episode_path / row["image_path"]
-        if not image_path.is_file():
-            raise EpisodeValidationError(f"camera image does not exist: {row['image_path']}")
-        with Image.open(image_path) as image:
-            rgb = image.convert("RGB")
-            current_shape = (rgb.height, rgb.width, 3)
-        if image_shape is None:
-            image_shape = current_shape
-        elif current_shape != image_shape:
-            raise EpisodeValidationError("all camera images must have the same shape")
-
-    camera_index = 0
-    camera_ages_ms: list[float] = []
-    for state_timestamp in state_timestamps:
-        while camera_index + 1 < len(camera_timestamps) and camera_timestamps[camera_index + 1] <= state_timestamp:
-            camera_index += 1
-        camera_timestamp = camera_timestamps[camera_index]
-        if camera_timestamp > state_timestamp:
-            raise EpisodeValidationError("no causal camera frame exists for the first state")
-        camera_ages_ms.append((state_timestamp - camera_timestamp) / 1_000_000.0)
-
-    oldest_camera_age_ms = max(camera_ages_ms)
-    if oldest_camera_age_ms > max_camera_age_ms:
-        raise EpisodeValidationError(
-            f"camera frame age {oldest_camera_age_ms:.3f} ms exceeds {max_camera_age_ms:.3f} ms"
+    camera_reports: dict[str, CameraValidationReport] = {}
+    causal_camera_timestamps: dict[str, tuple[int, ...]] = {}
+    for camera_id, camera_metadata in metadata["_cameras_by_role"].items():
+        report, causal_timestamps = _validate_camera_stream(
+            episode_path=episode_path,
+            camera_id=camera_id,
+            camera_metadata=camera_metadata,
+            state_timestamps=state_timestamps,
+            max_camera_age_ms=max_camera_age_ms,
         )
+        camera_reports[camera_id] = report
+        causal_camera_timestamps[camera_id] = causal_timestamps
 
-    assert image_shape is not None
-    camera_metadata = metadata["camera_front"]
-    expected_shape = (
-        _as_int(str(camera_metadata["height"]), "camera_front.height"),
-        _as_int(str(camera_metadata["width"]), "camera_front.width"),
-        3,
-    )
-    if image_shape != expected_shape:
-        raise EpisodeValidationError(
-            f"camera image shape {image_shape} does not match metadata {expected_shape}"
-        )
+    max_intercamera_skew = 0.0
+    if len(causal_camera_timestamps) > 1:
+        for timestamps in zip(*causal_camera_timestamps.values(), strict=True):
+            max_intercamera_skew = max(
+                max_intercamera_skew,
+                (max(timestamps) - min(timestamps)) / 1_000_000.0,
+            )
+        if max_intercamera_skew > max_intercamera_skew_ms:
+            raise EpisodeValidationError(
+                f"inter-camera skew {max_intercamera_skew:.3f} ms exceeds "
+                f"{max_intercamera_skew_ms:.3f} ms"
+            )
+
+    front = camera_reports["front"]
     return EpisodeValidationReport(
         episode_id=episode_id,
         step_count=len(steps),
-        camera_frame_count=len(camera_rows),
-        image_shape=image_shape,
-        max_camera_age_ms=oldest_camera_age_ms,
+        camera_frame_count=front.frame_count,
+        image_shape=front.image_shape,
+        max_camera_age_ms=front.max_age_ms,
         max_action_age_ms=oldest_action_age_ms,
         training_segment_count=len(training_segments),
         training_segments=training_segments,
+        cameras=dict(camera_reports),
+        max_intercamera_skew_ms=max_intercamera_skew,
     )

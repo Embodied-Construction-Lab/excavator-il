@@ -17,6 +17,7 @@ from excavator_il.act_runtime import (
     warmup_act_policy_session,
 )
 from excavator_il.collector.camera import RgbCameraFrame
+from excavator_il.dig_policy import ACTION_ORDER, DigPolicyObservation
 from excavator_il.stm32_protocol import Stm32TelemetryFrame
 
 
@@ -71,6 +72,118 @@ def test_policy_session_converts_live_observation_and_uses_lerobot_select_action
     assert float(batch["observation.images.front"].max()) == pytest.approx(17 / 255)
 
 
+def test_lerobot_act_adapter_exposes_the_dig_policy_contract_and_lifecycle():
+    policy = _Policy()
+    adapter = ActPolicySession(
+        policy=policy,
+        preprocessor=lambda batch: batch,
+        postprocessor=lambda action: action,
+        device="cpu",
+    )
+
+    warmup_action = adapter.warmup()
+
+    assert adapter.descriptor.backend_id == "lerobot_act"
+    assert adapter.descriptor.action_order == ACTION_ORDER
+    assert adapter.descriptor.output_semantics == "manual_action_normalized"
+    assert warmup_action == pytest.approx((0.1, -0.2, 0.3, -0.4))
+    assert tuple(policy.selected_batches[-1]["observation.images.front"].shape) == (
+        1,
+        3,
+        2,
+        3,
+    )
+    assert policy.reset_count >= 2
+
+
+def test_lerobot_act_adapter_consumes_named_policy_observation():
+    policy = _Policy()
+    adapter = ActPolicySession(
+        policy=policy,
+        preprocessor=lambda batch: batch,
+        postprocessor=lambda action: action,
+        device="cpu",
+    )
+    observation = DigPolicyObservation(
+        state_by_name={
+            name: float(index)
+            for index, name in enumerate(
+                (
+                    "boom_pos_m",
+                    "stick_pos_m",
+                    "bucket_pos_m",
+                    "boom_vel_mps",
+                    "stick_vel_mps",
+                    "bucket_vel_mps",
+                    "boom_angle_rad",
+                    "arm_angle_rad",
+                    "bucket_angle_rad",
+                    "swing_angle_rad",
+                    "swing_vel_radps",
+                )
+            )
+        },
+        rgb_by_role={
+            "front": np.arange(2 * 3 * 3, dtype=np.uint8).reshape(2, 3, 3)
+        },
+        state_monotonic_ns=2_000,
+        camera_monotonic_ns_by_role={"front": 1_900},
+    )
+
+    action = adapter.select_action(observation)
+
+    assert action == pytest.approx((0.1, -0.2, 0.3, -0.4))
+    assert tuple(policy.selected_batches[-1]["observation.state"][0]) == tuple(
+        float(index) for index in range(11)
+    )
+
+
+def test_lerobot_act_adapter_uses_both_named_rgb_roles_for_a_dual_camera_checkpoint():
+    policy = _Policy()
+    policy.config.input_features["observation.images.dump"] = SimpleNamespace(
+        shape=(3, 2, 3)
+    )
+    adapter = ActPolicySession(
+        policy=policy,
+        preprocessor=lambda batch: batch,
+        postprocessor=lambda action: action,
+        device="cpu",
+    )
+    front = np.full((2, 3, 3), 10, dtype=np.uint8)
+    dump = np.full((2, 3, 3), 20, dtype=np.uint8)
+    observation = ActObservation(
+        state=(0.0,) * 11,
+        front_rgb=front,
+        state_monotonic_ns=2_000,
+        camera_monotonic_ns=1_900,
+        extra_rgb_by_role={"dump": dump},
+        extra_camera_monotonic_ns_by_role={"dump": 1_850},
+    )
+
+    adapter.select_action(observation)
+
+    batch = policy.selected_batches[-1]
+    assert set(batch) == {
+        "observation.state",
+        "observation.images.front",
+        "observation.images.dump",
+    }
+    assert float(batch["observation.images.front"].mean()) == pytest.approx(10 / 255)
+    assert float(batch["observation.images.dump"].mean()) == pytest.approx(20 / 255)
+
+
+def test_act_observation_rejects_a_state_that_cannot_form_the_named_contract():
+    observation = ActObservation(
+        state=(0.0,) * 10,
+        front_rgb=np.zeros((2, 3, 3), dtype=np.uint8),
+        state_monotonic_ns=2_000,
+        camera_monotonic_ns=1_900,
+    )
+
+    with pytest.raises(ValueError, match="11 finite values"):
+        observation.to_policy_observation()
+
+
 def test_policy_session_rejects_temporal_ensemble_checkpoint():
     policy = _Policy()
     policy.config.temporal_ensemble_coeff = 0.01
@@ -90,7 +203,7 @@ def test_policy_session_rejects_extra_image_feature():
         shape=(3, 2, 3)
     )
 
-    with pytest.raises(ValueError, match="single front RGB"):
+    with pytest.raises(ValueError, match="named front RGB"):
         ActPolicySession(
             policy=policy,
             preprocessor=lambda batch: batch,
@@ -203,7 +316,24 @@ def test_live_warmup_uses_real_observation_budget_and_resets_action_queue():
     action = engine.warmup_live_observation(observation)
 
     assert action == (0.1, -0.2, 0.3, -0.4)
-    assert session.seen == [observation]
+    assert len(session.seen) == 1
+    assert session.seen[0].state_by_name == {
+        name: 0.0
+        for name in (
+            "boom_pos_m",
+            "stick_pos_m",
+            "bucket_pos_m",
+            "boom_vel_mps",
+            "stick_vel_mps",
+            "bucket_vel_mps",
+            "boom_angle_rad",
+            "arm_angle_rad",
+            "bucket_angle_rad",
+            "swing_angle_rad",
+            "swing_vel_radps",
+        )
+    }
+    assert np.array_equal(session.seen[0].rgb_by_role["front"], observation.front_rgb)
     assert session.reset_count == 1
 
 

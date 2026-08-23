@@ -1,0 +1,26 @@
+{
+  "schema_version": "excavator_collection_campaign_provenance.v1",
+  "campaign_id": "icra2027-dual-rgb-campaign-v1",
+  "frozen_baseline": {
+    "baseline_id": "icra2027-live-baseline-20260823",
+    "tag": "icra2027-live-baseline-20260823",
+    "repository_commits": {
+      "excavator_il": "9ce7fbe2a2db47d415fec2e01b1794de94dfc7da",
+      "excavator_orin_runtime": "83d2942cd667fdbceeb312813f2e846d1739dc0a",
+      "airylidar": "7327e4d22cf3d7db7440bef08ca5821bacedcf5f",
+      "f407": "ed2d8548bffe5e7a63973a69a8847f161d75ef31"
+    }
+  },
+  "airylidar_mission_targets": {
+    "repository": "airylidar",
+    "path": "mission/config/excavation_demo.json",
+    "sha256": "72c27e4c9c60adbdff141d66ca74c78f16b978988aa94758bf00dca30687d135"
+  },
+  "f407_firmware_commit": "ed2d8548bffe5e7a63973a69a8847f161d75ef31",
+  "machine_profile_sha256": "4b8c94484389429c2c3871857d928e46ec93fa1b62c66df459336868b00d2f89",
+  "dig_targets_m": {
+    "dig_01": [1.0, 0.26, 0.0],
+    "dig_02": [1.0, 0.0, 0.0],
+    "dig_03": [1.0, -0.26, 0.0]
+  }
+}
