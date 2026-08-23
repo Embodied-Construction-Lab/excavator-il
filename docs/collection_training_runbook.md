@@ -221,6 +221,24 @@ SSH，并重启对应的 VS Code Server/进程，再检查其实际环境。不�
 当前机器开机后液压即具备动作条件，不存在额外的“液压安全锁定/解锁”软件阶段。第一条短
 Episode 从 PC 运行引导脚本，作业区必须无人且急停可立即操作：
 
+在占用 STM32 串口之前，先在 Orin 单独验收两路 RGB 相机。打开现场照明，移除镜头遮挡，并确认
+前视相机能覆盖入铲区域、倾倒相机能覆盖卡车/倾倒区域；然后执行：
+
+```bash
+cd /home/jetson16/workspace_excavator/excavator-il
+conda activate excavator-il-collector
+python scripts/diagnose_dual_camera.py \
+  --duration-s 5 \
+  --output-dir /tmp/icra2027-camera-preflight
+```
+
+该诊断只并发打开 `config/collection.orin.json` 中的 `camera_front` 和 `camera_dump`，不会导入串口
+库、打开 `/dev/ttyTHS1`、创建网络连接或发送动作。只有两路解析到不同物理设备、分辨率均为
+`640×480×3`、实测频率均在 `25–35 Hz`、画面没有达到 99.5% 近黑/近白，并且两路均产生有效
+JPEG 时才返回 0。还必须人工查看 `/tmp/icra2027-camera-preflight/front.jpg` 和 `dump.jpg`，确认
+内容、方向和视野正确；算法通过不能替代这一步。任一路返回失败或画面仍黑暗/被遮挡时，不得开始
+零命令 soak、正式 Pilot 或 200 条 campaign，应先修正照明、相机朝向、遮挡或设备映射再复测。
+
 在发动机关闭、所有采集硬件上电且 deadman 保持释放时，先运行 30 秒零命令 soak：
 
 ```bash
