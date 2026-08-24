@@ -43,6 +43,7 @@ class StepBuildReport:
     disk_queue_drop_count: int
     training_segment_count: int
     excluded_training_step_count: int
+    camera_streams: Mapping[str, Mapping[str, Any]]
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -71,19 +72,19 @@ def _read_optional_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def _read_camera_rows(path: Path) -> list[dict[str, str]]:
     if not path.is_file():
-        raise ValueError("missing required camera_front_timestamps.csv")
+        raise ValueError(f"missing required {path.name}")
     with path.open(newline="", encoding="utf-8") as stream:
         rows = list(csv.DictReader(stream))
     required = {"camera_frame_index", "camera_stamp_monotonic_ns", "image_path"}
     if not rows or not required.issubset(rows[0]):
-        raise ValueError("camera_front_timestamps.csv is empty or missing required columns")
+        raise ValueError(f"{path.name} is empty or missing required columns")
     return rows
 
 
-def _read_episode_id(episode: Path) -> str:
+def _read_episode_contract(episode: Path) -> tuple[str, tuple[str, ...]]:
     metadata_path = episode / "episode.json"
     if not metadata_path.is_file():
-        return episode.name
+        return episode.name, ("front",)
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -93,7 +94,17 @@ def _read_episode_id(episode: Path) -> str:
         raise ValueError("episode.json episode_id must be non-empty text")
     if episode_id != episode.name:
         raise ValueError("episode.json episode_id does not match directory name")
-    return episode_id
+    if metadata.get("schema_version") == "excavator_demo_raw.v2":
+        cameras = metadata.get("cameras")
+        if not isinstance(cameras, dict) or "front" not in cameras:
+            raise ValueError("v2 episode.json cameras must contain front")
+        unsupported = set(cameras) - {"front", "dump"}
+        if unsupported:
+            raise ValueError("v2 episode.json contains unsupported camera roles")
+        roles = tuple(role for role in ("front", "dump") if role in cameras)
+    else:
+        roles = ("front",)
+    return episode_id, roles
 
 
 def _latest_causal(
@@ -190,6 +201,7 @@ def build_steps(
     if max_action_age_ms <= 0.0 or max_camera_age_ms <= 0.0:
         raise ValueError("maximum action and camera ages must be positive")
     episode = Path(episode_path)
+    episode_id, camera_roles = _read_episode_contract(episode)
     stm32_records = _read_jsonl(episode / "stm32_raw.jsonl")
     actions = [
         record
@@ -201,10 +213,20 @@ def build_steps(
     actions = sorted(actions, key=lambda item: int(item["action_stamp_monotonic_ns"]))
     action_stamps = [int(item["action_stamp_monotonic_ns"]) for item in actions]
 
-    camera_rows = _read_camera_rows(episode / "camera_front_timestamps.csv")
-    cameras: list[dict[str, Any]] = [dict(row) for row in camera_rows]
-    cameras = sorted(cameras, key=lambda item: int(item["camera_stamp_monotonic_ns"]))
-    camera_stamps = [int(item["camera_stamp_monotonic_ns"]) for item in cameras]
+    cameras_by_role: dict[str, list[dict[str, Any]]] = {}
+    camera_stamps_by_role: dict[str, list[int]] = {}
+    for camera_role in camera_roles:
+        rows = _read_camera_rows(
+            episode / f"camera_{camera_role}_timestamps.csv"
+        )
+        cameras = sorted(
+            (dict(row) for row in rows),
+            key=lambda item: int(item["camera_stamp_monotonic_ns"]),
+        )
+        cameras_by_role[camera_role] = cameras
+        camera_stamps_by_role[camera_role] = [
+            int(item["camera_stamp_monotonic_ns"]) for item in cameras
+        ]
     joystick_records = _read_optional_jsonl(episode / "joystick_raw.jsonl")
     command_records = _read_optional_jsonl(episode / "command_tx.jsonl")
     safety_events = locate_joystick_timeout_events(
@@ -213,11 +235,12 @@ def build_steps(
         recovery_sample_count=DEFAULT_RECOVERY_JOYSTICK_SAMPLES,
     )
 
-    episode_id = _read_episode_id(episode)
     output_rows: list[dict[str, Any]] = []
     rejection_reasons: Counter[str] = Counter()
     action_ages_ms: list[float] = []
-    camera_ages_ms: list[float] = []
+    camera_ages_ms_by_role: dict[str, list[float]] = {
+        role: [] for role in camera_roles
+    }
     seen_sensor_sequences: set[int] = set()
     new_state_count = 0
 
@@ -246,31 +269,76 @@ def build_steps(
             continue
 
         action = _latest_causal(actions, action_stamps, state_receive_ns)
-        camera = _latest_causal(cameras, camera_stamps, state_receive_ns)
         if action is None:
             rejection_reasons["no_causal_action"] += 1
             continue
-        if camera is None:
-            rejection_reasons["no_causal_camera"] += 1
+        selected_cameras: dict[str, dict[str, Any]] = {}
+        camera_selection_failed = False
+        for camera_role in camera_roles:
+            camera = _latest_causal(
+                cameras_by_role[camera_role],
+                camera_stamps_by_role[camera_role],
+                state_receive_ns,
+            )
+            if camera is None:
+                rejection_reasons[
+                    "no_causal_camera"
+                    if camera_role == "front"
+                    else f"no_causal_camera_{camera_role}"
+                ] += 1
+                camera_selection_failed = True
+                break
+            selected_cameras[camera_role] = camera
+        if camera_selection_failed:
             continue
         action_age_ms = (
             state_receive_ns - int(action["action_stamp_monotonic_ns"])
         ) / 1_000_000.0
-        camera_age_ms = (
-            state_receive_ns - int(camera["camera_stamp_monotonic_ns"])
-        ) / 1_000_000.0
         if action_age_ms > max_action_age_ms:
             rejection_reasons["action_stale"] += 1
             continue
-        if camera_age_ms > max_camera_age_ms:
-            rejection_reasons["camera_stale"] += 1
+        camera_ages = {
+            camera_role: (
+                state_receive_ns
+                - int(camera["camera_stamp_monotonic_ns"])
+            )
+            / 1_000_000.0
+            for camera_role, camera in selected_cameras.items()
+        }
+        invalid_camera_role = next(
+            (
+                camera_role
+                for camera_role, camera_age_ms in camera_ages.items()
+                if camera_age_ms > max_camera_age_ms
+            ),
+            None,
+        )
+        if invalid_camera_role is not None:
+            rejection_reasons[
+                "camera_stale"
+                if invalid_camera_role == "front"
+                else f"camera_{invalid_camera_role}_stale"
+            ] += 1
             continue
-        if not (episode / str(camera["image_path"])).is_file():
-            rejection_reasons["camera_file_missing"] += 1
+        missing_camera_role = next(
+            (
+                camera_role
+                for camera_role, camera in selected_cameras.items()
+                if not (episode / str(camera["image_path"])).is_file()
+            ),
+            None,
+        )
+        if missing_camera_role is not None:
+            rejection_reasons[
+                "camera_file_missing"
+                if missing_camera_role == "front"
+                else f"camera_{missing_camera_role}_file_missing"
+            ] += 1
             continue
 
         action_ages_ms.append(action_age_ms)
-        camera_ages_ms.append(camera_age_ms)
+        for camera_role, camera_age_ms in camera_ages.items():
+            camera_ages_ms_by_role[camera_role].append(camera_age_ms)
         output_rows.append(
             {
                 "episode_id": episode_id,
@@ -315,6 +383,80 @@ def build_steps(
         json.dumps(segment_manifest, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    camera_streams = {
+        camera_role: {
+            "frame_count": len(cameras_by_role[camera_role]),
+            "estimated_rate_hz": _timing_statistics(
+                camera_stamps_by_role[camera_role]
+            )["estimated_rate_hz"],
+            "age_ms": _age_statistics(camera_ages_ms_by_role[camera_role]),
+            "sequence_gap_count": _sequence_health(
+                [
+                    int(record["camera_frame_index"])
+                    for record in cameras_by_role[camera_role]
+                ]
+            )[0],
+            "queue_drop_count": 0,
+        }
+        for camera_role in camera_roles
+    }
+    all_camera_ages_ms = [
+        age
+        for camera_role in camera_roles
+        for age in camera_ages_ms_by_role[camera_role]
+    ]
+    stream_timing = {
+        "stm32_telemetry": _timing_statistics(
+            [
+                int(record["orin_receive_monotonic_ns"])
+                for record in stm32_records
+                if record.get("parse_ok")
+                and isinstance(record.get("telemetry"), dict)
+            ]
+        ),
+        "new_sensor_state": _timing_statistics(
+            [
+                int(record["orin_receive_monotonic_ns"])
+                for record in stm32_records
+                if record.get("parse_ok")
+                and isinstance(record.get("telemetry"), dict)
+                and int(record["telemetry"].get("sensor_is_new", 0)) == 1
+            ]
+        ),
+        "expert_action": _timing_statistics(action_stamps),
+        **{
+            f"camera_{camera_role}": _timing_statistics(
+                camera_stamps_by_role[camera_role]
+            )
+            for camera_role in camera_roles
+        },
+    }
+    sequence_gaps = {
+        "stm32_control": _sequence_health(
+            [
+                int(record["telemetry"]["control_seq"])
+                for record in stm32_records
+                if record.get("parse_ok")
+                and isinstance(record.get("telemetry"), dict)
+            ]
+        )[0],
+        "joystick": _sequence_health(
+            [
+                int(record["joystick_sample_seq"])
+                for record in joystick_records
+                if record.get("parse_ok")
+                and record.get("joystick_sample_seq") is not None
+            ]
+        )[0],
+        # Legacy front alias retained for zero-soak and existing reports.
+        "camera": int(camera_streams["front"]["sequence_gap_count"]),
+        **{
+            f"camera_{camera_role}": int(
+                camera_streams[camera_role]["sequence_gap_count"]
+            )
+            for camera_role in camera_roles
+        },
+    }
     report = StepBuildReport(
         episode_id=episode_id,
         raw_stm32_record_count=len(stm32_records),
@@ -323,46 +465,9 @@ def build_steps(
         rejected_state_count=sum(rejection_reasons.values()),
         rejection_reasons=dict(sorted(rejection_reasons.items())),
         max_action_age_ms=max(action_ages_ms),
-        max_camera_age_ms=max(camera_ages_ms),
-        stream_timing={
-            "stm32_telemetry": _timing_statistics(
-                [
-                    int(record["orin_receive_monotonic_ns"])
-                    for record in stm32_records
-                    if record.get("parse_ok") and isinstance(record.get("telemetry"), dict)
-                ]
-            ),
-            "new_sensor_state": _timing_statistics(
-                [
-                    int(record["orin_receive_monotonic_ns"])
-                    for record in stm32_records
-                    if record.get("parse_ok")
-                    and isinstance(record.get("telemetry"), dict)
-                    and int(record["telemetry"].get("sensor_is_new", 0)) == 1
-                ]
-            ),
-            "expert_action": _timing_statistics(action_stamps),
-            "camera_front": _timing_statistics(camera_stamps),
-        },
-        sequence_gaps={
-            "stm32_control": _sequence_health(
-                [
-                    int(record["telemetry"]["control_seq"])
-                    for record in stm32_records
-                    if record.get("parse_ok") and isinstance(record.get("telemetry"), dict)
-                ]
-            )[0],
-            "joystick": _sequence_health(
-                [
-                    int(record["joystick_sample_seq"])
-                    for record in joystick_records
-                    if record.get("parse_ok") and record.get("joystick_sample_seq") is not None
-                ]
-            )[0],
-            "camera": _sequence_health(
-                [int(record["camera_frame_index"]) for record in cameras]
-            )[0],
-        },
+        max_camera_age_ms=max(all_camera_ages_ms),
+        stream_timing=stream_timing,
+        sequence_gaps=sequence_gaps,
         duplicate_or_out_of_order_count=_sequence_health(
             [
                 int(record["joystick_sample_seq"])
@@ -383,11 +488,12 @@ def build_steps(
         ),
         sensor_invalid_count=int(rejection_reasons.get("sensor_invalid", 0)),
         action_age_ms=_age_statistics(action_ages_ms),
-        camera_age_ms=_age_statistics(camera_ages_ms),
+        camera_age_ms=_age_statistics(camera_ages_ms_by_role["front"]),
         camera_queue_drop_count=0,
         disk_queue_drop_count=0,
         training_segment_count=len(segment_manifest["segments"]),
         excluded_training_step_count=sum(rejection_reasons.values()),
+        camera_streams=camera_streams,
     )
     (episode / "quality_report.json").write_text(
         json.dumps(asdict(report), ensure_ascii=False, indent=2) + "\n",

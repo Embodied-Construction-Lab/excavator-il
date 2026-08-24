@@ -1,0 +1,27 @@
+{
+  "schema_version": "excavator_collection_evidence_config.v2",
+  "evidence_root": "/home/jetson16/workspace_excavator/data/icra2027-dual-rgb-campaign-v1/experiment-runs",
+  "collection_config": "collection.orin.json",
+  "machine_profile": "/home/jetson16/workspace_excavator/shared/machine_profile.json",
+  "campaign_provenance": "/home/jetson16/workspace_excavator/excavator-il/config/icra2027_collection_campaign_provenance.json",
+  "repository_paths": {
+    "excavator_il": ".."
+  },
+  "policy_ids": {
+    "collection_policy": "human_expert_dual_stick.v1"
+  },
+  "host_topology": {
+    "pc": {
+      "host": "192.168.50.1",
+      "role": "operator_ui_and_joystick"
+    },
+    "orin": {
+      "host": "192.168.50.2",
+      "role": "dual_rgb_collector"
+    },
+    "stm32": {
+      "serial_port": "/dev/ttyTHS1",
+      "role": "low_level_control_and_telemetry"
+    }
+  }
+}

@@ -43,6 +43,15 @@ class _Camera:
         return _Frame()
 
 
+_TARGET_SOURCE_PROVENANCE = {
+    "repository": "airylidar",
+    "path": "mission/config/excavation_demo.json",
+    "sha256": "a" * 64,
+    "commit": "b" * 40,
+    "dirty": False,
+}
+
+
 def _packet(sample_seq=0):
     return encode_joystick_packet(
         JoystickPacket(
@@ -89,10 +98,10 @@ def test_runtime_forwards_packet_records_real_write_and_sends_one_timeout_zero(t
         core=core,
         recorder=recorder,
         serial_port=serial,
-        camera=_Camera(),
+        cameras={"front": _Camera()},
         allowed_pc_host="192.168.0.220",
         joystick_timeout_ms=150,
-        camera_preview=preview,
+        camera_previews={"front": preview},
     )
 
     ack = runtime.handle_joystick(
@@ -128,6 +137,53 @@ def test_runtime_forwards_packet_records_real_write_and_sends_one_timeout_zero(t
     assert records[1]["command_kind"] == "safe_zero:joystick_timeout"
 
 
+def test_runtime_captures_front_and_dump_as_independent_named_streams(tmp_path):
+    recorder = EpisodeRecorder(tmp_path)
+    recorder.start(
+        EpisodeStart(
+            "ExecuteDig",
+            "operator_01",
+            (0.8, 0.1, -0.2),
+            "soil",
+            {},
+            {"device_id": "/dev/video0"},
+            {"device_id": "/dev/v4l/by-path/dump-camera"},
+            "dig_transport_dump",
+            "block_01",
+            "dig_01",
+            "demonstration",
+            _TARGET_SOURCE_PROVENANCE,
+        ),
+        start_wall_ns=1,
+        start_monotonic_ns=2,
+    )
+    preview = LatestJpegFrame()
+    dump_preview = LatestJpegFrame()
+    runtime = CollectorRuntime(
+        core=CollectorCore(
+            recorder=recorder,
+            expected_device_ids=("left-guid", "right-guid"),
+            mapping_id="dual_stick.v1",
+            calibration_id="raw.v1",
+            deadzone=0.15,
+        ),
+        recorder=recorder,
+        serial_port=_Serial(),
+        cameras={"front": _Camera(), "dump": _Camera()},
+        allowed_pc_host="192.168.0.220",
+        joystick_timeout_ms=150,
+        camera_previews={"front": preview, "dump": dump_preview},
+    )
+
+    image_path = runtime.capture_once("front")
+    dump_path = runtime.capture_once("dump")
+
+    assert image_path == "camera_front/000000.jpg"
+    assert dump_path == "camera_dump/000000.jpg"
+    assert preview.wait_after(0, timeout_s=0.01).encoded_image == b"jpeg"
+    assert dump_preview.wait_after(0, timeout_s=0.01).encoded_image == b"jpeg"
+
+
 def test_runtime_rejects_unexpected_pc_without_touching_serial(tmp_path):
     recorder = EpisodeRecorder(tmp_path)
     serial = _Serial()
@@ -142,7 +198,7 @@ def test_runtime_rejects_unexpected_pc_without_touching_serial(tmp_path):
         core=core,
         recorder=recorder,
         serial_port=serial,
-        camera=_Camera(),
+        cameras={"front": _Camera()},
         allowed_pc_host="192.168.0.220",
         joystick_timeout_ms=150,
     )
@@ -172,7 +228,7 @@ def test_runtime_publishes_valid_stm32_telemetry_for_read_only_ui(tmp_path):
         core=core,
         recorder=recorder,
         serial_port=_Serial(),
-        camera=_Camera(),
+        cameras={"front": _Camera()},
         allowed_pc_host="192.168.50.1",
         joystick_timeout_ms=150,
         telemetry_preview=latest,

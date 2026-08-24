@@ -11,6 +11,6 @@ WORKDIR /opt/excavator-il
 COPY pyproject.toml README.md ./
 COPY src ./src
 RUN python3 -m pip install --no-cache-dir --no-deps --no-build-isolation . && \
-    python3 -c "import excavator_il, lerobot, serial, torch; assert '.nv26.01.' in torch.__version__"
+    python3 -c "import excavator_il.resident_act_runtime, lerobot, serial, torch; assert '.nv26.01.' in torch.__version__"
 
 LABEL org.opencontainers.image.revision="${EXCAVATOR_IL_REVISION}"

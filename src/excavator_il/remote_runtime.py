@@ -197,6 +197,142 @@ raise SystemExit("serial remained owned after TERM: " + "; ".join(details))
             )
         return result
 
+    def reclaim_hardware_gated_runtime(
+        self,
+        *,
+        process_marker: str,
+        gate_prefix: str,
+        protected_devices: tuple[str | PurePosixPath, ...],
+        timeout_s: int,
+        execute: Callable[[str], str] | None = None,
+    ) -> str:
+        """Reclaim only an abandoned Runtime that is still waiting at its gate."""
+
+        if (
+            not isinstance(process_marker, str)
+            or not process_marker
+            or "\x00" in process_marker
+        ):
+            raise ValueError("process_marker must be non-empty NUL-free text")
+        if (
+            not isinstance(gate_prefix, str)
+            or not gate_prefix.startswith("/")
+            or gate_prefix == "/"
+            or "\x00" in gate_prefix
+        ):
+            raise ValueError("gate_prefix must be a safe absolute prefix")
+        devices = tuple(PurePosixPath(path) for path in protected_devices)
+        if not devices or any(
+            not path.is_absolute() or not str(path).startswith("/dev/")
+            for path in devices
+        ):
+            raise ValueError("protected_devices must contain absolute /dev paths")
+        if (
+            isinstance(timeout_s, bool)
+            or not isinstance(timeout_s, int)
+            or timeout_s <= 0
+        ):
+            raise ValueError("timeout_s must be a positive integer")
+
+        program = r'''import json
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+import time
+
+marker = sys.argv[1]
+gate_prefix = sys.argv[2]
+timeout_s = float(sys.argv[3])
+devices = tuple(json.loads(sys.argv[4]))
+
+def process_argv(pid):
+    try:
+        raw = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes()
+    except (FileNotFoundError, PermissionError):
+        return ()
+    return tuple(os.fsdecode(value) for value in raw.split(b"\0") if value)
+
+def hardware_gate(argv):
+    if marker not in argv:
+        return None
+    try:
+        index = argv.index("--hardware-start-gate")
+        gate = argv[index + 1]
+    except (ValueError, IndexError):
+        return None
+    if not gate.startswith(gate_prefix) or not gate.endswith(".start"):
+        return None
+    return gate
+
+def candidates():
+    found = []
+    for entry in pathlib.Path("/proc").iterdir():
+        if entry.name.isdigit() and hardware_gate(process_argv(int(entry.name))):
+            found.append(int(entry.name))
+    return tuple(found)
+
+def owners(device):
+    result = subprocess.run(
+        ["fuser", device],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    return {int(value) for value in result.stdout.split()}
+
+matched = candidates()
+if not matched:
+    print("idle")
+    raise SystemExit(0)
+
+physical_owners = set().union(*(owners(device) for device in devices))
+unsafe = physical_owners.intersection(matched)
+if unsafe:
+    raise SystemExit(
+        "hardware-gated Runtime already owns a protected device; "
+        f"refusing stale reclaim: pids={sorted(unsafe)}"
+    )
+
+for pid in sorted(matched, reverse=True):
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+deadline = time.monotonic() + timeout_s
+while time.monotonic() < deadline:
+    if not candidates():
+        print("reclaimed")
+        raise SystemExit(0)
+    time.sleep(0.1)
+
+raise SystemExit(
+    "stale hardware-gated Runtime did not exit: "
+    + ",".join(str(pid) for pid in candidates())
+)
+'''
+        command = shlex.join(
+            [
+                "/usr/bin/python3",
+                "-c",
+                program,
+                process_marker,
+                gate_prefix,
+                str(timeout_s),
+                json.dumps(tuple(str(path) for path in devices)),
+            ]
+        )
+        run_remote = execute or self.run
+        result = run_remote(command).strip()
+        if result not in {"idle", "reclaimed"}:
+            raise RuntimeError(
+                f"hardware-gated reconciliation returned an invalid result: {result!r}"
+            )
+        return result
+
     def stop_owned_process(
         self,
         *,

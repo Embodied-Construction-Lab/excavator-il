@@ -28,6 +28,15 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="explicitly allow pipeline-only synthetic Episodes",
     )
+    convert.add_argument(
+        "--camera-roles",
+        choices=("auto", "front", "front,dump"),
+        default="auto",
+        help=(
+            "camera contract: auto preserves all cameras when every Episode "
+            "matches; front is an explicit single-camera ablation"
+        ),
+    )
 
     split = commands.add_parser(
         "prepare-training-split",
@@ -108,6 +117,12 @@ def _parser() -> argparse.ArgumentParser:
     collect = commands.add_parser("collect", help="run the Orin hardware collector")
     collect.add_argument("--config", default="config/collection.orin.json")
 
+    camera_preview = commands.add_parser(
+        "camera-preview",
+        help="serve the Orin camera while another Runtime owns STM32",
+    )
+    camera_preview.add_argument("--config", default="config/collection.orin.json")
+
     diagnose_stm32 = commands.add_parser(
         "diagnose-stm32-link",
         help="read-only check of the Orin USART2 telemetry link",
@@ -132,6 +147,10 @@ def _parser() -> argparse.ArgumentParser:
         "--hardware-start-gate",
         help="absolute file gate consumed after CUDA warmup and before hardware open",
     )
+    act_runtime.add_argument(
+        "--operator-observation-config",
+        help="collector config reused for read-only camera and machine-state outputs",
+    )
 
     inspect_runtime = commands.add_parser(
         "inspect-act-runtime-log",
@@ -151,6 +170,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     zero_soak.add_argument("episode")
 
+    record_collection = commands.add_parser(
+        "record-collection-run",
+        help="publish immutable Experiment Run evidence for one validated Episode",
+    )
+    record_collection.add_argument("episode")
+    record_collection.add_argument(
+        "--config", default="config/collection_evidence.orin.json"
+    )
+
     episode = commands.add_parser("episode", help="control a running local Collector")
     episode.add_argument("--config", default="config/collection.orin.json")
     episode_commands = episode.add_subparsers(dest="episode_command", required=True)
@@ -159,6 +187,21 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument("--operator", required=True, dest="operator_id")
     start.add_argument("--dig-target-m", nargs=3, type=float)
     start.add_argument("--material-id")
+    start.add_argument(
+        "--task-variant",
+        choices=("dig_only", "dig_transport_dump"),
+    )
+    start.add_argument("--soil-reset-block-id")
+    start.add_argument("--dig-point-id")
+    start.add_argument(
+        "--recording-purpose",
+        choices=("demonstration", "diagnostic"),
+        default="demonstration",
+    )
+    start.add_argument(
+        "--target-source-provenance-json",
+        help="immutable Airy target-source provenance JSON from the PC",
+    )
     stop = episode_commands.add_parser("stop")
     result = stop.add_mutually_exclusive_group(required=True)
     result.add_argument("--success", action="store_true")
@@ -196,12 +239,18 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "convert":
             from .lerobot_conversion import convert_episodes
 
+            camera_roles = {
+                "auto": None,
+                "front": ("front",),
+                "front,dump": ("front", "dump"),
+            }[args.camera_roles]
             summary = convert_episodes(
                 args.episodes,
                 args.output_root,
                 args.repo_id,
                 fps=args.fps,
                 allow_synthetic=args.allow_synthetic,
+                camera_roles=camera_roles,
             )
             _print_json(asdict(summary))
         elif args.command == "prepare-training-split":
@@ -331,6 +380,15 @@ def main(argv: list[str] | None = None) -> int:
                 format="%(asctime)s %(levelname)s %(name)s: %(message)s",
             )
             run_collector(args.config)
+        elif args.command == "camera-preview":
+            from .camera_preview_service import run_camera_preview
+
+            logging.basicConfig(
+                level=logging.INFO,
+                format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+                force=True,
+            )
+            run_camera_preview(args.config)
         elif args.command == "diagnose-stm32-link":
             from .stm32_link_diagnostic import run_stm32_link_diagnostic
 
@@ -352,6 +410,7 @@ def main(argv: list[str] | None = None) -> int:
                 motion_authorization=args.motion_authorization,
                 max_steps=args.max_steps,
                 hardware_start_gate=args.hardware_start_gate,
+                operator_observation_config=args.operator_observation_config,
             )
         elif args.command == "inspect-act-runtime-log":
             from .act_runtime_config import load_act_runtime_config
@@ -381,6 +440,29 @@ def main(argv: list[str] | None = None) -> int:
             report = inspect_zero_command_episode(args.episode)
             _print_json(asdict(report))
             return 0 if report.passed else 3
+        elif args.command == "record-collection-run":
+            from .collection_experiment_run import (
+                load_collection_experiment_run_config,
+                record_collection_experiment_run,
+            )
+
+            config = load_collection_experiment_run_config(args.config)
+            snapshot = record_collection_experiment_run(
+                config.request_for_episode(args.episode)
+            )
+            if snapshot.final is None:
+                raise RuntimeError("collection Experiment Run was not finalized")
+            _print_json(
+                {
+                    "schema_version": "collection_experiment_run_result.v1",
+                    "run_id": snapshot.run_id,
+                    "state": snapshot.state,
+                    "run_dir": str(snapshot.run_dir),
+                    "episode_id": snapshot.final["metrics"]["episode_id"],
+                    "task_context": dict(snapshot.start["task_context"]),
+                    "artifact_count": len(snapshot.artifacts),
+                }
+            )
         elif args.command == "episode":
             from .collector.client import send_episode_command
             from .collector.config import load_collection_config
@@ -393,6 +475,17 @@ def main(argv: list[str] | None = None) -> int:
                     request["dig_target_m"] = args.dig_target_m
                 if args.material_id is not None:
                     request["material_id"] = args.material_id
+                if args.task_variant is not None:
+                    request["task_variant"] = args.task_variant
+                if args.soil_reset_block_id is not None:
+                    request["soil_reset_block_id"] = args.soil_reset_block_id
+                if args.dig_point_id is not None:
+                    request["dig_point_id"] = args.dig_point_id
+                request["recording_purpose"] = args.recording_purpose
+                if args.target_source_provenance_json is not None:
+                    request["target_source_provenance"] = json.loads(
+                        args.target_source_provenance_json
+                    )
             elif args.episode_command == "stop":
                 request.update(
                     success=bool(args.success),

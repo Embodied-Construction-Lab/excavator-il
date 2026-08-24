@@ -15,6 +15,7 @@ from .collector.config import SerialConfig
 
 SCHEMA_VERSION = "excavator_act_runtime_config.v2"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_BACKEND_IDENTIFIER = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 _ROOT_FIELDS = frozenset(
     {
         "schema_version",
@@ -25,6 +26,7 @@ _ROOT_FIELDS = frozenset(
         "checkpoint_files_sha256",
         "log_root",
         "device",
+        "dig_policy_backend",
         "stm32_serial",
         "camera_front",
         "timing",
@@ -53,6 +55,7 @@ class ActRuntimeConfig:
     checkpoint_files_sha256: dict[str, str]
     log_root: Path
     device: str
+    dig_policy_backend: str
     serial: SerialConfig
     camera: ActCameraConfig
     max_inference_state_age_ms: float
@@ -86,6 +89,15 @@ def _positive_number(value: Any, field: str) -> float:
     if not math.isfinite(number) or number <= 0:
         raise ValueError(f"{field} must be finite and positive")
     return number
+
+
+def _normalized_backend_identifier(value: Any, field: str) -> str:
+    normalized = _text(value, field).strip().lower().replace("-", "_")
+    if _BACKEND_IDENTIFIER.fullmatch(normalized) is None:
+        raise ValueError(
+            f"{field} must be a normalized lowercase backend identifier"
+        )
+    return normalized
 
 
 def load_act_runtime_config(path: str | Path) -> ActRuntimeConfig:
@@ -128,6 +140,9 @@ def load_act_runtime_config(path: str | Path) -> ActRuntimeConfig:
     device = _text(root.get("device"), "device")
     if device != "cuda":
         raise ValueError("online ACT runtime device must be cuda")
+    dig_policy_backend = _normalized_backend_identifier(
+        root.get("dig_policy_backend", "lerobot_act"), "dig_policy_backend"
+    )
     serial = _object(root.get("stm32_serial"), "stm32_serial")
     camera = _object(root.get("camera_front"), "camera_front")
     timing = _object(root.get("timing"), "timing")
@@ -155,6 +170,7 @@ def load_act_runtime_config(path: str | Path) -> ActRuntimeConfig:
         checkpoint_files_sha256=MappingProxyType(file_hashes),
         log_root=Path(_text(root.get("log_root"), "log_root")).expanduser(),
         device=device,
+        dig_policy_backend=dig_policy_backend,
         serial=SerialConfig(
             port=_text(serial.get("port"), "stm32_serial.port"),
             baudrate=baudrate,

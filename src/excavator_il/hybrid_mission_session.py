@@ -7,11 +7,16 @@ import os
 import queue
 import signal
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
+from .hybrid_experiment_run import (
+    HybridMissionEvidenceLifecycle,
+    HybridMissionRunRequest,
+)
 from .hybrid_mission import (
     REQUIRED_HYBRID_MOTION_AUTHORIZATION,
     HybridMissionConfig,
@@ -20,14 +25,52 @@ from .hybrid_mission import (
     next_hybrid_segment,
 )
 from .hybrid_mission_system import SystemHybridMissionOperations
+from .hybrid_mission_resident_system import (
+    SystemResidentHybridMissionOperations,
+)
 
 
 _FINAL_STAGES = frozenset({"completed", "failed", "cancelled"})
+MAX_HYBRID_CYCLE_COUNT = 9
 _WAITING_STAGES = {
     HybridMissionSegment.ACT_DIG: "awaiting_act_dig",
     HybridMissionSegment.RL_TO_DUMP_AND_DUMP: "awaiting_rl_to_dump",
     HybridMissionSegment.RL_RETURN_TO_DIG: "awaiting_rl_return",
 }
+
+
+def _watch_parent_identity(
+    expected_parent_pid: int,
+    *,
+    get_parent_pid: Callable[[], int],
+    sleep: Callable[[float], None],
+    interrupt: Callable[[], None],
+) -> None:
+    """Interrupt the Mission worker if its supervising WebUI process vanishes."""
+
+    while get_parent_pid() == expected_parent_pid:
+        sleep(0.1)
+    interrupt()
+
+
+def _arm_parent_death_interrupt() -> threading.Thread | None:
+    parent = multiprocessing.parent_process()
+    if parent is None or parent.pid is None:
+        return None
+
+    thread = threading.Thread(
+        target=_watch_parent_identity,
+        kwargs={
+            "expected_parent_pid": parent.pid,
+            "get_parent_pid": os.getppid,
+            "sleep": time.sleep,
+            "interrupt": lambda: os.kill(os.getpid(), signal.SIGINT),
+        },
+        name="hybrid-mission-parent-lease",
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 @dataclass(frozen=True)
@@ -39,10 +82,12 @@ class HybridMissionSnapshot:
     error: str = ""
     logs: tuple[str, ...] = ()
     # Lifetime total remains available for experiment bookkeeping.  The UI uses
-    # run_completed_cycles so a new 4-scoop run always starts at 0 / 4.
+    # run_completed_cycles so every new run starts at 0 / requested_cycles.
     completed_cycles: int = 0
     run_completed_cycles: int = 0
     requested_cycles: int = 1
+    run_id: str = ""
+    evidence_error: str = ""
 
 
 def run_hybrid_mission_worker(
@@ -58,14 +103,22 @@ def run_hybrid_mission_worker(
 ) -> None:
     if not isinstance(cycle_count, int) or isinstance(cycle_count, bool):
         raise ValueError("cycle_count must be an integer")
-    if not 1 <= cycle_count <= 5:
-        raise ValueError("cycle_count must be within [1, 5]")
+    if not 1 <= cycle_count <= MAX_HYBRID_CYCLE_COUNT:
+        raise ValueError(
+            f"cycle_count must be within [1, {MAX_HYBRID_CYCLE_COUNT}]"
+        )
     target_cycle = _rotated_target_cycle(dig_target_id, dig_target_ids)
     config = HybridMissionConfig.load(config_path)
-    operations = SystemHybridMissionOperations(
+    operations_type = (
+        SystemResidentHybridMissionOperations
+        if getattr(config, "runtime_backend", "legacy") == "resident"
+        else SystemHybridMissionOperations
+    )
+    operations = operations_type(
         config,
         output=lambda message: events.put({"kind": "log", "message": str(message)}),
     )
+    _arm_parent_death_interrupt()
     segment = HybridMissionSegment(start_segment)
     current_authorization = motion_authorization
     completed_cycles = 0
@@ -124,6 +177,11 @@ def run_hybrid_mission_worker(
                     current_target_id = segment_target_id
                     segment = HybridMissionSegment.ACT_DIG
                     continue
+                # A completed Mission is still a terminal authority boundary.
+                # The resident backend disarms the owner and releases its two
+                # long-lived workers here; the legacy backend keeps its existing
+                # zero/release cleanup behavior behind the same Interface.
+                operations.safe_stop()
                 events.put(
                     {
                         "kind": "terminal",
@@ -163,11 +221,22 @@ def run_hybrid_mission_worker(
                 )
             current_authorization = command.get("motion_authorization")
             segment = requested
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         try:
             operations.safe_stop()
-        except Exception as exc:
-            events.put({"kind": "log", "message": f"停止清理失败：{exc}"})
+        except Exception as cleanup_exc:
+            events.put(
+                {
+                    "kind": "terminal",
+                    "stage": "failed",
+                    "next_segment": "",
+                    "error": (
+                        f"{type(exc).__name__}: operator cancellation; "
+                        f"cleanup={cleanup_exc}"
+                    ),
+                }
+            )
+            return
         events.put(
             {"kind": "terminal", "stage": "cancelled", "next_segment": ""}
         )
@@ -227,6 +296,7 @@ class HybridMissionSupervisor:
         worker_target: Callable[..., None] = run_hybrid_mission_worker,
         process_context: Any | None = None,
         log_capacity: int = 400,
+        evidence_run_factory: Callable[[HybridMissionRunRequest], Any] | None = None,
     ) -> None:
         if log_capacity <= 0:
             raise ValueError("log_capacity must be positive")
@@ -235,6 +305,7 @@ class HybridMissionSupervisor:
         self._worker_target = worker_target
         self._context = process_context or multiprocessing.get_context("spawn")
         self._log_capacity = log_capacity
+        self._evidence_run_factory = evidence_run_factory
         self._lock = threading.RLock()
         self._logs: deque[str] = deque(maxlen=log_capacity)
         self._state = HybridMissionSnapshot()
@@ -243,10 +314,25 @@ class HybridMissionSupervisor:
         self._commands: Any | None = None
         self._process: Any | None = None
         self._monitor: threading.Thread | None = None
+        self._evidence = HybridMissionEvidenceLifecycle(None)
+        self._evidence_abort_error = ""
 
     def snapshot(self) -> HybridMissionSnapshot:
         with self._lock:
             return replace(self._state, logs=tuple(self._logs))
+
+    def retry_evidence_finalization(self) -> None:
+        """Retry a failed evidence publication without replaying Mission events."""
+
+        with self._lock:
+            if not self._evidence.finalization_pending:
+                raise RuntimeError("no hybrid Mission evidence finalization is pending")
+            self._evidence.retry_finalize()
+            self._sync_evidence_error_locked()
+            if self._evidence.finalization_pending:
+                raise RuntimeError(
+                    f"cannot finalize hybrid Mission evidence: {self._evidence.error}"
+                )
 
     def start(
         self,
@@ -262,15 +348,49 @@ class HybridMissionSupervisor:
             raise ValueError("automatic must be boolean")
         if not isinstance(cycle_count, int) or isinstance(cycle_count, bool):
             raise ValueError("cycle_count must be an integer")
-        if not 1 <= cycle_count <= 5:
-            raise ValueError("cycle_count must be within [1, 5]")
+        if not 1 <= cycle_count <= MAX_HYBRID_CYCLE_COUNT:
+            raise ValueError(
+                f"cycle_count must be within [1, {MAX_HYBRID_CYCLE_COUNT}]"
+            )
         if not automatic and cycle_count != 1:
             raise ValueError("segmented Mission supports exactly one cycle")
         if automatic and motion_authorization != REQUIRED_HYBRID_MOTION_AUTHORIZATION:
             raise ValueError("automatic Mission requires exact motion authorization")
         with self._lock:
+            if self._evidence.finalization_pending:
+                raise RuntimeError(
+                    "previous hybrid Mission evidence finalization is pending"
+                )
             if self._state.stage not in {"idle", *_FINAL_STAGES}:
                 raise RuntimeError("a hybrid Mission is already active")
+            evidence_run = None
+            if self._evidence_run_factory is not None:
+                evidence_run = self._evidence_run_factory(
+                    HybridMissionRunRequest(
+                        config_path=self._config_path,
+                        dig_target_id=dig_target_id,
+                        automatic=automatic,
+                        requested_cycles=cycle_count,
+                    )
+                )
+                run_id = getattr(evidence_run, "run_id", None)
+                if not isinstance(run_id, str) or not run_id:
+                    raise ValueError(
+                        "evidence_run_factory must return a run with a non-empty run_id"
+                    )
+            else:
+                run_id = ""
+            target_cycle = _rotated_target_cycle(
+                dig_target_id, self._dig_target_ids
+            )
+            self._evidence = HybridMissionEvidenceLifecycle(
+                evidence_run,
+                cycle_targets=tuple(
+                    target_cycle[index % len(target_cycle)]
+                    for index in range(cycle_count)
+                ),
+            )
+            self._evidence_abort_error = ""
             self._logs.clear()
             self._state = HybridMissionSnapshot(
                 stage="starting",
@@ -280,7 +400,27 @@ class HybridMissionSupervisor:
                 completed_cycles=self._completed_cycles,
                 run_completed_cycles=0,
                 requested_cycles=cycle_count,
+                run_id=run_id,
             )
+            self._evidence.start_mission(
+                automatic=automatic,
+                requested_cycles=cycle_count,
+                dig_target_id=dig_target_id,
+            )
+            self._sync_evidence_error_locked()
+            if self._evidence.error:
+                message = (
+                    "initial hybrid Mission evidence could not be written: "
+                    f"{self._evidence.error}"
+                )
+                self._state = replace(
+                    self._state,
+                    stage="failed",
+                    next_segment="",
+                    error=message,
+                )
+                self._finish_evidence_locked(stage="failed", error=message)
+                raise RuntimeError(message)
         self._launch(
             segment=HybridMissionSegment.RL_TO_DIG,
             automatic=automatic,
@@ -396,6 +536,10 @@ class HybridMissionSupervisor:
                     next_segment="",
                     error=f"{type(exc).__name__}: {exc}",
                 )
+                self._finish_evidence_locked(
+                    stage="failed",
+                    error=self._state.error,
+                )
                 self._close_events_locked()
                 raise RuntimeError(f"cannot start hybrid Mission worker: {exc}") from exc
             self._process = process
@@ -421,11 +565,16 @@ class HybridMissionSupervisor:
         process.join(timeout=1.0)
         with self._lock:
             if self._process is process and not terminal_received:
+                exit_error = f"hybrid Mission worker exited with code {process.exitcode}"
                 self._state = replace(
                     self._state,
                     stage="failed",
                     next_segment="",
-                    error=f"hybrid Mission worker exited with code {process.exitcode}",
+                    error=self._evidence_abort_error or exit_error,
+                )
+                self._finish_evidence_locked(
+                    stage="failed",
+                    error=self._state.error,
                 )
 
     def _apply_event(self, event: object) -> bool:
@@ -456,6 +605,12 @@ class HybridMissionSupervisor:
                         )
                     else:
                         self._state = replace(self._state, stage=stage)
+                    self._evidence.start_phase(
+                        stage,
+                        self._state.dig_target_id,
+                    )
+                    self._sync_evidence_error_locked()
+                    self._abort_on_evidence_error_locked()
                 return False
             if event.get("kind") == "waiting":
                 stage = event.get("stage")
@@ -464,12 +619,15 @@ class HybridMissionSupervisor:
                     return False
                 if not isinstance(next_segment, str) or not next_segment:
                     return False
+                self._evidence.complete_phase("success")
+                self._sync_evidence_error_locked()
                 self._state = replace(
                     self._state,
                     stage=stage,
                     next_segment=next_segment,
                     error="",
                 )
+                self._abort_on_evidence_error_locked()
                 return False
             if event.get("kind") == "progress":
                 completed_cycles = event.get("completed_cycles")
@@ -479,10 +637,19 @@ class HybridMissionSupervisor:
                     or not 0 <= completed_cycles <= self._state.requested_cycles
                 ):
                     return False
+                self._evidence.complete_phase("success")
+                self._evidence.complete_cycle(
+                    "success",
+                    completed_cycles=completed_cycles,
+                )
                 self._state = replace(
                     self._state,
                     run_completed_cycles=completed_cycles,
                 )
+                if completed_cycles < self._state.requested_cycles:
+                    self._evidence.start_cycle(completed_cycles)
+                self._sync_evidence_error_locked()
+                self._abort_on_evidence_error_locked()
                 return False
             if event.get("kind") != "terminal":
                 return False
@@ -492,6 +659,9 @@ class HybridMissionSupervisor:
                 stage = "failed"
             next_segment = event.get("next_segment", "")
             error = event.get("error", "")
+            if self._evidence_abort_error:
+                stage = "failed"
+                error = self._evidence_abort_error
             if stage == "completed":
                 completed_cycles = event.get("completed_cycles", 1)
                 if (
@@ -513,7 +683,38 @@ class HybridMissionSupervisor:
                     else self._state.run_completed_cycles
                 ),
             )
+            self._finish_evidence_locked(stage=stage, error=self._state.error)
             return True
+
+    def _finish_evidence_locked(self, *, stage: str, error: str) -> None:
+        self._evidence.finish(
+            stage=stage,
+            error=error,
+            requested_cycles=self._state.requested_cycles,
+            completed_cycles=self._state.run_completed_cycles,
+            automatic=self._state.automatic,
+        )
+        self._sync_evidence_error_locked()
+
+    def _sync_evidence_error_locked(self) -> None:
+        if self._evidence.error != self._state.evidence_error:
+            self._state = replace(
+                self._state,
+                evidence_error=self._evidence.error,
+            )
+
+    def _abort_on_evidence_error_locked(self) -> None:
+        if not self._evidence.error or self._evidence_abort_error:
+            return
+        message = f"evidence recording failed: {self._evidence.error}"
+        self._evidence_abort_error = message
+        self._state = replace(self._state, stage="stopping", error=message)
+        process = self._process
+        if process is not None and process.is_alive():
+            try:
+                os.kill(process.pid, signal.SIGINT)
+            except OSError:
+                pass
 
     def _release_finished_locked(self) -> None:
         process = self._process

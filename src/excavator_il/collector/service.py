@@ -11,7 +11,7 @@ import socket
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .camera import UvcCamera
 from .config import CollectionConfig, load_collection_config
@@ -34,13 +34,17 @@ class CollectorService:
         config: CollectionConfig,
         *,
         serial_port: Any,
-        camera: Any,
+        cameras: Mapping[str, Any],
     ) -> None:
         self._config = config
         self._serial = serial_port
-        self._camera = camera
+        if tuple(cameras) != tuple(config.cameras):
+            raise ValueError("camera instances must match configured camera roles")
+        self._cameras = dict(cameras)
         self._recorder = EpisodeRecorder(config.data_root)
-        self._camera_preview = LatestJpegFrame()
+        self._camera_previews = {
+            camera_id: LatestJpegFrame() for camera_id in self._cameras
+        }
         self._telemetry_preview = LatestTelemetryFrame()
         self._preview_server: MjpegPreviewServer | None = None
         self._machine_state_publisher = (
@@ -63,17 +67,17 @@ class CollectorService:
             core=self._core,
             recorder=self._recorder,
             serial_port=serial_port,
-            camera=camera,
+            cameras=self._cameras,
             allowed_pc_host=config.joystick.allowed_pc_host,
             joystick_timeout_ms=config.joystick.timeout_ms,
-            camera_preview=self._camera_preview,
+            camera_previews=self._camera_previews,
             telemetry_preview=self._telemetry_preview,
             machine_state_publisher=self._machine_state_publisher,
         )
         self._episode_controller = EpisodeController(
             recorder=self._recorder,
             defaults=config.episode_defaults,
-            camera=config.camera,
+            cameras=config.cameras,
         )
         self._stop = threading.Event()
         self._worker_errors: queue.Queue[BaseException] = queue.Queue()
@@ -103,12 +107,12 @@ class CollectorService:
         except BaseException as exc:
             self._fail_worker("serial", exc)
 
-    def _camera_loop(self) -> None:
+    def _camera_loop(self, camera_id: str) -> None:
         try:
             while not self._stop.is_set():
-                self._runtime.capture_once()
+                self._runtime.capture_once(camera_id)
         except BaseException as exc:
-            self._fail_worker("camera", exc)
+            self._fail_worker(f"camera-{camera_id}", exc)
 
     @staticmethod
     def _read_control_request(connection: socket.socket) -> dict[str, Any]:
@@ -179,7 +183,7 @@ class CollectorService:
     def _start_workers(self) -> None:
         if self._config.camera_preview is not None:
             self._preview_server = MjpegPreviewServer(
-                self._camera_preview,
+                self._camera_previews,
                 telemetry=self._telemetry_preview,
                 bind_host=self._config.camera_preview.bind_host,
                 port=self._config.camera_preview.port,
@@ -187,7 +191,10 @@ class CollectorService:
             )
         workers = [
             ("stm32-telemetry", self._serial_loop),
-            ("camera-front", self._camera_loop),
+            *(
+                (f"camera-{camera_id}", lambda role=camera_id: self._camera_loop(role))
+                for camera_id in self._cameras
+            ),
             ("episode-control", self._control_loop),
         ]
         if self._preview_server is not None:
@@ -238,7 +245,10 @@ class CollectorService:
             self._config.joystick.allowed_pc_host,
             self._config.serial.port,
             self._config.serial.baudrate,
-            self._config.camera.device,
+            ",".join(
+                f"{camera_id}={camera.device}"
+                for camera_id, camera in self._config.cameras.items()
+            ),
             next_command_seq,
         )
         if self._preview_server is not None:
@@ -307,9 +317,13 @@ def run_collector(config_path: str | Path) -> None:
         exclusive=True,
     )
     try:
-        camera = UvcCamera(config.camera)
+        cameras: dict[str, UvcCamera] = {}
         try:
-            service = CollectorService(config, serial_port=serial_port, camera=camera)
+            for camera_id, camera_config in config.cameras.items():
+                cameras[camera_id] = UvcCamera(camera_config)
+            service = CollectorService(
+                config, serial_port=serial_port, cameras=cameras
+            )
             previous_handlers: dict[int, Any] = {}
 
             def stop_handler(signum: int, _frame: Any) -> None:
@@ -324,6 +338,7 @@ def run_collector(config_path: str | Path) -> None:
                 for signum, handler in previous_handlers.items():
                     signal.signal(signum, handler)
         finally:
-            camera.close()
+            for camera in reversed(tuple(cameras.values())):
+                camera.close()
     finally:
         serial_port.close()

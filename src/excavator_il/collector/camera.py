@@ -22,6 +22,7 @@ class EncodedCameraFrame:
 class RgbCameraFrame:
     capture_monotonic_ns: int
     rgb: np.ndarray
+    encoded_image: bytes | None = None
 
 
 class UvcCamera:
@@ -77,12 +78,20 @@ class UvcCamera:
         capture_monotonic_ns = self._clock()
         if not ok or frame is None:
             raise RuntimeError(f"camera read failed for {self._config.device}")
+        ok, encoded = self._cv2.imencode(
+            ".jpg",
+            frame,
+            [self._cv2.IMWRITE_JPEG_QUALITY, self._config.jpeg_quality],
+        )
+        if not ok:
+            raise RuntimeError("camera JPEG encoding failed")
         rgb = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2RGB)
         if rgb.dtype != np.uint8:
             raise RuntimeError("camera RGB frame must use uint8 pixels")
         return RgbCameraFrame(
             capture_monotonic_ns=capture_monotonic_ns,
             rgb=np.ascontiguousarray(rgb),
+            encoded_image=encoded.tobytes(),
         )
 
     def close(self) -> None:

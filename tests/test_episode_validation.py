@@ -17,6 +17,27 @@ def test_validate_episode_accepts_synchronized_rgb_demonstration(rgb_episode_fac
     assert report.max_action_age_ms == 10.0
 
 
+def test_validate_episode_accepts_optional_dump_camera(rgb_episode_factory):
+    report = validate_episode(rgb_episode_factory(dual_camera=True))
+
+    assert report.cameras["dump"].frame_count == 3
+
+
+def test_validate_episode_accepts_explicit_dual_camera_diagnostic_without_protocol(
+    rgb_episode_factory,
+):
+    episode = rgb_episode_factory(dual_camera=True)
+    metadata_path = episode / "episode.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["recording_purpose"] = "diagnostic"
+    metadata.pop("collection_protocol")
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    report = validate_episode(episode)
+
+    assert tuple(report.cameras) == ("front", "dump")
+
+
 def test_validate_episode_rejects_camera_frame_older_than_sync_limit(rgb_episode_factory):
     episode = rgb_episode_factory()
     timestamps_path = episode / "camera_front_timestamps.csv"
@@ -29,7 +50,7 @@ def test_validate_episode_rejects_camera_frame_older_than_sync_limit(rgb_episode
         writer.writeheader()
         writer.writerows(rows)
 
-    with pytest.raises(EpisodeValidationError, match="camera frame age"):
+    with pytest.raises(EpisodeValidationError, match="front camera frame age"):
         validate_episode(episode, max_camera_age_ms=120.0)
 
 
@@ -271,4 +292,70 @@ def test_validate_episode_rejects_pending_operator_review(rgb_episode_factory):
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
 
     with pytest.raises(EpisodeValidationError, match="pending_review"):
+        validate_episode(episode)
+
+
+def test_validate_episode_v2_reports_each_rgb_stream_and_alignment(
+    rgb_episode_factory,
+):
+    episode = rgb_episode_factory(dual_camera=True)
+
+    report = validate_episode(episode)
+
+    assert tuple(report.cameras) == ("front", "dump")
+    assert report.cameras["front"].frame_count == 3
+    assert report.cameras["dump"].frame_count == 3
+    assert report.cameras["front"].estimated_rate_hz == 10.0
+    assert report.cameras["dump"].image_shape == (24, 32, 3)
+    assert report.cameras["front"].max_age_ms == 5.0
+    assert report.cameras["dump"].max_age_ms == 8.0
+    assert report.max_intercamera_skew_ms == 3.0
+    # Front aliases remain stable for existing ACT v1 callers.
+    assert report.camera_frame_count == 3
+    assert report.image_shape == (24, 32, 3)
+
+
+def test_validate_episode_v2_fails_closed_when_configured_dump_stream_is_missing(
+    rgb_episode_factory,
+):
+    episode = rgb_episode_factory(dual_camera=True)
+    (episode / "camera_dump_timestamps.csv").unlink()
+
+    with pytest.raises(EpisodeValidationError, match="camera_dump_timestamps.csv"):
+        validate_episode(episode)
+
+
+def test_validate_episode_v2_rejects_stale_dump_frames(rgb_episode_factory):
+    episode = rgb_episode_factory(dual_camera=True)
+    timestamps_path = episode / "camera_dump_timestamps.csv"
+    with timestamps_path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    for row in rows:
+        row["camera_stamp_monotonic_ns"] = str(
+            int(row["camera_stamp_monotonic_ns"]) - 500_000_000
+        )
+    with timestamps_path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=rows[0].keys())
+        writer.writeheader()
+        writer.writerows(rows)
+
+    with pytest.raises(EpisodeValidationError, match="dump camera frame age"):
+        validate_episode(episode)
+
+
+def test_validate_episode_v2_rejects_low_rate_dump_even_when_frames_are_fresh(
+    rgb_episode_factory,
+):
+    episode = rgb_episode_factory(step_count=8, dual_camera=True)
+    timestamps_path = episode / "camera_dump_timestamps.csv"
+    with timestamps_path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))[::2]
+    for index, row in enumerate(rows):
+        row["camera_frame_index"] = str(index)
+    with timestamps_path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=rows[0].keys())
+        writer.writeheader()
+        writer.writerows(rows)
+
+    with pytest.raises(EpisodeValidationError, match="dump camera rate .*nominal"):
         validate_episode(episode)

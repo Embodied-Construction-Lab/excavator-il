@@ -48,6 +48,7 @@ def test_cli_dispatches_collection_tools_without_importing_training_stack(monkey
     from excavator_il.collector import client, config, service
 
     calls = []
+    episode_requests = []
     monkeypatch.setattr(teleop.TeleopConfig, "load", lambda path: f"teleop:{path}")
     monkeypatch.setattr(
         teleop, "run_teleop", lambda loaded, print_every: calls.append((loaded, print_every))
@@ -68,7 +69,8 @@ def test_cli_dispatches_collection_tools_without_importing_training_stack(monkey
     monkeypatch.setattr(
         client,
         "send_episode_command",
-        lambda path, request: {"ok": True, "path": str(path), "request": request},
+        lambda path, request: episode_requests.append(dict(request))
+        or {"ok": True, "path": str(path), "request": request},
     )
 
     assert main(["teleop", "--config", "teleop.json", "--print-every", "7"]) == 0
@@ -92,6 +94,24 @@ def test_cli_dispatches_collection_tools_without_importing_training_stack(monkey
             "3",
             "--material-id",
             "soil",
+            "--task-variant",
+            "dig_transport_dump",
+            "--soil-reset-block-id",
+            "block_07",
+            "--dig-point-id",
+            "dig_03",
+            "--recording-purpose",
+            "diagnostic",
+            "--target-source-provenance-json",
+            json.dumps(
+                {
+                    "repository": "airylidar",
+                    "path": "mission/config/excavation_demo.json",
+                    "sha256": "a" * 64,
+                    "commit": "b" * 40,
+                    "dirty": False,
+                }
+            ),
         ]
     ) == 0
     assert main(["episode", "stop", "--failure-reason", "bucket_empty"]) == 0
@@ -109,6 +129,24 @@ def test_cli_dispatches_collection_tools_without_importing_training_stack(monkey
         ]
     ) == 0
     assert calls == [("teleop:teleop.json", 7), ("collect", "collection.json")]
+    assert episode_requests[0] == {
+        "command": "start",
+        "task": "ExecuteDig",
+        "operator_id": "operator_01",
+        "dig_target_m": [1.0, 2.0, 3.0],
+        "material_id": "soil",
+        "task_variant": "dig_transport_dump",
+        "soil_reset_block_id": "block_07",
+        "dig_point_id": "dig_03",
+        "recording_purpose": "diagnostic",
+        "target_source_provenance": {
+            "repository": "airylidar",
+            "path": "mission/config/excavation_demo.json",
+            "sha256": "a" * 64,
+            "commit": "b" * 40,
+            "dirty": False,
+        },
+    }
     assert "device_id" in capsys.readouterr().out
 
 
@@ -142,8 +180,14 @@ def test_act_runtime_cli_defaults_to_shadow_and_passes_exact_motion_authorizatio
         act_runtime_service,
         "run_act_runtime",
         lambda path, motion_authorization=None, max_steps=None,
-        hardware_start_gate=None: calls.append(
-            (path, motion_authorization, max_steps, hardware_start_gate)
+        hardware_start_gate=None, operator_observation_config=None: calls.append(
+            (
+                path,
+                motion_authorization,
+                max_steps,
+                hardware_start_gate,
+                operator_observation_config,
+            )
         ),
     )
 
@@ -160,15 +204,100 @@ def test_act_runtime_cli_defaults_to_shadow_and_passes_exact_motion_authorizatio
         ]
     ) == 0
     assert calls == [
-        ("runtime.json", None, None, None),
+        ("runtime.json", None, None, None, None),
         (
             "runtime.json",
             "ALLOW_ACT_MACHINE_MOTION",
             None,
             "/opt/act-control/hybrid_001.start",
+            None,
         ),
     ]
     assert all(call["force"] is True for call in logging_calls)
+
+
+def test_camera_preview_cli_dispatches_collection_config(monkeypatch):
+    from excavator_il import camera_preview_service
+
+    calls = []
+    monkeypatch.setattr(
+        camera_preview_service,
+        "run_camera_preview",
+        lambda path: calls.append(path),
+    )
+
+    assert main(["camera-preview", "--config", "collection.json"]) == 0
+    assert calls == ["collection.json"]
+
+
+def test_record_collection_run_cli_prints_stable_json(monkeypatch, capsys):
+    from excavator_il import collection_experiment_run
+
+    calls = []
+
+    class _Config:
+        def request_for_episode(self, episode):
+            calls.append(("request", episode))
+            return "request"
+
+    monkeypatch.setattr(
+        collection_experiment_run,
+        "load_collection_experiment_run_config",
+        lambda path: calls.append(("config", path)) or _Config(),
+    )
+    monkeypatch.setattr(
+        collection_experiment_run,
+        "record_collection_experiment_run",
+        lambda request: calls.append(("record", request))
+        or SimpleNamespace(
+            run_id="collection_episode_0042",
+            state="success",
+            run_dir="/evidence/runs/collection_episode_0042",
+            artifacts=({"artifact_id": "raw_episode"}, {"artifact_id": "quality_report"}),
+            start={"task_context": {"task_variant": "dig_only"}},
+            final={"metrics": {"episode_id": "episode_0042"}},
+        ),
+    )
+
+    exit_code = main(
+        [
+            "record-collection-run",
+            "/data/raw/episode_0042",
+            "--config",
+            "config/evidence.json",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [
+        ("config", "config/evidence.json"),
+        ("request", "/data/raw/episode_0042"),
+        ("record", "request"),
+    ]
+    assert json.loads(capsys.readouterr().out) == {
+        "schema_version": "collection_experiment_run_result.v1",
+        "run_id": "collection_episode_0042",
+        "state": "success",
+        "run_dir": "/evidence/runs/collection_episode_0042",
+        "episode_id": "episode_0042",
+        "task_context": {"task_variant": "dig_only"},
+        "artifact_count": 2,
+    }
+
+
+def test_record_collection_run_cli_returns_nonzero_on_evidence_failure(
+    monkeypatch, capsys
+):
+    from excavator_il import collection_experiment_run
+
+    monkeypatch.setattr(
+        collection_experiment_run,
+        "load_collection_experiment_run_config",
+        lambda _path: (_ for _ in ()).throw(ValueError("evidence drift")),
+    )
+
+    assert main(["record-collection-run", "episode_0001"]) == 2
+    assert "evidence drift" in capsys.readouterr().err
 
 
 def test_inspect_zero_soak_returns_nonzero_for_unsafe_episode(monkeypatch, capsys):
@@ -230,7 +359,13 @@ def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
         inference_arguments.update(kwargs)
         return _Result()
 
-    monkeypatch.setattr(lerobot_conversion, "convert_episodes", lambda *a, **k: _Result())
+    conversion_arguments = []
+    monkeypatch.setattr(
+        lerobot_conversion,
+        "convert_episodes",
+        lambda *args, **kwargs: conversion_arguments.append((args, kwargs))
+        or _Result(),
+    )
     monkeypatch.setattr(act_smoke, "run_act_smoke_train_step", lambda **k: _Result())
     monkeypatch.setattr(act_smoke, "run_act_checkpoint_inference", infer)
     monkeypatch.setattr(training_split, "prepare_training_split", lambda **k: _Result())
@@ -243,6 +378,18 @@ def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
     )
 
     assert main(["convert", "ep", "--output-root", "out"]) == 0
+    assert main(
+        [
+            "convert",
+            "ep",
+            "--output-root",
+            "out-front",
+            "--camera-roles",
+            "front",
+        ]
+    ) == 0
+    assert conversion_arguments[0][1]["camera_roles"] is None
+    assert conversion_arguments[1][1]["camera_roles"] == ("front",)
     assert main(
         [
             "prepare-training-split",
@@ -309,7 +456,7 @@ def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
     assert inference_arguments["warmup_runs"] == 2
     assert inference_arguments["timed_runs"] == 3
     assert inference_arguments["max_inference_ms"] == 100.0
-    assert capsys.readouterr().out.count('"value": "ok"') == 7
+    assert capsys.readouterr().out.count('"value": "ok"') == 8
 
 
 def test_cli_synthesizes_pipeline_validation_episodes(monkeypatch, capsys):

@@ -9,7 +9,7 @@ import signal
 import subprocess
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from .act_runtime_contract import REQUIRED_MOTION_AUTHORIZATION
 from .guided_episode import (
@@ -20,6 +20,24 @@ from .hybrid_mission import HybridMissionConfig
 from .remote_runtime import LineProcess, SshRuntimeHost
 
 
+class HybridRlOperations(Protocol):
+    """Narrow RL-side Interface required by the hybrid Mission Adapter."""
+
+    def prewarm_rl_runtime(self, hardware_start_gate: str | PurePosixPath) -> None: ...
+
+    def start_rl_runtime(self) -> None: ...
+
+    def start_operator_preview(self) -> None: ...
+
+    def run_rl_follow(self, phase: str, *, target_id: str | None = None) -> Any: ...
+
+    def run_rl_fixed_action(self, behavior: str, *, behavior_port: int) -> None: ...
+
+    def stop_rl_runtime_and_wait_for_serial(self) -> None: ...
+
+    def stop_operator_preview_and_wait_for_camera(self) -> None: ...
+
+
 class SystemHybridMissionOperations:
     """Overlap hardware-free startup while preserving one physical command owner."""
 
@@ -28,7 +46,7 @@ class SystemHybridMissionOperations:
         config: HybridMissionConfig,
         *,
         guided_config: GuidedEpisodeConfig | None = None,
-        rl_operations: SystemGuidedEpisodeOperations | None = None,
+        rl_operations: HybridRlOperations | None = None,
         line_process_factory: Callable[..., Any] = LineProcess,
         output: Callable[[str], None] = print,
         timestamp: str | None = None,
@@ -53,9 +71,14 @@ class SystemHybridMissionOperations:
         self._act_gate_path = PurePosixPath(
             "/home/jetson16/workspace_excavator/act_inference/control"
         ) / self._act_gate_name
+        self._rl_gate_path = PurePosixPath(
+            "/tmp/excavator-rl-control"
+        ) / self._act_gate_name
         self._rl_runtime_active = False
+        self._rl_runtime_prepared = False
 
     def run_rl_to_dig(self, target_id: str) -> None:
+        self._reclaim_stale_rl_prewarm()
         self._start_rl_runtime()
         try:
             self._start_act_prewarm(self._config.act_max_steps)
@@ -98,15 +121,39 @@ class SystemHybridMissionOperations:
         if self._rl_runtime_active:
             return
         self._rl.start_rl_runtime()
+        try:
+            self._rl.start_operator_preview()
+        except BaseException:
+            self._rl.stop_rl_runtime_and_wait_for_serial()
+            raise
+        self._rl_runtime_prepared = False
         self._rl_runtime_active = True
 
-    def _stop_rl_runtime(self) -> None:
-        if not self._rl_runtime_active:
+    def _start_rl_prewarm(self) -> None:
+        if self._rl_runtime_active or self._rl_runtime_prepared:
             return
         try:
+            self._reclaim_stale_rl_prewarm()
+            self._rl.prewarm_rl_runtime(self._rl_gate_path)
+        except Exception as exc:
+            self._rl_runtime_prepared = False
+            self._output(
+                "RL 预热失败，将在 ACT 完成后回退到安全冷启动："
+                f"{type(exc).__name__}: {exc}"
+            )
+            return
+        self._rl_runtime_prepared = True
+
+    def _stop_rl_runtime(self) -> None:
+        if not self._rl_runtime_active and not self._rl_runtime_prepared:
+            return
+        try:
+            if self._rl_runtime_active:
+                self._rl.stop_operator_preview_and_wait_for_camera()
             self._rl.stop_rl_runtime_and_wait_for_serial()
         finally:
             self._rl_runtime_active = False
+            self._rl_runtime_prepared = False
 
     def _start_act_prewarm(self, max_steps: int) -> None:
         if self._act_process is not None:
@@ -142,105 +189,26 @@ class SystemHybridMissionOperations:
             raise
 
     def _reclaim_stale_act_prewarm(self) -> None:
-        """Stop an abandoned hardware-gated ACT process before a new Mission.
-
-        A prewarm has no serial or camera ownership while it waits for its
-        one-shot gate.  If the PC UI exits in that state, the container can
-        remain alive and make every later prewarm reject itself as a competing
-        ACT Runtime.  Reclaim only the exact hybrid gate argv shape, and refuse
-        to signal it if it has already acquired either physical device.
-        """
-
-        program = r'''import os
-import pathlib
-import signal
-import subprocess
-import sys
-import time
-
-serial, camera = sys.argv[1:3]
-timeout_s = float(sys.argv[3])
-
-def process_argv(pid):
-    try:
-        raw = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes()
-    except (FileNotFoundError, PermissionError):
-        return ()
-    return tuple(os.fsdecode(value) for value in raw.split(b"\0") if value)
-
-def hardware_gate(argv):
-    if "act-runtime" not in argv:
-        return None
-    try:
-        index = argv.index("--hardware-start-gate")
-        gate = argv[index + 1]
-    except (ValueError, IndexError):
-        return None
-    if not gate.startswith("/opt/act-control/hybrid_") or not gate.endswith(".start"):
-        return None
-    return gate
-
-def candidates():
-    found = []
-    for entry in pathlib.Path("/proc").iterdir():
-        if entry.name.isdigit() and hardware_gate(process_argv(int(entry.name))):
-            found.append(int(entry.name))
-    return tuple(found)
-
-def owners(device):
-    result = subprocess.run(
-        ["fuser", device],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        check=False,
-    )
-    return {int(value) for value in result.stdout.split()}
-
-matched = candidates()
-if not matched:
-    print("idle")
-    raise SystemExit(0)
-
-physical_owners = owners(serial) | owners(camera)
-unsafe = physical_owners.intersection(matched)
-if unsafe:
-    raise SystemExit(
-        "hardware-gated ACT Runtime already owns a physical device; "
-        f"refusing stale reclaim: pids={sorted(unsafe)}"
-    )
-
-for pid in sorted(matched, reverse=True):
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-
-deadline = time.monotonic() + timeout_s
-while time.monotonic() < deadline:
-    if not candidates():
-        print("reclaimed")
-        raise SystemExit(0)
-    time.sleep(0.1)
-
-raise SystemExit(
-    "stale hardware-gated ACT Runtime did not exit: "
-    + ",".join(str(pid) for pid in candidates())
-)
-'''
-        command = shlex.join(
-            [
-                "/usr/bin/python3",
-                "-c",
-                program,
-                str(self._guided.rl_serial_port),
-                "/dev/video0",
-                str(self._guided.rl_serial_release_timeout_s),
-            ]
+        result = self._remote_host.reclaim_hardware_gated_runtime(
+            process_marker="act-runtime",
+            gate_prefix="/opt/act-control/hybrid_",
+            protected_devices=(str(self._guided.rl_serial_port), "/dev/video0"),
+            timeout_s=self._guided.rl_serial_release_timeout_s,
+            execute=self._run_remote,
         )
-        result = self._run_remote(command).strip()
         if result == "reclaimed":
             self._output("已回收上一轮遗留的 ACT 预热进程。")
+
+    def _reclaim_stale_rl_prewarm(self) -> None:
+        result = self._remote_host.reclaim_hardware_gated_runtime(
+            process_marker="orin_state_sender.py",
+            gate_prefix="/tmp/excavator-rl-control/hybrid_",
+            protected_devices=(str(self._guided.rl_serial_port),),
+            timeout_s=self._guided.rl_serial_release_timeout_s,
+            execute=self._run_remote,
+        )
+        if result == "reclaimed":
+            self._output("已回收上一轮遗留的 RL 预热进程。")
 
     def _act_remote_command(
         self, *, max_steps: int, hardware_start_gate: str | None
@@ -312,6 +280,7 @@ raise SystemExit(
                 lambda line: "ACT hardware ready: mode=motion" in line,
                 self._config.act_ready_timeout_s,
             )
+            self._start_rl_prewarm()
             process.wait(timeout_s=self._config.act_run_timeout_s)
             if process.returncode != 0:
                 raise RuntimeError(

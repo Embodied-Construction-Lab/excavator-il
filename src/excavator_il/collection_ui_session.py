@@ -23,6 +23,9 @@ class CollectionSessionSnapshot:
     stage: str = "idle"
     positioning_mode: str = ""
     dig_target_id: str = ""
+    task_variant: str = ""
+    soil_reset_block_id: str = ""
+    dig_point_id: str = ""
     episode_path: str = ""
     error: str = ""
     logs: tuple[str, ...] = ()
@@ -35,6 +38,9 @@ def run_guided_collection_worker(
     dig_target_id: str | None,
     commands: Any,
     events: Any,
+    task_variant: str | None = None,
+    soil_reset_block_id: str | None = None,
+    dig_point_id: str | None = None,
 ) -> None:
     """Run the existing guided workflow behind structured process messages."""
     from .guided_episode import (
@@ -85,15 +91,27 @@ def run_guided_collection_worker(
             )
             episode_path = ""
         else:
-            episode_path = run_guided_episode(
-                config,
-                operations,
-                positioning_mode=PositioningMode(positioning_mode),
-                input_fn=wait_for_operator,
-                output=emit_log,
-                stage_callback=emit_stage,
-                rl_target_id=dig_target_id,
-            )
+            if task_variant is not None:
+                emit_log(
+                    "[episode-context] "
+                    f"task_variant={task_variant} "
+                    f"soil_reset_block_id={soil_reset_block_id} "
+                    f"dig_point_id={dig_point_id}"
+                )
+            run_options: dict[str, Any] = {
+                "positioning_mode": PositioningMode(positioning_mode),
+                "input_fn": wait_for_operator,
+                "output": emit_log,
+                "stage_callback": emit_stage,
+                "rl_target_id": dig_target_id,
+            }
+            if task_variant is not None:
+                run_options.update(
+                    task_variant=task_variant,
+                    soil_reset_block_id=soil_reset_block_id,
+                    dig_point_id=dig_point_id,
+                )
+            episode_path = run_guided_episode(config, operations, **run_options)
     except KeyboardInterrupt:
         events.put({"kind": "terminal", "stage": "cancelled"})
     except BaseException as exc:
@@ -142,10 +160,25 @@ class GuidedCollectionSupervisor:
             return replace(self._state, logs=tuple(self._logs))
 
     def start(
-        self, positioning_mode: str, dig_target_id: str | None = None
+        self,
+        positioning_mode: str,
+        dig_target_id: str | None = None,
+        *,
+        task_variant: str | None = None,
+        soil_reset_block_id: str | None = None,
+        dig_point_id: str | None = None,
     ) -> None:
         if positioning_mode not in _POSITIONING_MODES:
             raise ValueError("positioning_mode must be rl, manual, direct or teleop")
+        from .collector.config import validate_collection_protocol
+
+        protocol = validate_collection_protocol(
+            task_variant=task_variant,
+            soil_reset_block_id=soil_reset_block_id,
+            dig_point_id=dig_point_id,
+        )
+        if positioning_mode == "teleop" and protocol:
+            raise ValueError("teleop does not create an Episode or accept collection protocol")
         with self._lock:
             if self._state.stage not in {"idle", *_TERMINAL_STAGES}:
                 raise RuntimeError("a guided collection session is already active")
@@ -163,6 +196,9 @@ class GuidedCollectionSupervisor:
                 stage="starting",
                 positioning_mode=positioning_mode,
                 dig_target_id=dig_target_id or "",
+                task_variant=task_variant or "",
+                soil_reset_block_id=soil_reset_block_id or "",
+                dig_point_id=dig_point_id or "",
                 completed_count=self._completed_count,
             )
             process = self._context.Process(
@@ -173,6 +209,9 @@ class GuidedCollectionSupervisor:
                     dig_target_id,
                     self._commands,
                     self._events,
+                    task_variant,
+                    soil_reset_block_id,
+                    dig_point_id,
                 ),
                 name="guided-collection-worker",
             )

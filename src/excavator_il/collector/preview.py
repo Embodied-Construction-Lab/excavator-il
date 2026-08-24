@@ -8,7 +8,21 @@ import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import MappingProxyType
-from typing import Mapping
+from typing import Mapping, Protocol
+
+
+class _PreviewWriter(Protocol):
+    def write(self, payload: bytes) -> object: ...
+
+
+def _write_preview_payload(writer: _PreviewWriter, payload: bytes) -> bool:
+    """Write one response body; a browser closing the request is not a fault."""
+
+    try:
+        writer.write(payload)
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -108,11 +122,11 @@ class _PreviewHttpServer(ThreadingHTTPServer):
 
 
 class MjpegPreviewServer:
-    """Serve a Collector-owned latest-frame buffer to one allowed PC host."""
+    """Serve Collector-owned named latest-frame buffers to one allowed PC host."""
 
     def __init__(
         self,
-        frames: LatestJpegFrame,
+        frames: LatestJpegFrame | Mapping[str, LatestJpegFrame],
         *,
         telemetry: LatestTelemetryFrame | None = None,
         bind_host: str,
@@ -125,7 +139,17 @@ class MjpegPreviewServer:
             raise ValueError("port must be in [0, 65535]")
         if not isinstance(allowed_client_host, str) or not allowed_client_host:
             raise ValueError("allowed_client_host must be non-empty")
-        self._frames = frames
+        if isinstance(frames, LatestJpegFrame):
+            named_frames = {"front": frames}
+        else:
+            named_frames = dict(frames)
+        if "front" not in named_frames:
+            raise ValueError("frames must contain the front camera")
+        if not set(named_frames).issubset({"front", "dump"}):
+            raise ValueError("camera preview names must be front or dump")
+        if any(not isinstance(value, LatestJpegFrame) for value in named_frames.values()):
+            raise ValueError("camera preview values must be LatestJpegFrame")
+        self._frames = MappingProxyType(named_frames)
         self._telemetry = telemetry
         self._allowed_client_host = allowed_client_host
         self._stop = threading.Event()
@@ -156,19 +180,40 @@ class MjpegPreviewServer:
                 route = self.path.split("?", maxsplit=1)[0]
                 if route == "/healthz":
                     self._health()
-                elif route == "/camera/front.jpg":
-                    self._snapshot()
-                elif route == "/camera/front.mjpg":
-                    self._stream()
+                elif route.startswith("/camera/") and route.endswith(".jpg"):
+                    self._snapshot_route(route)
+                elif route.startswith("/camera/") and route.endswith(".mjpg"):
+                    self._stream_route(route)
                 elif route == "/telemetry/latest.json":
                     self._telemetry_snapshot()
                 else:
                     self.send_error(404, "preview route not found")
 
             def _health(self) -> None:
-                frame = owner._frames.wait_after(0, timeout_s=0.001)
+                cameras: dict[str, dict[str, bool | float | int]] = {}
+                now_ns = time.monotonic_ns()
+                for camera_id, frames in owner._frames.items():
+                    frame = frames.wait_after(0, timeout_s=0.001)
+                    cameras[camera_id] = {
+                        "frame_available": frame is not None,
+                        "sequence": 0 if frame is None else frame.sequence,
+                        "age_ms": (
+                            0.0
+                            if frame is None
+                            else max(
+                                0.0,
+                                (now_ns - frame.capture_monotonic_ns) / 1_000_000.0,
+                            )
+                        ),
+                    }
                 payload = json.dumps(
-                    {"ok": True, "frame_available": frame is not None},
+                    {
+                        "ok": all(
+                            camera["frame_available"] for camera in cameras.values()
+                        ),
+                        "frame_available": cameras["front"]["frame_available"],
+                        "cameras": cameras,
+                    },
                     separators=(",", ":"),
                 ).encode("utf-8")
                 self.send_response(200)
@@ -176,10 +221,31 @@ class MjpegPreviewServer:
                 self.send_header("Content-Length", str(len(payload)))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
-                self.wfile.write(payload)
+                _write_preview_payload(self.wfile, payload)
 
-            def _snapshot(self) -> None:
-                frame = owner._frames.wait_after(0, timeout_s=1.0)
+            @staticmethod
+            def _camera_id(route: str, suffix: str) -> str:
+                return route.removeprefix("/camera/").removesuffix(suffix)
+
+            def _frames_for(self, camera_id: str) -> LatestJpegFrame | None:
+                return owner._frames.get(camera_id)
+
+            def _snapshot_route(self, route: str) -> None:
+                frames = self._frames_for(self._camera_id(route, ".jpg"))
+                if frames is None:
+                    self.send_error(404, "camera preview is disabled")
+                    return
+                self._snapshot(frames)
+
+            def _stream_route(self, route: str) -> None:
+                frames = self._frames_for(self._camera_id(route, ".mjpg"))
+                if frames is None:
+                    self.send_error(404, "camera preview is disabled")
+                    return
+                self._stream(frames)
+
+            def _snapshot(self, frames: LatestJpegFrame) -> None:
+                frame = frames.wait_after(0, timeout_s=1.0)
                 if frame is None:
                     self.send_error(503, "camera frame is not available")
                     return
@@ -188,7 +254,7 @@ class MjpegPreviewServer:
                 self.send_header("Content-Length", str(len(frame.encoded_image)))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
-                self.wfile.write(frame.encoded_image)
+                _write_preview_payload(self.wfile, frame.encoded_image)
 
             def _telemetry_snapshot(self) -> None:
                 if owner._telemetry is None:
@@ -232,9 +298,9 @@ class MjpegPreviewServer:
                 self.send_header("Content-Length", str(len(payload)))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
-                self.wfile.write(payload)
+                _write_preview_payload(self.wfile, payload)
 
-            def _stream(self) -> None:
+            def _stream(self, frames: LatestJpegFrame) -> None:
                 self.send_response(200)
                 self.send_header(
                     "Content-Type",
@@ -245,7 +311,7 @@ class MjpegPreviewServer:
                 self.end_headers()
                 sequence = 0
                 while not owner._stop.is_set():
-                    frame = owner._frames.wait_after(sequence, timeout_s=1.0)
+                    frame = frames.wait_after(sequence, timeout_s=1.0)
                     if frame is None:
                         continue
                     sequence = frame.sequence

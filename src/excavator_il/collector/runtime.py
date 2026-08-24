@@ -6,7 +6,7 @@ import json
 import logging
 import threading
 import time
-from typing import Any
+from typing import Any, Mapping
 
 from .core import CollectorCore, CollectorDecision
 from .machine_state import MachineStateUdpPublisher
@@ -24,23 +24,28 @@ class CollectorRuntime:
         core: CollectorCore,
         recorder: EpisodeRecorder,
         serial_port: Any,
-        camera: Any,
+        cameras: Mapping[str, Any],
         allowed_pc_host: str,
         joystick_timeout_ms: int,
-        camera_preview: LatestJpegFrame | None = None,
+        camera_previews: Mapping[str, LatestJpegFrame] | None = None,
         telemetry_preview: LatestTelemetryFrame | None = None,
         machine_state_publisher: MachineStateUdpPublisher | None = None,
     ) -> None:
         self._core = core
         self._recorder = recorder
         self._serial = serial_port
-        self._camera = camera
+        if tuple(cameras) not in {("front",), ("front", "dump")}:
+            raise ValueError("cameras must contain front and optional dump roles")
+        self._cameras = dict(cameras)
+        previews = {} if camera_previews is None else dict(camera_previews)
+        if not set(previews).issubset(self._cameras):
+            raise ValueError("camera_previews must only contain configured cameras")
+        self._camera_previews = previews
         self._allowed_pc_host = allowed_pc_host
         self._timeout_ns = joystick_timeout_ms * 1_000_000
         self._last_joystick_ns: int | None = None
         self._timeout_zero_sent = False
         self._serial_write_lock = threading.Lock()
-        self._camera_preview = camera_preview
         self._telemetry_preview = telemetry_preview
         self._machine_state_publisher = machine_state_publisher
         self._machine_state_send_failed = False
@@ -153,14 +158,20 @@ class CollectorRuntime:
                     LOGGER.info("AiryLidar machine-state UDP recovered")
                 self._machine_state_send_failed = False
 
-    def capture_once(self) -> str | None:
-        frame = self._camera.read_encoded()
-        if self._camera_preview is not None:
-            self._camera_preview.publish(
+    def capture_once(self, camera_id: str = "front") -> str | None:
+        try:
+            camera = self._cameras[camera_id]
+        except KeyError as exc:
+            raise ValueError(f"camera role is not configured: {camera_id}") from exc
+        frame = camera.read_encoded()
+        preview = self._camera_previews.get(camera_id)
+        if preview is not None:
+            preview.publish(
                 frame.encoded_image,
                 capture_monotonic_ns=frame.capture_monotonic_ns,
             )
         return self._recorder.record_camera(
+            camera_id=camera_id,
             encoded_image=frame.encoded_image,
             capture_monotonic_ns=frame.capture_monotonic_ns,
             extension=frame.extension,

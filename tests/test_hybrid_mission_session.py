@@ -8,6 +8,7 @@ import pytest
 from excavator_il.hybrid_mission import REQUIRED_HYBRID_MOTION_AUTHORIZATION
 from excavator_il.hybrid_mission_session import (
     HybridMissionSupervisor,
+    _watch_parent_identity,
     run_hybrid_mission_worker,
 )
 
@@ -20,6 +21,22 @@ def _wait_for_stage(supervisor, stage, timeout_s=2.0):
             return snapshot
         time.sleep(0.01)
     raise AssertionError(f"stage did not become {stage}: {supervisor.snapshot()}")
+
+
+def test_parent_identity_watcher_interrupts_when_supervisor_disappears():
+    observed_parent_pids = iter((42, 42, 1))
+    sleeps = []
+    interrupts = []
+
+    _watch_parent_identity(
+        42,
+        get_parent_pid=lambda: next(observed_parent_pids),
+        sleep=lambda seconds: sleeps.append(seconds),
+        interrupt=lambda: interrupts.append("SIGINT"),
+    )
+
+    assert sleeps == [0.1, 0.1]
+    assert interrupts == ["SIGINT"]
 
 
 def _scripted_segment(
@@ -226,6 +243,7 @@ def test_hybrid_worker_runs_all_segments_and_emits_completion(monkeypatch):
         ("act", 130),
         ("dump",),
         ("return", "dig_03"),
+        ("stop",),
     ]
     assert emitted[-1] == {
         "kind": "terminal",
@@ -233,6 +251,52 @@ def test_hybrid_worker_runs_all_segments_and_emits_completion(monkeypatch):
         "next_segment": "",
         "completed_cycles": 1,
     }
+
+
+def test_keyboard_interrupt_reports_failure_when_safe_stop_cannot_be_confirmed(
+    monkeypatch,
+):
+    events = queue.Queue()
+
+    class _Config:
+        act_max_steps = 130
+
+    class _Operations:
+        def __init__(self, _config, output):
+            del output
+
+        def run_rl_to_dig(self, _target):
+            raise KeyboardInterrupt
+
+        def safe_stop(self):
+            raise RuntimeError("terminal zero ACK timeout")
+
+    monkeypatch.setattr(
+        "excavator_il.hybrid_mission_session.HybridMissionConfig.load",
+        lambda _path: _Config(),
+    )
+    monkeypatch.setattr(
+        "excavator_il.hybrid_mission_session.SystemHybridMissionOperations",
+        _Operations,
+    )
+
+    run_hybrid_mission_worker(
+        "hybrid.json",
+        "dig_01",
+        "rl_to_dig",
+        False,
+        None,
+        events,
+        queue.Queue(),
+    )
+
+    emitted = []
+    while not events.empty():
+        emitted.append(events.get_nowait())
+    terminal = emitted[-1]
+    assert terminal["kind"] == "terminal"
+    assert terminal["stage"] == "failed"
+    assert "terminal zero ACK timeout" in terminal["error"]
 
 
 @pytest.mark.parametrize(
@@ -352,7 +416,7 @@ def test_automatic_worker_cycles_targets_from_selected_point_without_restarting_
     )
 
     assert len(instances) == 1
-    assert calls == expected_calls
+    assert calls == [*expected_calls, ("stop",)]
     emitted = []
     while not events.empty():
         emitted.append(events.get_nowait())
@@ -372,6 +436,60 @@ def test_automatic_worker_cycles_targets_from_selected_point_without_restarting_
         "next_segment": "",
         "completed_cycles": cycle_count,
     }
+
+
+def test_automatic_worker_accepts_nine_cycle_truck_loading(monkeypatch):
+    events = queue.Queue()
+    act_targets = []
+    current_target = {"value": ""}
+
+    class _Config:
+        act_max_steps = 130
+
+    class _Operations:
+        def __init__(self, _config, output):
+            self.output = output
+
+        def run_rl_to_dig(self, target):
+            current_target["value"] = target
+
+        def run_act_dig(self, _steps):
+            act_targets.append(current_target["value"])
+
+        def run_rl_to_dump_and_dump(self):
+            pass
+
+        def run_rl_return_to_dig(self, target):
+            current_target["value"] = target
+
+        def prewarm_next_act(self, _steps):
+            pass
+
+        def safe_stop(self):
+            pass
+
+    monkeypatch.setattr(
+        "excavator_il.hybrid_mission_session.HybridMissionConfig.load",
+        lambda _path: _Config(),
+    )
+    monkeypatch.setattr(
+        "excavator_il.hybrid_mission_session.SystemHybridMissionOperations",
+        _Operations,
+    )
+
+    run_hybrid_mission_worker(
+        "hybrid.json",
+        "dig_01",
+        "rl_to_dig",
+        True,
+        REQUIRED_HYBRID_MOTION_AUTHORIZATION,
+        events,
+        queue.Queue(),
+        cycle_count=9,
+        dig_target_ids=("dig_01", "dig_02", "dig_03"),
+    )
+
+    assert act_targets == ["dig_01", "dig_02", "dig_03"] * 3
 
 
 def test_segmented_worker_keeps_one_operations_instance_between_clicks(monkeypatch):
@@ -451,4 +569,72 @@ def test_segmented_worker_keeps_one_operations_instance_between_clicks(monkeypat
         ("act", 130),
         ("dump",),
         ("return", "dig_01"),
+        ("stop",),
+    ]
+
+
+def test_worker_selects_resident_backend_from_authoritative_config(monkeypatch):
+    events = queue.Queue()
+    calls = []
+
+    class _Config:
+        act_max_steps = 130
+        runtime_backend = "resident"
+
+    class _ResidentOperations:
+        def __init__(self, _config, output):
+            calls.append(("constructed", output is not None))
+
+        def run_rl_to_dig(self, target):
+            calls.append(("dig", target))
+
+        def run_act_dig(self, steps):
+            calls.append(("act", steps))
+
+        def run_rl_to_dump_and_dump(self):
+            calls.append(("dump",))
+
+        def run_rl_return_to_dig(self, target):
+            calls.append(("return", target))
+
+        def prewarm_next_act(self, steps):
+            calls.append(("resident_ready", steps))
+
+        def safe_stop(self):
+            calls.append(("stop",))
+
+    class _LegacyOperations:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("legacy backend must not be constructed")
+
+    monkeypatch.setattr(
+        "excavator_il.hybrid_mission_session.HybridMissionConfig.load",
+        lambda _path: _Config(),
+    )
+    monkeypatch.setattr(
+        "excavator_il.hybrid_mission_session.SystemHybridMissionOperations",
+        _LegacyOperations,
+    )
+    monkeypatch.setattr(
+        "excavator_il.hybrid_mission_session.SystemResidentHybridMissionOperations",
+        _ResidentOperations,
+    )
+
+    run_hybrid_mission_worker(
+        "hybrid.json",
+        "dig_01",
+        "rl_to_dig",
+        True,
+        REQUIRED_HYBRID_MOTION_AUTHORIZATION,
+        events,
+        queue.Queue(),
+    )
+
+    assert calls == [
+        ("constructed", True),
+        ("dig", "dig_01"),
+        ("act", 130),
+        ("dump",),
+        ("return", "dig_01"),
+        ("stop",),
     ]

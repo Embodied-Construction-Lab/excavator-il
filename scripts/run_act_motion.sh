@@ -113,6 +113,7 @@ fi
 runtime_args=(
   excavator-il act-runtime --config /opt/act-runtime.json
   --motion-authorization ALLOW_ACT_MACHINE_MOTION
+  --operator-observation-config /opt/collection-runtime.json
 )
 if [[ -n "${max_steps}" ]]; then
   runtime_args+=(--max-steps "${max_steps}")
@@ -128,7 +129,7 @@ fi
 
 exec "${docker_command[@]}" run --rm \
   --runtime=nvidia --gpus all \
-  --network=none \
+  --network=host \
   --read-only \
   --user "${runtime_uid}:${runtime_gid}" \
   --group-add "${serial_gid}" \
@@ -148,6 +149,7 @@ exec "${docker_command[@]}" run --rm \
   -v /home/jetson16/workspace_excavator/shared:/opt/excavator-config:ro \
   -v "${deployment_root}/logs:/opt/act-runtime-logs" \
   -v "${repo_dir}/config/act_runtime.orin.json:/opt/act-runtime.json:ro" \
+  -v "${repo_dir}/config/collection.orin.json:/opt/collection-runtime.json:ro" \
   "${control_mount[@]}" \
   "${image}" \
   "${runtime_args[@]}"

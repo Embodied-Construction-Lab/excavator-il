@@ -132,6 +132,51 @@ def test_reclaim_serial_owner_propagates_unknown_owner_failure():
         )
 
 
+def test_reclaim_hardware_gated_runtime_matches_gate_and_refuses_device_owner():
+    commands = []
+    host = SshRuntimeHost("jetson16@192.168.50.2")
+
+    result = host.reclaim_hardware_gated_runtime(
+        process_marker="orin_state_sender.py",
+        gate_prefix="/tmp/excavator-rl-control/hybrid_",
+        protected_devices=("/dev/ttyTHS1",),
+        timeout_s=8,
+        execute=lambda command: commands.append(command) or "reclaimed\n",
+    )
+
+    assert result == "reclaimed"
+    assert len(commands) == 1
+    command = commands[0]
+    assert "orin_state_sender.py" in command
+    assert "/tmp/excavator-rl-control/hybrid_" in command
+    assert "--hardware-start-gate" in command
+    assert "/dev/ttyTHS1" in command
+    assert "refusing stale reclaim" in command
+    assert "os.kill(pid, signal.SIGTERM)" in command
+
+
+@pytest.mark.parametrize(
+    ("process_marker", "gate_prefix", "protected_devices"),
+    [
+        ("", "/tmp/control/hybrid_", ("/dev/ttyTHS1",)),
+        ("runtime", "relative/hybrid_", ("/dev/ttyTHS1",)),
+        ("runtime", "/tmp/control/hybrid_", ()),
+        ("runtime", "/tmp/control/hybrid_", ("relative",)),
+    ],
+)
+def test_reclaim_hardware_gated_runtime_rejects_unsafe_scope(
+    process_marker, gate_prefix, protected_devices
+):
+    host = SshRuntimeHost("jetson16@192.168.50.2")
+
+    with pytest.raises(ValueError):
+        host.reclaim_hardware_gated_runtime(
+            process_marker=process_marker,
+            gate_prefix=gate_prefix,
+            protected_devices=protected_devices,
+            timeout_s=8,
+        )
+
 @pytest.mark.parametrize(
     "known",
     [(), ((),), (("", "collect"),), (("bad\x00path",),)],

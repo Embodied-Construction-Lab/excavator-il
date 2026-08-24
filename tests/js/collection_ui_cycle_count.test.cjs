@@ -33,9 +33,9 @@ assert.equal(vm.runInContext("selectedHybridCycleCount()", context), 4);
 vm.runInContext("renderHybridCycleButton()", context);
 assert.equal(startButton.textContent, "自动装车 4 铲");
 
-cycleSelect.value = "5";
+cycleSelect.value = "9";
 vm.runInContext("renderHybridCycleButton()", context);
-assert.equal(startButton.textContent, "自动装车 5 铲");
+assert.equal(startButton.textContent, "自动装车 9 铲");
 
 cycleSelect.value = "999";
 assert.equal(

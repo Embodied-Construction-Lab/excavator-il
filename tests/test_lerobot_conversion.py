@@ -11,6 +11,44 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from excavator_il.lerobot_conversion import convert_episodes
 
 
+@pytest.mark.parametrize(
+    ("status", "success"),
+    (("failed", False), ("aborted", False)),
+)
+def test_convert_rejects_unsuccessful_demonstration_before_dataset_creation(
+    tmp_path, rgb_episode_factory, status, success
+):
+    episode = rgb_episode_factory(step_count=3)
+    metadata_path = episode / "episode.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata.update({"status": status, "success": success})
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="successful complete demonstration"):
+        convert_episodes(
+            episode_paths=[episode],
+            output_root=tmp_path / "unsuccessful_rejected",
+            repo_id="local/unsuccessful_rejected",
+        )
+
+
+def test_convert_rejects_diagnostic_episode_before_dataset_creation(
+    tmp_path, rgb_episode_factory
+):
+    episode = rgb_episode_factory(step_count=3)
+    metadata_path = episode / "episode.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["recording_purpose"] = "diagnostic"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="diagnostic Episode.*training"):
+        convert_episodes(
+            episode_paths=[episode],
+            output_root=tmp_path / "diagnostic_rejected",
+            repo_id="local/diagnostic_rejected",
+        )
+
+
 def test_convert_requires_explicit_opt_in_for_synthetic_episode(
     tmp_path, rgb_episode_factory
 ):
@@ -139,6 +177,9 @@ def test_convert_episode_builds_rgb_state_action_lerobot_dataset(tmp_path, rgb_e
         [0.15, 0.14, 0.13, 0.0, 0.0, 0.0, 0.5, 1.0, 1.5, 0.0, 0.0],
     )
     np.testing.assert_allclose(row["action"], [0.2, -0.3, 0.4, 0.0])
+    assert row["source.task_variant"] == "unknown"
+    assert row["source.soil_reset_block_id"] == "unknown"
+    assert row["source.dig_point_id"] == "unknown"
 
 
 def test_convert_preserves_all_source_episode_boundaries(tmp_path, rgb_episode_factory):
@@ -260,3 +301,79 @@ def test_convert_uses_lerobot_episode_boundaries_for_training_segments(
     assert dataset.hf_dataset[2]["source.frame_index"] == "2"
     assert dataset[1]["action_is_pad"].tolist() == [False, True, True, True]
     assert dataset[2]["action_is_pad"].tolist() == [False, False, False, True]
+
+
+def test_convert_dual_camera_opt_in_preserves_protocol_group_labels(
+    tmp_path, rgb_episode_factory
+):
+    episode = rgb_episode_factory(step_count=3, dual_camera=True)
+    output = tmp_path / "dual_camera_dataset"
+
+    summary = convert_episodes(
+        episode_paths=[episode],
+        output_root=output,
+        repo_id="local/excavator_dual_rgb_v2",
+        camera_roles=("front", "dump"),
+    )
+
+    assert summary.frame_count == 3
+    dataset = LeRobotDataset(repo_id="local/excavator_dual_rgb_v2", root=output)
+    assert dataset.features["observation.images.front"]["shape"] == (24, 32, 3)
+    assert dataset.features["observation.images.dump"]["shape"] == (24, 32, 3)
+    row = dataset.hf_dataset[0]
+    assert row["source.task_variant"] == "dig_transport_dump"
+    assert row["source.soil_reset_block_id"] == "block_01"
+    assert row["source.dig_point_id"] == "dig_01"
+
+
+def test_convert_default_preserves_both_cameras_for_dual_raw_episode(
+    tmp_path, rgb_episode_factory
+):
+    episode = rgb_episode_factory(step_count=3, dual_camera=True)
+    output = tmp_path / "dual_camera_auto_dataset"
+
+    convert_episodes(
+        episode_paths=[episode],
+        output_root=output,
+        repo_id="local/dual_camera_auto",
+    )
+
+    dataset = LeRobotDataset(repo_id="local/dual_camera_auto", root=output)
+    assert "observation.images.front" in dataset.features
+    assert "observation.images.dump" in dataset.features
+
+
+def test_convert_auto_camera_contract_rejects_mixed_single_and_dual_episodes(
+    tmp_path, rgb_episode_factory
+):
+    single = rgb_episode_factory(
+        episode_id="episode_single", step_count=3
+    )
+    dual = rgb_episode_factory(
+        episode_id="episode_dual", step_count=3, dual_camera=True
+    )
+
+    with pytest.raises(ValueError, match="mixed camera contracts"):
+        convert_episodes(
+            episode_paths=[single, dual],
+            output_root=tmp_path / "mixed_contract",
+            repo_id="local/mixed_contract",
+        )
+
+
+def test_convert_explicit_front_only_is_available_for_dual_camera_ablation(
+    tmp_path, rgb_episode_factory
+):
+    episode = rgb_episode_factory(step_count=3, dual_camera=True)
+    output = tmp_path / "front_only_ablation"
+
+    convert_episodes(
+        episode_paths=[episode],
+        output_root=output,
+        repo_id="local/front_only_ablation",
+        camera_roles=("front",),
+    )
+
+    dataset = LeRobotDataset(repo_id="local/front_only_ablation", root=output)
+    assert "observation.images.front" in dataset.features
+    assert "observation.images.dump" not in dataset.features

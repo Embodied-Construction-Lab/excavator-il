@@ -7,12 +7,21 @@ from excavator_il.hybrid_mission_system import SystemHybridMissionOperations
 
 
 class _RlOperations:
-    def __init__(self, *, fail_follow=False):
+    def __init__(self, *, fail_follow=False, fail_prewarm=False):
         self.calls = []
         self.fail_follow = fail_follow
+        self.fail_prewarm = fail_prewarm
 
     def start_rl_runtime(self):
         self.calls.append("start_rl_runtime")
+
+    def start_operator_preview(self):
+        self.calls.append("start_operator_preview")
+
+    def prewarm_rl_runtime(self, hardware_start_gate):
+        self.calls.append(("prewarm_rl_runtime", str(hardware_start_gate)))
+        if self.fail_prewarm:
+            raise RuntimeError("rl prewarm failed")
 
     def run_rl_follow(self, phase, *, target_id=None):
         self.calls.append(("run_rl_follow", phase, target_id))
@@ -24,6 +33,9 @@ class _RlOperations:
 
     def stop_rl_runtime_and_wait_for_serial(self):
         self.calls.append("stop_rl_runtime_and_wait_for_serial")
+
+    def stop_operator_preview_and_wait_for_camera(self):
+        self.calls.append("stop_operator_preview_and_wait_for_camera")
 
 
 def _config(tmp_path):
@@ -46,6 +58,14 @@ def _guided(tmp_path):
         log_dir = tmp_path
 
     return _GuidedConfig()
+
+
+def _remote_success(command, calls=None):
+    if calls is not None:
+        calls.append(command)
+    if "refusing stale reclaim" in command:
+        return "idle\n"
+    return "released\n"
 
 
 def test_hybrid_system_adapter_prewarms_act_and_reuses_rl_for_dump_return(
@@ -89,7 +109,7 @@ def test_hybrid_system_adapter_prewarms_act_and_reuses_rl_for_dump_return(
     monkeypatch.setattr(
         operations,
         "_run_remote",
-        lambda command: remote_commands.append(command) or "released\n",
+        lambda command: _remote_success(command, remote_commands),
     )
 
     operations.run_rl_to_dig("dig_03")
@@ -99,12 +119,21 @@ def test_hybrid_system_adapter_prewarms_act_and_reuses_rl_for_dump_return(
 
     assert rl.calls == [
         "start_rl_runtime",
+        "start_operator_preview",
         ("run_rl_follow", "dig", "dig_03"),
+        "stop_operator_preview_and_wait_for_camera",
         "stop_rl_runtime_and_wait_for_serial",
+        (
+            "prewarm_rl_runtime",
+            "/tmp/excavator-rl-control/hybrid_"
+            + operations._act_gate_name.removeprefix("hybrid_"),
+        ),
         "start_rl_runtime",
+        "start_operator_preview",
         ("run_rl_follow", "dump", None),
         ("run_rl_fixed_action", "ExecuteDump", 18083),
         ("run_rl_follow", "dig", "dig_03"),
+        "stop_operator_preview_and_wait_for_camera",
         "stop_rl_runtime_and_wait_for_serial",
     ]
     rendered = " ".join(processes[0].argv)
@@ -186,13 +215,70 @@ def test_hybrid_system_adapter_releases_rl_and_prewarm_after_follow_failure(
         line_process_factory=_PrewarmProcess,
         output=lambda _message: None,
     )
-    monkeypatch.setattr(operations, "_run_remote", lambda _command: "released\n")
+    monkeypatch.setattr(operations, "_run_remote", _remote_success)
 
     with pytest.raises(RuntimeError, match="follow failed"):
         operations.run_rl_to_dig("dig_01")
 
     assert rl.calls[-1] == "stop_rl_runtime_and_wait_for_serial"
     assert operations._act_process is None
+
+
+def test_rl_prewarm_failure_falls_back_to_cold_start_after_act(
+    tmp_path, monkeypatch
+):
+    messages = []
+
+    class _ActProcess:
+        returncode = 0
+
+        def __init__(self, _argv, **_kwargs):
+            pass
+
+        def wait_for(self, predicate, _timeout_s, *, after_index=-1):
+            del after_index
+            lines = ("HYBRID_ACT_PID=4242", "ACT hardware ready: mode=motion")
+            line = next(candidate for candidate in lines if predicate(candidate))
+            return lines.index(line), line
+
+        def wait(self, timeout_s=5.0):
+            assert timeout_s == 90
+
+    rl = _RlOperations(fail_prewarm=True)
+    operations = SystemHybridMissionOperations(
+        _config(tmp_path),
+        guided_config=_guided(tmp_path),
+        rl_operations=rl,
+        line_process_factory=_ActProcess,
+        output=messages.append,
+    )
+    monkeypatch.setattr(operations, "_run_remote", lambda _command: "released\n")
+
+    operations.run_act_dig(130)
+    operations.run_rl_to_dump_and_dump()
+
+    assert "start_rl_runtime" in rl.calls
+    assert any("冷启动" in message for message in messages)
+
+
+def test_safe_stop_cleans_rl_runtime_that_is_still_waiting_at_hardware_gate(
+    tmp_path, monkeypatch
+):
+    rl = _RlOperations()
+    operations = SystemHybridMissionOperations(
+        _config(tmp_path),
+        guided_config=_guided(tmp_path),
+        rl_operations=rl,
+        output=lambda _message: None,
+    )
+    monkeypatch.setattr(operations, "_run_remote", _remote_success)
+
+    operations._start_rl_prewarm()
+    operations.safe_stop()
+
+    assert any(call[0] == "prewarm_rl_runtime" for call in rl.calls)
+    assert rl.calls[-1] == "stop_rl_runtime_and_wait_for_serial"
+    assert operations._rl_runtime_prepared is False
 
 
 def test_act_prewarm_start_failure_does_not_mistake_active_rl_for_act_owner(
@@ -231,7 +317,7 @@ def test_act_prewarm_start_failure_does_not_mistake_active_rl_for_act_owner(
     monkeypatch.setattr(
         operations,
         "_run_remote",
-        lambda command: cleanup_commands.append(command) or "released\n",
+        lambda command: _remote_success(command, cleanup_commands),
     )
 
     with pytest.raises(RuntimeError, match="prewarm failed"):

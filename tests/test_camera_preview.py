@@ -8,6 +8,7 @@ from excavator_il.collector.preview import (
     LatestJpegFrame,
     LatestTelemetryFrame,
     MjpegPreviewServer,
+    _write_preview_payload,
 )
 
 
@@ -21,6 +22,14 @@ def test_latest_jpeg_frame_is_bounded_and_waits_for_a_new_sequence():
     assert first.sequence == 1
     assert second.sequence == 2
     assert latest.wait_after(1, timeout_s=0.01) == second
+
+
+def test_preview_client_disconnect_is_an_expected_write_result():
+    class DisconnectedClient:
+        def write(self, _payload):
+            raise BrokenPipeError("browser closed the preview request")
+
+    assert _write_preview_payload(DisconnectedClient(), b"jpeg") is False
 
 
 def test_mjpeg_preview_server_streams_the_collector_owned_latest_frame():
@@ -57,7 +66,10 @@ def test_mjpeg_preview_server_streams_the_collector_owned_latest_frame():
     )
 
     with urlopen(f"http://127.0.0.1:{server.port}/healthz", timeout=1.0) as health:
-        assert json.load(health) == {"ok": True, "frame_available": True}
+        health_payload = json.load(health)
+        assert health_payload["ok"] is True
+        assert health_payload["frame_available"] is True
+        assert health_payload["cameras"]["front"]["frame_available"] is True
     with urlopen(
         f"http://127.0.0.1:{server.port}/camera/front.jpg", timeout=1.0
     ) as snapshot:
@@ -103,3 +115,40 @@ def test_mjpeg_preview_server_streams_the_collector_owned_latest_frame():
     assert b"multipart/x-mixed-replace; boundary=frame" in response
     assert b"Content-Type: image/jpeg" in response
     assert b"fixture-jpeg" in response
+
+
+def test_preview_server_exposes_front_and_dump_as_independent_named_streams():
+    front = LatestJpegFrame()
+    dump = LatestJpegFrame()
+    server = MjpegPreviewServer(
+        {"front": front, "dump": dump},
+        bind_host="127.0.0.1",
+        port=0,
+        allowed_client_host="127.0.0.1",
+    )
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    front.publish(b"front-jpeg", capture_monotonic_ns=time.monotonic_ns())
+    dump.publish(b"dump-jpeg", capture_monotonic_ns=time.monotonic_ns())
+
+    try:
+        with urlopen(
+            f"http://127.0.0.1:{server.port}/camera/front.jpg", timeout=1.0
+        ) as response:
+            assert response.read() == b"front-jpeg"
+        with urlopen(
+            f"http://127.0.0.1:{server.port}/camera/dump.jpg", timeout=1.0
+        ) as response:
+            assert response.read() == b"dump-jpeg"
+        with urlopen(
+            f"http://127.0.0.1:{server.port}/healthz", timeout=1.0
+        ) as response:
+            health = json.load(response)
+    finally:
+        server.close()
+        thread.join(timeout=1.0)
+
+    assert health["ok"] is True
+    assert health["cameras"]["front"]["frame_available"] is True
+    assert health["cameras"]["dump"]["frame_available"] is True
+    assert not thread.is_alive()

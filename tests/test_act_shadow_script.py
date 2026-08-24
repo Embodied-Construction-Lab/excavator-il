@@ -13,6 +13,10 @@ def test_act_shadow_runs_as_operator_with_hardware_device_groups():
     assert "/dev/video0" in script
     assert "/dev/video1" not in script
     assert "chmod 777" not in script
+    assert "docker_command=(docker)" in script
+    assert "docker info" in script
+    assert 'exec "${docker_command[@]}" run' in script
+    assert "exec sudo docker run" not in script
 
 
 def test_act_runtime_uses_the_verified_uvc_capture_node():
@@ -44,7 +48,9 @@ def test_act_motion_requires_local_authorization_without_pc_runtime_input():
     assert script_path.stat().st_mode & 0o111
     assert "act_operator_hmac" not in script
     assert "authentication_key" not in script
-    assert "--network=none" in script
+    assert "--network=host" in script
+    assert "--operator-observation-config /opt/collection-runtime.json" in script
+    assert "collection.orin.json:/opt/collection-runtime.json:ro" in script
     assert "PC teleop" in script
     assert "模型可能立即发送非零杆量" in script
     assert '[[ "${confirmation}" != "ALLOW_ACT_MACHINE_MOTION" ]]' in script

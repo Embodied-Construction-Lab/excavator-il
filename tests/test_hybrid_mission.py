@@ -1,4 +1,5 @@
 import json
+from pathlib import PurePosixPath
 
 import pytest
 
@@ -6,6 +7,7 @@ from excavator_il.hybrid_mission import (
     REQUIRED_HYBRID_MOTION_AUTHORIZATION,
     HybridMissionConfig,
     HybridMissionSegment,
+    ResidentMissionConfig,
     execute_hybrid_segment,
     remaining_hybrid_segments,
 )
@@ -122,6 +124,125 @@ def test_hybrid_config_resolves_paths_and_validates_step_budget(tmp_path):
     assert config.act_max_steps == 130
     assert config.act_remote_script == "scripts/run_act_motion.sh"
     assert config.rl_behavior_port == 18083
+    assert config.runtime_backend == "legacy"
+    assert config.resident is None
+
+
+def test_hybrid_v2_config_selects_one_resident_runtime_for_the_whole_mission(
+    tmp_path,
+):
+    guided = tmp_path / "guided.json"
+    guided.write_text("{}", encoding="utf-8")
+    path = tmp_path / "hybrid.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavator_hybrid_mission_config.v2",
+                "runtime_backend": "resident",
+                "guided_config": "guided.json",
+                "act": {
+                    "max_steps": 130,
+                    "ready_timeout_s": 60,
+                    "run_timeout_s": 90,
+                    "remote_script": "scripts/run_act_motion.sh",
+                },
+                "rl": {"behavior_port": 18083},
+                "resident": {
+                    "owner_script": "scripts/run_resident_mission_runtime.sh",
+                    "act_worker_script": "scripts/run_act_resident.sh",
+                    "runtime_root": "/home/jetson16/.local/run/excavator-resident",
+                    "ready_timeout_s": 120,
+                    "handoff_timeout_s": 3,
+                    "poll_interval_ms": 50,
+                    "prepared_dump_lead_steps": 20,
+                    "prepared_ready_grace_ms": 300,
+                    "prepared_start_tolerance_m": 0.15,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = HybridMissionConfig.load(path)
+
+    assert config.runtime_backend == "resident"
+    assert config.resident == ResidentMissionConfig(
+        owner_script="scripts/run_resident_mission_runtime.sh",
+        act_worker_script="scripts/run_act_resident.sh",
+        runtime_root=PurePosixPath(
+            "/home/jetson16/.local/run/excavator-resident"
+        ),
+        ready_timeout_s=120,
+        handoff_timeout_s=3,
+        poll_interval_ms=50,
+        prepared_dump_lead_steps=20,
+        prepared_ready_grace_ms=300,
+        prepared_start_tolerance_m=0.15,
+    )
+
+
+def test_hybrid_v2_config_rejects_prepared_dump_lead_at_the_act_budget(tmp_path):
+    path = tmp_path / "hybrid.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavator_hybrid_mission_config.v2",
+                "runtime_backend": "resident",
+                "guided_config": "guided.json",
+                "act": {
+                    "max_steps": 20,
+                    "ready_timeout_s": 1,
+                    "run_timeout_s": 3,
+                    "remote_script": "scripts/run_act_motion.sh",
+                },
+                "rl": {"behavior_port": 18083},
+                "resident": {
+                    "owner_script": "scripts/run_resident_mission_runtime.sh",
+                    "act_worker_script": "scripts/run_act_resident.sh",
+                    "runtime_root": "/run/excavator-resident",
+                    "ready_timeout_s": 120,
+                    "handoff_timeout_s": 3,
+                    "poll_interval_ms": 50,
+                    "prepared_dump_lead_steps": 20,
+                    "prepared_ready_grace_ms": 300,
+                    "prepared_start_tolerance_m": 0.15,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError, match="prepared_dump_lead_steps must be less than act.max_steps"
+    ):
+        HybridMissionConfig.load(path)
+
+
+def test_hybrid_v2_config_rejects_resident_backend_without_resident_contract(
+    tmp_path,
+):
+    path = tmp_path / "hybrid.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavator_hybrid_mission_config.v2",
+                "runtime_backend": "resident",
+                "guided_config": "guided.json",
+                "act": {
+                    "max_steps": 130,
+                    "ready_timeout_s": 60,
+                    "run_timeout_s": 90,
+                    "remote_script": "scripts/run_act_motion.sh",
+                },
+                "rl": {"behavior_port": 18083},
+                "resident": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="resident"):
+        HybridMissionConfig.load(path)
 
 
 @pytest.mark.parametrize("steps", [0, -1, True, 2001])

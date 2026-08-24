@@ -15,6 +15,7 @@
   },
   "log_root": "/opt/act-runtime-logs",
   "device": "cuda",
+  "dig_policy_backend": "lerobot_act",
   "stm32_serial": {
     "port": "/dev/ttyTHS1",
     "baudrate": 460800

@@ -26,20 +26,22 @@
 ACT 冒烟训练，确认损失能够下降、模型能够保存并完成离线推理。此阶段只判断数据链是否可学，
 不评价真机挖掘成功率。
 
-### 阶段 C：ACT v1 数据集
+### 阶段 C：ICRA 2027 双 RGB Demonstration 数据集
 
-- 目标采集 60～100 条质量合格的成功 Episode；
-- 额外保留至少 10 条失败或人工中止 Episode，但 ACT v1 暂不用于行为克隆训练；
-- 操作员、初始姿态、挖掘点和材料条件尽量覆盖真实部署范围；
-- 按 Episode 划分 80% 训练、10% 验证、10% 测试，禁止按帧随机拆分；
-- 同一连续采集批次尽量只进入一个集合，降低相邻 Episode 的数据泄漏。
+- 目标采集 200 条质量合格且人工确认成功的 Episode；
+- 其中 `dig_only` 与 `dig_transport_dump` 各 100 条；
+- 使用 20 个 `soil_reset_block_id`，每块 10 条并轮换三个 `dig_point_id`；
+- 失败或人工中止 Episode 原地保留为证据，但不占 campaign 槽位且不能进入行为克隆转换；
+- train/validation 按 soil block 原子切分，禁止按帧或单条 Episode 随机拆分；
+- 正式 held-out live 评估使用采集结束后另行准备的新 soil blocks，不从这 200 条中挑选结果。
 
 ### 阶段 D：训练与离线评估
 
-1. 分别转换 train/val/test 三个 LeRobotDataset。
-2. 使用 train 数据训练 ACT，val 数据选择 checkpoint。
-3. 在 test Episode 上报告动作 MAE、动作方向一致率和动作序列平滑度。
-4. 保存数据清单、Git commit、配置、随机种子和 checkpoint。
+1. 转换一份保留 `front + dump` 的完整证据数据集，以及当前 ACT v1 使用的显式 `front` 视图。
+2. 按 `soil_reset_block_id` 生成稳定 train/validation manifest 并 materialize。
+3. 使用 train 数据训练策略，validation 数据选择 checkpoint。
+4. 最终任务成功率只在独立 held-out live Experiment Runs 上报告。
+5. 保存数据清单、Git commit、配置、随机种子、模型字节指纹和 checkpoint。
 
 ### 阶段 E：真机递进验证
 
@@ -219,6 +221,25 @@ SSH，并重启对应的 VS Code Server/进程，再检查其实际环境。不�
 当前机器开机后液压即具备动作条件，不存在额外的“液压安全锁定/解锁”软件阶段。第一条短
 Episode 从 PC 运行引导脚本，作业区必须无人且急停可立即操作：
 
+在占用 STM32 串口之前，先在 Orin 单独验收两路 RGB 相机。打开现场照明，移除镜头遮挡，并确认
+前视相机能覆盖入铲区域、倾倒相机能覆盖卡车/倾倒区域；然后执行：
+
+```bash
+cd /home/jetson16/workspace_excavator/excavator-il
+conda activate excavator-il-collector
+python scripts/diagnose_dual_camera.py \
+  --duration-s 5 \
+  --output-dir /tmp/icra2027-camera-preflight
+```
+
+该诊断只并发打开 `config/collection.orin.json` 中的 `camera_front` 和 `camera_dump`，不会导入串口
+库、打开 `/dev/ttyTHS1`、创建网络连接或发送动作。两路先各自丢弃 3 帧完成 UVC/曝光预热，再进入
+固定 5 秒测量窗口，避免把首次打开设备的等待时间误判为持续掉帧。只有两路解析到不同物理设备、分辨率均为
+`640×480×3`、实测频率均在 `25–35 Hz`、画面没有达到 99.5% 近黑/近白，并且两路均产生有效
+JPEG 时才返回 0。还必须人工查看 `/tmp/icra2027-camera-preflight/front.jpg` 和 `dump.jpg`，确认
+内容、方向和视野正确；算法通过不能替代这一步。任一路返回失败或画面仍黑暗/被遮挡时，不得开始
+零命令 soak、正式 Pilot 或 200 条 campaign，应先修正照明、相机朝向、遮挡或设备映射再复测。
+
 在发动机关闭、所有采集硬件上电且 deadman 保持释放时，先运行 30 秒零命令 soak：
 
 ```bash
@@ -241,6 +262,11 @@ python scripts/collect_guided_episode.py
 
 脚本读取 `config/guided_episode.pc.json`。启动后先选择
 `RL定位/l`、`人工预定位/y` 或 `直接采集/n`：
+
+该脚本是非正式终端诊断入口：实际创建的 Episode 固定写为
+`recording_purpose=diagnostic`，且不携带 `collection_protocol`。即使 Orin 的 `data_root` 指向正式
+campaign raw root，权威 inspector 也只会把它计入 `ignored_diagnostics`，不会形成 `malformed`、
+占用槽位或进入训练集。不得使用该脚本填充正式 200 条 campaign；正式示教从 3.2 的 WebUI 发起。
 
 - `人工预定位/y`：Collector 先运行一个不创建 Episode 的 teleop。按住 deadman 用双杆调整到 RL
   Follow 的交接位姿附近；X/Y 调整工作装置，Z1/Z2 调整左右履带。完成后六轴全部回中、松开
@@ -269,8 +295,12 @@ Orin 的 `excavator-orin-runtime/deploy/edge_runtime.remote.json` 必须把
 `remote_behavior.allowed_client_host` 配为当前控制链路 PC 地址（有线链路为 `192.168.50.1`）。修改
 AiryLidar Mission 目标后必须重启 Operator，使 Planner 与引导客户端加载同一 Mission SHA。
 
-RL 模式从 `rl_preposition.mission_config` 读取实际 Dig 目标并写入 Episode 的 `dig_target_m`；人工和
-直接模式使用 `episode.dig_target_m`。该字段目前仅作溯源元数据，不参与 ACT 输入。
+正式 campaign 的 WebUI 流程中，RL、人工和直接三种模式都从 `rl_preposition.demo_config` 按本槽位
+`dig_point_id` 解析实际 Dig 目标并写入 Episode 的 `dig_target_m`；RL 定位返回值还必须与该权威
+坐标一致。共享引导流程在 preflight 前和每次 Episode 创建（包括重录）前，都会重新读取 PC 上实际文件，
+核对 AiryLidar 仓库为 clean、HEAD 未变、文件路径与 SHA-256 未变，并把这组事实写入
+`episode.json.target_source_provenance`。只有没有 collection protocol 的旧式诊断入口才兼容使用
+`episode.dig_target_m`。该字段仅作溯源元数据，不参与 ACT 输入。
 
 RL 定位不切换或重烧 STM32 固件。脚本执行的串口所有权边界是：RL Follow 成功并确认 terminal
 velocity zero → 向本轮脚本启动的精确 RL PID 发送 `SIGTERM` → 等待其 `finally` 再次归零并关闭串口
@@ -281,7 +311,8 @@ velocity zero → 向本轮脚本启动的精确 RL PID 发送 `SIGTERM` → 等
 
 1. 检查 PC 配置与 Orin SSH；
 2. 启动本次专属 Collector，并记录其精确 PID；
-3. 创建正式 Episode，使 Recorder 进入待命，再启动新的 teleop；teleop 先通过 0.5 秒本地手柄中位
+3. 创建明确标记为 `recording_purpose=diagnostic` 的 Episode，使 Recorder 进入待命，再启动新的
+   teleop；teleop 先通过 0.5 秒本地手柄中位
    稳定门，然后确认 ACK 已接受、无拒绝且 deadman 初始释放；稳定门通过前不创建 UDP socket；
 4. Recorder、teleop 和 ACK 门禁全部就绪后才提示等待 deadman；按下后终端显示“记录已开始”，
    此时再操纵双杆 XY；Z1/Z2 在 Recorder 激活期间由 Collector 强制为零；
@@ -296,17 +327,36 @@ velocity zero → 向本轮脚本启动的精确 RL PID 发送 `SIGTERM` → 等
 Collector 或 teleop 的本地日志保存在 `logs/`，该目录不进入 Git。
 
 原始 Episode 只保存在 Orin；根目录由 Orin 的 `config/collection.orin.json` 中 `data_root`
-设置。当前为 `/home/jetson16/workspace_excavator/data/excavator-data`。PC 的
+设置。ICRA 2027 双 RGB campaign 固定为
+`/home/jetson16/workspace_excavator/data/icra2027-dual-rgb-campaign-v1/raw`。
+历史目录不删除，也不得与该 campaign 混合。PC 的
 `config/guided_episode.pc.json` 中
 `runtime.log_dir` 只控制引导、teleop 和校验日志位置，不是数据集存储位置。迁移机器时必须显式
 检查这两个配置，不能仅复制 shell 历史中的绝对路径。
 
+正式 campaign 的权威进度来自 Orin 原始目录，不来自浏览器缓存或人工计数。可随时只读检查：
+
+```bash
+cd /home/jetson16/workspace_excavator/excavator-il
+conda activate excavator-il-collector
+python scripts/inspect_collection_campaign.py \
+  --collection-config config/collection.orin.json --next
+```
+
+采满 200 条之前该命令以退出码 2 返回是预期行为；应读取 JSON 中的 `summary` 和
+`next_expected_slot`。只有 `complete_and_valid=true` 时才表示整个 campaign 已完成且不存在
+duplicate、unplanned 或 malformed Episode。失败/中止尝试保留，但不会占用计划槽位；
+`recording_purpose=diagnostic` 的零命令 soak 和 `collect_guided_episode.py` 动作诊断都会计入
+`ignored_diagnostics`，不会进入训练集或占用槽位。
+
 ### 3.2 PC 本地采集 UI
 
-UI 是终端引导脚本的本地浏览器 Adapter，不是另一套采集实现。它调用同一个
+UI 复用终端引导脚本的运动与 Episode 生命周期实现，不是另一套采集实现。它调用同一个
 `GuidedCollectionSupervisor`，再按模式进入 `run_guided_episode()` 或 `run_standalone_teleop()`，
 所以 RL/Collector/teleop 串口互斥、deadman
-门禁、Episode 封存、重录、校验和异常归零语义与 3.1 完全一致。服务强制只监听 loopback，浏览器
+门禁、Episode 封存、重录、校验和异常归零语义与 3.1 一致；但 recording purpose 不同：3.1 的
+终端入口固定为 `diagnostic`，WebUI 正式请求携带完整 `collection_protocol` 并记录为
+`demonstration`，同时执行 campaign 槽位门禁。服务强制只监听 loopback，浏览器
 之外的页面没有 UI 请求头时不能触发状态改变。
 
 PC 安装并启动：
@@ -382,26 +432,33 @@ Collector 运行时，同一只读 HTTP 服务还提供最新 STM32 遥测。UI 
 
 页面选择 DIG 点后点击“开始分段验证”，按顺序检查：
 
-- `RL 到挖点` 期间会并行预热 ACT；此时 ACT 不打开串口或相机。RL 完成、终态回零并确认
-  `/dev/ttyTHS1` 释放后进入 `等待 ACT 挖掘`；
-- 点击 ACT 段；这次明确点击就是本地运动授权，页面自动发送固定授权值，不需要手工输入口令。
-  默认完成 130 个 10 Hz step 后自动回零；
-- 点击“前往倾倒并倾倒”，同一 RL Runtime 先 Follow DUMP，再调用现有 `ExecuteDump`，完成后以
-  零动作保持热待命；
-- 点击“RL 返回挖点”，直接复用热待命 Runtime 返回本轮选择的同一 DIG 点，完成后终态回零并退出。
+- Mission 开始时 Orin resident owner 一次性打开 `/dev/ttyTHS1` 并在内存中保持 RL ONNX；独立
+  ACT Worker 一次性加载 checkpoint、完成 CUDA warmup 并占用 `/dev/video0`，但绝不映射串口；
+- `RL 到挖点` 使用 resident RL generation。完成后 owner 依次等待 RL terminal zero 与 ACT 模式
+  zero claim 的 STM32 ACK，不退出进程、不释放重开串口；
+- 点击 ACT 段；这次明确点击就是本地运动授权。默认完成 130 个 10 Hz step。在最后 20 steps 时，
+  PC 后台准备 DUMP 轨迹；
+- 点击“前往倾倒并倾倒”时先完成 ACT terminal zero → RL target zero 的 ACK 交接，再激活准备好的
+  DUMP 轨迹。轨迹未及时就绪、已过期或当前起点不兼容时保持归零，回退到普通 live Plan；
+- 点击“RL 返回挖点”，继续复用同一 resident RL Runtime 返回本轮目标，不发生模型或容器冷启动。
 
-整个分段流程由一个后台 worker 保存预热/热待命状态，但任何时刻仍只有一个硬件 owner。RL→ACT
-交接必须先执行 terminal zero 并确认串口释放；ACT 预热本身不持有硬件。倾倒→返回不切换 owner，
-RL Runtime 保持零动作待命；等待阶段点击“安全停止”会停止当前 Runtime 并释放串口。分段全部通过
-后才能使用“自动装车”。自动模式可选择 1～5 铲；页面选中的 DIG 点是第一铲，后续按 Mission
+整个流程只有 resident owner 能写串口；策略切换只增加 `control_generation` 并更换候选动作语义。
+PC 每 0.4 秒续约一次 1.5 秒 Mission lease。Web UI/PC 退出或控制网线断开后，Orin 会 terminal
+disarm、等待最终零命令 ACK 并释放串口；点击“安全停止”时先禁止新的续约，再执行相同终态路径。
+分段全部通过
+后才能使用“自动装车”。自动模式可选择 1～9 铲；页面选中的 DIG 点是第一铲，后续按 Mission
 配置中的 DIG 顺序循环。例如从 `dig_02` 开始的 5 铲依次为
 `dig_02 → dig_03 → dig_01 → dig_02 → dig_03`。RL 返回阶段直接去下一铲的交接位姿，并在途中
-预热下一铲 ACT，以减少静止等待；最后一铲仍返回该铲使用的挖点。任一阶段失败即停止，不会跳过
-故障继续下一铲。ACT step 上限集中在
+保持常驻 ACT Worker ready；最后一铲仍返回该铲使用的挖点。任一阶段失败即停止，不会跳过故障
+继续下一铲。ACT step 上限集中在
 `config/hybrid_mission.pc.json`，不得通过页面临时随意扩大。该有界 step 规则只是当前实验的
 最小完成条件，不代表任务成功识别；真实土壤验收仍记录是否完成挖掘、是否带土和最终交接位姿。
-原生 RViz 不作为 iframe 嵌入；`config/collection_ui.pc.json.visualization_url` 仅保留未来
-Foxglove Web 三维视图入口，当前留空。
+原生 RViz 不作为 iframe 嵌入，Web UI 也不显示 RViz/Foxglove 扩展占位。
+需要三维状态或录屏时，使用页面“启动 RL + RViz”打开的原生 RViz 窗口。
+
+更新 `excavator-il` Python 代码后，Orin 必须用
+`docker/act-inference.incremental.Dockerfile` 重建 `excavator-act-inference:jp72-pytorch261`；Git
+同步不会修改已有镜像。精确构建与 import 核验命令见仓库 README 的“RL + ACT 混合 Mission”节。
 
 Wi-Fi 局域网避免了公网路由，但不是实时总线：无线信道争用/重传/省电、驱动与内核队列，以及
 Orin 进程调度都可能把若干 20 Hz 包延后后再成批交付。`episode_0004` 中 PC 采样间隔仍约
@@ -411,7 +468,11 @@ Orin 进程调度都可能把若干 20 Hz 包延后后再成批交付。`episode
 恢复窗口并生成 Training Segment；事件无法定位或恢复时 `validate` 拒绝该条。不要通过插值、
 沿用旧动作或直接忽略 timeout 计数来挽救数据。
 
-### 3.3 常规分端命令
+### 3.4 非正式链路诊断命令
+
+正式 200 条 campaign 必须从 WebUI 发起，使 `dig_point_id`、AiryLidar 权威目标坐标和 campaign
+槽位在创建 Episode 前一并校验。`collect_guided_episode.py` 和下面的分端命令只用于诊断
+Collector/teleop/Recorder，显式标记为 `diagnostic`，不会占 campaign 槽位或进入训练集。
 
 Orin 终端 1——启动 Collector：
 
@@ -429,16 +490,17 @@ cd /home/zhaoshuai/workspace_uinty/RL_prj/excavator-il
 excavator-il teleop --config config/teleop.pc.json --print-every 20
 ```
 
-Orin 终端 2——记录一条成功示教：
+Orin 终端 2——记录一条诊断 Episode：
 
 ```bash
 conda activate excavator-il-collector
 cd /home/jetson16/workspace_excavator/excavator-il
 
 excavator-il episode --config config/collection.orin.json start \
-  --task ExecuteDig --operator operator_01 \
+  --task ExecuteDig --operator zhaoshuai \
   --dig-target-m 0.8 0.0 -0.2 \
-  --material-id soil_01
+  --material-id soil_01 \
+  --recording-purpose diagnostic
 
 # 人工完成一次完整挖掘后：
 excavator-il episode --config config/collection.orin.json stop --success
@@ -459,12 +521,51 @@ excavator-il episode --config config/collection.orin.json abort \
 在保存 Episode 的机器上执行：
 
 ```bash
-EPISODE=/home/jetson16/workspace_excavator/data/excavator-data/episode_0001
+EPISODE=/home/jetson16/workspace_excavator/data/icra2027-dual-rgb-campaign-v1/raw/episode_0001
 
 excavator-il build-steps "$EPISODE"
 excavator-il validate "$EPISODE"
 python -m json.tool "$EPISODE/quality_report.json"
 ```
+
+WebUI/引导脚本在上述两步通过后会自动调用 `record-collection-run`，生成不可变
+`experiment_run.v1`。单独复核或补录证据时可显式执行同一幂等命令：
+
+```bash
+excavator-il record-collection-run "$EPISODE" \
+  --config config/collection_evidence.orin.json
+
+python scripts/manage_experiment_run.py verify \
+  --root /home/jetson16/workspace_excavator/data/icra2027-dual-rgb-campaign-v1/experiment-runs \
+  --run-id collection_episode_0001
+```
+
+证据写入失败会让正式流程失败，但不会删除或改写 raw Episode。修复配置后可重试同一命令；若
+Episode、质量报告或 TaskContext 已发生漂移，重试会拒绝，而不是把新内容嫁接到旧 Run。
+artifact 使用 `experiment_run_artifact.v2`：`source_path` 仅保留原始来源，不能作为可验证证据；
+注册时先在 Run 自己管理的 `artifact_snapshots/` 中生成不可变内容快照，拷贝前后源指纹与快照指纹
+必须一致，`snapshot_path` 才供 finalize 和统一 Evaluation Harness 使用。实现会优先尝试独立 CoW
+reflink，并把实际结果记为 `snapshot_method=reflink`；不支持 reflink 或跨文件系统时使用标准库逐字节
+copy 并明确记录 `snapshot_method=copy`，不会假装节省了空间。目录中不同文件采用不同方法时记录为
+`mixed`。
+
+fallback copy 意味着 raw Episode 和 Experiment Run 证据快照可能占用接近两份容量。正式 200 条
+采集前，先用 2--4 条 Pilot 的 `du -sh` 估算单条上界，用 campaign inspector 确认剩余槽位，再用
+`df -h` 确认 raw、快照和临时复制峰值均有余量：
+
+```bash
+python scripts/inspect_collection_campaign.py \
+  --collection-config config/collection.orin.json --next
+du -sh /home/jetson16/workspace_excavator/data/icra2027-dual-rgb-campaign-v1/raw
+du -sh /home/jetson16/workspace_excavator/data/icra2027-dual-rgb-campaign-v1/experiment-runs
+df -h /home/jetson16/workspace_excavator/data/icra2027-dual-rgb-campaign-v1
+```
+
+正式配置还要求 tracked 的 `config/icra2027_collection_campaign_provenance.json`，它冻结本批次
+AiryLidar 目标配置 commit/path/SHA、F407 固件 commit、共享机器配置 SHA 与三个 Dig 坐标。每条 Run
+发布前会把该文件纳入配置快照，并逐项对照 Episode 中本次真正使用的 target source provenance；
+本地采集仓库存在未提交修改时也会 fail closed。`quality_report` 是必需的 integrity-only evidence，
+统一 Evaluation Harness 会先验证其内容哈希，但不会由此伪造额外性能指标。
 
 `episode.json` 为 `pending_review` 时不得构建或校验；必须先分类为 `complete`、`failed` 或
 `aborted`。`rejection_reasons.action_stale` 表示某个 10 Hz 新状态找不到不晚于它且年龄不超过
@@ -474,7 +575,7 @@ python -m json.tool "$EPISODE/quality_report.json"
 批量校验时逐条处理，任一命令失败都不应把该 Episode 加入训练集：
 
 ```bash
-for episode in /home/jetson16/workspace_excavator/data/excavator-data/episode_*; do
+for episode in /home/jetson16/workspace_excavator/data/icra2027-dual-rgb-campaign-v1/raw/episode_*; do
   excavator-il build-steps "$episode" || break
   excavator-il validate "$episode" || break
 done
@@ -482,32 +583,50 @@ done
 
 ## 5. 转换 LeRobotDataset
 
-先把通过验证的 Episode 从 Orin 同步到训练 PC，再显式列出每个集合的 Episode。以下编号仅为示例：
+先把通过验证的成功 Episode 从 Orin 只读同步到训练 PC。完整双 RGB 数据集用于证据保留和后续
+双视觉策略；当前 ACT v1 在线 contract 仍是单前视，因此另建一个显式 front-only 训练视图：
 
 ```bash
 cd /home/zhaoshuai/workspace_uinty/RL_prj/excavator-il
 conda activate excavator-il
 
-excavator-il convert \
-  data/raw/episode_0001 data/raw/episode_0002 data/raw/episode_0003 \
-  --output-root data/lerobot/excavator_rgb_v1_train \
-  --repo-id local/excavator_rgb_v1_train --fps 10
+RAW=data/raw/icra2027-dual-rgb-campaign-v1
 
-excavator-il convert \
-  data/raw/episode_0004 \
-  --output-root data/lerobot/excavator_rgb_v1_val \
-  --repo-id local/excavator_rgb_v1_val --fps 10
+excavator-il convert "$RAW"/episode_* \
+  --output-root data/lerobot/icra2027_dual_rgb_full \
+  --repo-id local/icra2027_dual_rgb_full --fps 10
 
-excavator-il convert \
-  data/raw/episode_0005 \
-  --output-root data/lerobot/excavator_rgb_v1_test \
-  --repo-id local/excavator_rgb_v1_test --fps 10
+excavator-il prepare-training-split \
+  --dataset-root data/lerobot/icra2027_dual_rgb_full \
+  --repo-id local/icra2027_dual_rgb_full \
+  --output data/lerobot/icra2027_dual_rgb_split.json \
+  --train-ratio 0.8 --seed 2027
+
+excavator-il materialize-training-split \
+  --manifest data/lerobot/icra2027_dual_rgb_split.json \
+  --output-root data/lerobot/icra2027_dual_rgb_split
+
+excavator-il convert "$RAW"/episode_* \
+  --output-root data/lerobot/icra2027_act_front_full \
+  --repo-id local/icra2027_act_front_full --fps 10 \
+  --camera-roles front
+
+excavator-il prepare-training-split \
+  --dataset-root data/lerobot/icra2027_act_front_full \
+  --repo-id local/icra2027_act_front_full \
+  --output data/lerobot/icra2027_act_front_split.json \
+  --train-ratio 0.8 --seed 2027
+
+excavator-il materialize-training-split \
+  --manifest data/lerobot/icra2027_act_front_split.json \
+  --output-root data/lerobot/icra2027_act_front_split
 ```
 
-输出目录必须是新的空目录；不要在已有 LeRobotDataset 上重复运行转换。
-输入列表按原始 Episode 分配集合；同一 parent Episode 产生的所有 Training Segment 会转换为
-多个 LeRobot Episode，但必须留在同一个 train/val/test 集合。LeRobot 原生 Episode 边界会限制
-ACT future-action delta indices，并通过 `action_is_pad` 屏蔽片段末端越界动作。
+输出目录必须是新的空目录；不要在已有 LeRobotDataset 上重复运行转换。默认 `auto` 只有在全部
+输入均为同一双相机契约时才保留双路；混合 v1/v2 会明确失败。split manifest v2 把同一个
+`soil_reset_block_id` 的所有 parent Episode 和 Training Segment 固定在同一 partition，并按
+`task_variant` 分层；materialize 会重算数据指纹并拒绝漂移或泄漏。LeRobot 原生 Episode 边界会
+限制 ACT future-action delta indices，并通过 `action_is_pad` 屏蔽片段末端越界动作。
 
 ### 5.1 重复数据的离线管线验证
 
@@ -568,24 +687,32 @@ excavator-il smoke-infer \
 excavator-il smoke-train
 ```
 
-使用 LeRobot 0.5.2 在训练 PC 上启动 ACT v1：
+使用 LeRobot 0.5.2 在训练 PC 上启动 ACT v1。训练必须读取 materialized train，而不是转换后的
+全量数据集；repo ID 由 `split_provenance.json` 产生，不手写猜测：
 
 ```bash
+SPLIT=data/lerobot/icra2027_act_front_split
+TRAIN_REPO=$(python3 -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["train_repo_id"])' \
+  "$SPLIT/split_provenance.json")
+
 lerobot-train \
-  --dataset.repo_id=local/excavator_rgb_v1_train \
-  --dataset.root=data/lerobot/excavator_rgb_v1_train \
+  --dataset.repo_id="$TRAIN_REPO" \
+  --dataset.root="$SPLIT/train" \
+  --dataset.video_backend=pyav \
   --policy.type=act \
   --policy.device=cuda \
   --policy.push_to_hub=false \
   --policy.chunk_size=20 \
   --policy.n_action_steps=10 \
-  --output_dir=outputs/act_excavator_rgb_v1 \
-  --job_name=act_excavator_rgb_v1 \
+  --output_dir=outputs/icra2027_act_front_seed2027 \
+  --job_name=icra2027_act_front_seed2027 \
   --batch_size=8 \
-  --steps=100000 \
+  --steps=200000 \
   --save_checkpoint=true \
   --save_freq=10000 \
   --log_freq=100 \
+  --seed=2027 \
   --wandb.enable=false
 ```
 
@@ -595,17 +722,32 @@ LeRobot 0.5.2 的 ACT 默认要求 Hub repo；本地训练必须显式设置
 
 ```bash
 excavator-il smoke-infer \
-  outputs/act_excavator_rgb_v1/checkpoints/last/pretrained_model \
-  --dataset-root data/lerobot/excavator_rgb_v1_train \
-  --repo-id local/excavator_rgb_v1_train \
+  outputs/icra2027_act_front_seed2027/checkpoints/last/pretrained_model \
+  --dataset-root "$SPLIT/train" \
+  --repo-id "$TRAIN_REPO" \
   --sample-index 0 --device cuda
 ```
 
 预期 `predicted_chunk_shape` 为 `[1, 20, 4]`、`action_dim` 为 4 且
 `all_finite=true`。这一步只验证离线推理接口，不授权向 Orin 或 STM32 发送模型动作。
 
-显存不足时先把 `--batch_size` 降为 4 或 2。训练开始前记录 GPU、LeRobot 版本、数据集清单、
-三个仓库的 commit 和完整命令。正式实验至少运行 3 个随机种子，第一轮只需跑通一个种子。
+显存不足时先把 `--batch_size` 降为 4 或 2。200k 是训练预算，不代表应固定选最后 checkpoint；
+checkpoint 选择只使用 materialized validation partition。训练开始前创建 `run_kind=training` 的
+Experiment Run，记录 GPU、LeRobot 版本、split manifest/provenance、配置、代码 commit、随机种子、
+checkpoint 和完整命令。正式实验至少运行 3 个预先冻结的随机种子；第一轮只需跑通一个种子。
+
+完成态 Experiment Runs 使用统一 Harness 生成机器可读 JSON 与论文表格 CSV：
+
+```bash
+python scripts/evaluate_experiment_runs.py \
+  EvaluationReport/experiment_runs/runs/<run_id_1> \
+  EvaluationReport/experiment_runs/runs/<run_id_2> \
+  --aggregate-mode homogeneous \
+  --output-dir EvaluationReport/evaluations/<evaluation_id>
+```
+
+`training_internal` 与 `held_out_experiment` 不能混合聚合。论文最终任务结论只使用后者；代码或
+配置仓库为 dirty 的 held-out Run 会被 Harness 拒绝，不能通过手工改 CSV 绕过。
 
 ## 7. 回归命令
 
