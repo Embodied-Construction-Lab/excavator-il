@@ -59,7 +59,7 @@ class _PreparedProcess:
         self.returncode = 130
 
 
-def test_prepare_starts_the_live_planner_without_waiting_for_readiness(tmp_path):
+def test_prepare_warms_planner_then_releases_a_separate_plan_gate(tmp_path):
     created = []
 
     def factory(*args, **kwargs):
@@ -76,6 +76,11 @@ def test_prepare_starts_the_live_planner_without_waiting_for_readiness(tmp_path)
     assert process.wait_for_calls == []
     assert process.wait_calls == []
     gate = tmp_path / "logs" / "hybrid_mission_20260821_140000.prepared-dump.start"
+    plan_gate = (
+        tmp_path
+        / "logs"
+        / "hybrid_mission_20260821_140000.prepared-dump.plan"
+    )
     assert process.argv == [
         "/bin/zsh",
         "-lc",
@@ -94,6 +99,8 @@ def test_prepare_starts_the_live_planner_without_waiting_for_readiness(tmp_path)
                         "--wait-s 5",
                         "--start-gate",
                         str(gate),
+                        "--plan-gate",
+                        str(plan_gate),
                         "--first-waypoint-distance-m 0.15",
                     )
                 ),
@@ -102,6 +109,11 @@ def test_prepare_starts_the_live_planner_without_waiting_for_readiness(tmp_path)
     ]
     assert process.kwargs["prefix"] == "prepared-dump"
     assert not gate.exists()
+    assert not plan_gate.exists()
+
+    adapter.trigger_prepare()
+
+    assert plan_gate.is_file()
 
 
 def test_activate_waits_for_stable_ready_marker_then_releases_one_shot_gate(tmp_path):
@@ -124,6 +136,7 @@ def test_activate_waits_for_stable_ready_marker_then_releases_one_shot_gate(tmp_
 
     adapter = _adapter(tmp_path, factory)
     adapter.start_prepare()
+    adapter.trigger_prepare()
 
     outcome = adapter.activate_prepared()
 
@@ -146,6 +159,7 @@ def test_explicit_safe_fallback_before_ready_is_the_only_fallback_result(tmp_pat
 
     adapter = _adapter(tmp_path, Process)
     adapter.start_prepare()
+    adapter.trigger_prepare()
 
     assert adapter.activate_prepared() is PreparedDumpActivation.FALLBACK_SAFE
 
@@ -165,6 +179,7 @@ def test_readiness_timeout_cancels_then_explicitly_allows_safe_replan(tmp_path):
 
     adapter = _adapter(tmp_path, factory)
     adapter.start_prepare()
+    adapter.trigger_prepare()
 
     outcome = adapter.activate_prepared()
 

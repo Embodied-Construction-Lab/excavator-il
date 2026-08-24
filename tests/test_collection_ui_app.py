@@ -548,7 +548,9 @@ def test_collection_ui_exposes_config_status_and_guided_collection_actions(tmp_p
     assert "RViz / Foxglove 扩展位" not in page.text
     assert "连续自动完成 1～9 铲装车循环" in page.text
     assert '<option value="9">9 铲</option>' in page.text
-    assert '/static/app.js?v=20260823-campaign-slot' in page.text
+    assert '/static/app.js?v=20260824-log-tools' in page.text
+    assert 'id="copy-log"' in page.text
+    assert 'id="copy-hybrid-log"' in page.text
     assert "采集协议" in page.text
     assert "仅挖掘" in page.text
     assert "挖掘 + 运转 + 倾倒" in page.text

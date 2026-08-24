@@ -208,9 +208,12 @@
       <section class="panel log-panel">
         <div class="section-heading compact">
           <div><span class="step-number">04</span><h2>采集运行记录</h2></div>
-          <div class="episode-metadata">
-            <span id="episode-context"></span>
-            <span id="episode-path" class="episode-path"></span>
+          <div class="log-heading-tools">
+            <div class="episode-metadata">
+              <span id="episode-context"></span>
+              <span id="episode-path" class="episode-path"></span>
+            </div>
+            <button id="copy-log" class="button ghost log-copy-button" type="button">复制</button>
           </div>
         </div>
         <pre id="log-output">等待采集任务…</pre>
@@ -220,7 +223,10 @@
       <section id="hybrid-panel" class="panel hybrid-panel hidden">
         <div class="section-heading">
           <div><span class="step-number">03</span><h2>RL + ACT 混合 Mission</h2></div>
-          <p>分段拍摄单个动作，或连续自动完成 1～9 铲装车循环。</p>
+          <div class="log-heading-tools">
+            <p>分段拍摄单个动作，或连续自动完成 1～9 铲装车循环。</p>
+            <button id="copy-hybrid-log" class="button ghost log-copy-button" type="button">复制日志</button>
+          </div>
         </div>
         <div id="operator-control" class="operator-control hidden">
           <div>
@@ -269,6 +275,6 @@
       </section>
     </main>
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20260823-campaign-slot" defer></script>
+    <script src="/static/app.js?v=20260824-log-tools" defer></script>
   </body>
 </html>

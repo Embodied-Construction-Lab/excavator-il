@@ -209,11 +209,17 @@ def test_act_dig_waits_for_same_segment_completion_and_automatic_rl_handoff():
     events = []
     statuses = iter(
         (
-            _status(
-                act_segment_generation=7,
-                act_segment_max_steps=130,
-                act_segment_completed_steps=130,
-                act_segment_complete=True,
+            replace(
+                _status(
+                    control_generation=8,
+                    act_segment_generation=7,
+                    act_segment_max_steps=130,
+                    act_segment_completed_steps=130,
+                    act_segment_complete=True,
+                ),
+                phase="terminal_zero_pending",
+                active=ResidentPolicyBinding("act_dig", "manual_action"),
+                target=ResidentPolicyBinding("rl_follow", "velocity_reference"),
             ),
             _status(
                 rl_is_active=True,
@@ -270,7 +276,7 @@ def test_act_dig_waits_for_same_segment_completion_and_automatic_rl_handoff():
     ]
 
 
-def test_act_progress_prepares_dump_once_then_activates_it_without_replanning():
+def test_act_warms_dump_planner_then_triggers_fresh_plan_near_completion():
     events = []
     statuses = iter(
         (
@@ -324,6 +330,9 @@ def test_act_progress_prepares_dump_once_then_activates_it_without_replanning():
         def start_prepare(self):
             events.append("start_prepare")
 
+        def trigger_prepare(self):
+            events.append("trigger_prepare")
+
         def activate_prepared(self):
             events.append("activate_prepared")
             return PreparedDumpActivation.ACTIVATED
@@ -352,7 +361,9 @@ def test_act_progress_prepares_dump_once_then_activates_it_without_replanning():
     operations.run_rl_to_dump_and_dump()
 
     assert events.count("start_prepare") == 1
-    assert events.index("start_prepare") > events.index("status")
+    assert events.count("trigger_prepare") == 1
+    assert events.index("start_prepare") < events.index("status")
+    assert events.index("trigger_prepare") > events.index("status")
     assert events[-2:] == ["activate_prepared", "run_dump_action"]
     assert "legacy_dump" not in events
 
@@ -387,6 +398,9 @@ def test_prepared_dump_falls_back_only_after_an_explicit_fallback_safe_result():
     class Prepared:
         def start_prepare(self):
             events.append("start_prepare")
+
+        def trigger_prepare(self):
+            events.append("trigger_prepare")
 
         def activate_prepared(self):
             events.append("activate_prepared")
@@ -443,6 +457,9 @@ def test_prepared_dump_failure_cancels_and_disarms_without_legacy_replan():
     class Prepared:
         def start_prepare(self):
             events.append("start_prepare")
+
+        def trigger_prepare(self):
+            events.append("trigger_prepare")
 
         def activate_prepared(self):
             events.append("activate_prepared")
@@ -705,6 +722,61 @@ def test_act_authority_loss_fails_immediately_instead_of_waiting_for_timeout():
     )
 
     with pytest.raises(RuntimeError, match="ACT authority was revoked"):
+        operations.run_act_dig(130)
+
+    assert events == [("sleep", 0.1), ("status",), ("terminal_disarm",)]
+
+
+def test_completed_act_fails_when_sensor_safety_cancels_the_rl_handoff():
+    events = []
+    now = [0.0]
+
+    def sleep(seconds):
+        events.append(("sleep", seconds))
+        now[0] += seconds
+
+    class Control:
+        def ensure_ready(self):
+            return _status()
+
+        def activate_act(self, max_steps):
+            return _status(
+                control_generation=11,
+                act_is_active=True,
+                act_segment_generation=11,
+                act_segment_max_steps=max_steps,
+                act_segment_completed_steps=129,
+            )
+
+        def status(self):
+            events.append(("status",))
+            return replace(
+                _status(
+                    control_generation=13,
+                    act_segment_generation=11,
+                    act_segment_max_steps=130,
+                    act_segment_completed_steps=130,
+                    act_segment_complete=True,
+                ),
+                phase="terminal_zero_pending",
+                active=ResidentPolicyBinding("act_dig", "manual_action"),
+                target=None,
+            )
+
+        def terminal_disarm(self):
+            events.append(("terminal_disarm",))
+            return replace(_status(), is_operational=False)
+
+    operations = ResidentHybridMissionOperations(
+        control=Control(),
+        behavior=object(),
+        act_run_timeout_s=0.2,
+        poll_interval_s=0.1,
+        monotonic=lambda: now[0],
+        sleep=sleep,
+    )
+
+    with pytest.raises(RuntimeError, match="ACT-to-RL handoff was revoked"):
         operations.run_act_dig(130)
 
     assert events == [("sleep", 0.1), ("status",), ("terminal_disarm",)]

@@ -45,6 +45,54 @@ const $ = (id) => document.getElementById(id);
 const CAMERA_RETRY_MS = 1000;
 const CAMERA_REFRESH_MS = 100;
 const CAMPAIGN_REFRESH_MS = 5000;
+const LOG_BOTTOM_TOLERANCE_PX = 24;
+const logAutofollow = new Map();
+
+function logIsNearBottom(node) {
+  return node.scrollHeight - node.scrollTop - node.clientHeight <= LOG_BOTTOM_TOLERANCE_PX;
+}
+
+function bindLogPanel(id) {
+  const node = $(id);
+  if (!node || logAutofollow.has(id)) return;
+  logAutofollow.set(id, true);
+  node.addEventListener("scroll", () => {
+    logAutofollow.set(id, logIsNearBottom(node));
+  });
+}
+
+function renderLogContent(id, lines, emptyText) {
+  const node = $(id);
+  if (!node) return;
+  const shouldFollow = logAutofollow.get(id) !== false;
+  node.textContent = lines.length ? lines.join("\n") : emptyText;
+  if (shouldFollow) {
+    const schedule = window.requestAnimationFrame || (callback => callback());
+    schedule(() => {
+      node.scrollTop = node.scrollHeight;
+    });
+  }
+}
+
+async function copyLogContent(id) {
+  const node = $(id);
+  if (!node) throw new Error("日志区域不存在");
+  const content = node.textContent || "";
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(content);
+  } else {
+    const textarea = document.createElement("textarea");
+    textarea.value = content;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    if (!copied) throw new Error("浏览器拒绝复制日志");
+  }
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
@@ -287,8 +335,7 @@ function renderSnapshot(snapshot) {
   const visibleLogs = protocolLine && !logs.includes(protocolLine)
     ? [protocolLine, ...logs]
     : logs;
-  $("log-output").textContent = visibleLogs.length ? visibleLogs.join("\n") : "等待采集任务…";
-  $("log-output").scrollTop = $("log-output").scrollHeight;
+  renderLogContent("log-output", visibleLogs, "等待采集任务…");
   if (snapshot.task_variant) $("task-variant").value = snapshot.task_variant;
   if (snapshot.soil_reset_block_id) $("soil-reset-block-id").value = snapshot.soil_reset_block_id;
   if (snapshot.dig_point_id) $("dig-point-id").value = snapshot.dig_point_id;
@@ -318,8 +365,7 @@ function renderHybridSnapshot(snapshot) {
   const requestedCycles = Number(snapshot.requested_cycles || 1);
   $("hybrid-cycles").textContent = `${snapshot.run_completed_cycles || 0} / ${requestedCycles} 铲`;
   const logs = Array.isArray(snapshot.logs) ? snapshot.logs : [];
-  $("hybrid-log").textContent = logs.length ? logs.join("\n") : "等待混合 Mission…";
-  $("hybrid-log").scrollTop = $("hybrid-log").scrollHeight;
+  renderLogContent("hybrid-log", logs, "等待混合 Mission…");
   $("hybrid-error").textContent = snapshot.error || "";
   $("hybrid-error").classList.toggle("hidden", !snapshot.error);
   const runningSegment = stage.startsWith("running_") ? stage.slice("running_".length) : "";
@@ -408,6 +454,18 @@ function toast(message, isError = false) {
 }
 
 function bindActions() {
+  bindLogPanel("log-output");
+  bindLogPanel("hybrid-log");
+  $("copy-log")?.addEventListener("click", () => {
+    copyLogContent("log-output")
+      .then(() => toast("采集日志已复制"))
+      .catch(error => toast(error.message, true));
+  });
+  $("copy-hybrid-log")?.addEventListener("click", () => {
+    copyLogContent("hybrid-log")
+      .then(() => toast("Mission 日志已复制"))
+      .catch(error => toast(error.message, true));
+  });
   document.querySelectorAll(".mode-card").forEach(card => card.addEventListener("click", () => {
     state.selectedMode = card.dataset.mode;
     renderSelectedMode();

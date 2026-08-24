@@ -108,6 +108,8 @@ class PreparedDumpAdapter(Protocol):
 
     def start_prepare(self) -> None: ...
 
+    def trigger_prepare(self) -> None: ...
+
     def activate_prepared(self) -> PreparedDumpActivation: ...
 
     def cancel(self) -> None: ...
@@ -292,6 +294,7 @@ class ResidentHybridMissionOperations:
         self._prepared_dump = prepared_dump
         self._prepared_dump_lead_steps = prepared_dump_lead_steps
         self._prepared_dump_started = False
+        self._prepared_dump_triggered = False
         self._terminal_disarmed = False
         self._act_run_timeout_s = float(act_run_timeout_s)
         self._handoff_timeout_s = float(handoff_timeout_s)
@@ -305,12 +308,17 @@ class ResidentHybridMissionOperations:
         )
 
     def run_rl_to_dump_and_dump(self) -> None:
-        if self._prepared_dump is None or not self._prepared_dump_started:
+        if (
+            self._prepared_dump is None
+            or not self._prepared_dump_started
+            or not self._prepared_dump_triggered
+        ):
             self._run_rl_behavior(self._behavior.run_rl_to_dump_and_dump)
             return
         try:
             outcome = self._prepared_dump.activate_prepared()
             self._prepared_dump_started = False
+            self._prepared_dump_triggered = False
             if outcome is not PreparedDumpActivation.ACTIVATED:
                 if outcome is not PreparedDumpActivation.FALLBACK_SAFE:
                     raise RuntimeError(
@@ -355,6 +363,10 @@ class ResidentHybridMissionOperations:
                 raise RuntimeError(
                     "resident ACT activation generation is inconsistent"
                 )
+            if self._prepared_dump is not None:
+                self._prepared_dump.start_prepare()
+                self._prepared_dump_started = True
+                self._prepared_dump_triggered = False
             deadline = self._monotonic() + self._act_run_timeout_s
             self._wait_for_act_completion(
                 status,
@@ -442,6 +454,7 @@ class ResidentHybridMissionOperations:
     def _cancel_prepared_dump(self) -> None:
         prepared = self._prepared_dump
         self._prepared_dump_started = False
+        self._prepared_dump_triggered = False
         if prepared is not None:
             prepared.cancel()
 
@@ -490,12 +503,13 @@ class ResidentHybridMissionOperations:
                 raise RuntimeError("resident ACT worker disconnected")
             if (
                 prepare_at_step is not None
-                and not self._prepared_dump_started
+                and self._prepared_dump_started
+                and not self._prepared_dump_triggered
                 and current.act_segment_completed_steps >= prepare_at_step
             ):
                 assert self._prepared_dump is not None
-                self._prepared_dump.start_prepare()
-                self._prepared_dump_started = True
+                self._prepared_dump.trigger_prepare()
+                self._prepared_dump_triggered = True
             if current.act_segment_complete:
                 if current.act_segment_completed_steps != max_steps:
                     raise RuntimeError(
@@ -512,6 +526,24 @@ class ResidentHybridMissionOperations:
                             "resident ACT completion lacks an active RL binding"
                         )
                     return
+                rl_handoff_is_pending = (
+                    current.target == _RL_BINDING
+                    and (
+                        (
+                            current.phase == "terminal_zero_pending"
+                            and current.active == _ACT_BINDING
+                        )
+                        or (
+                            current.phase == "target_zero_pending"
+                            and current.active is None
+                        )
+                    )
+                )
+                if not rl_handoff_is_pending:
+                    raise RuntimeError(
+                        "ACT-to-RL handoff was revoked: "
+                        + _control_status_summary(current)
+                    )
             elif not current.act_is_active:
                 activation_is_pending = (
                     current.act_segment_completed_steps == 0
@@ -532,6 +564,26 @@ def _act_step_budget(value: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 2000:
         raise ValueError("max_steps must be an integer in [1, 2000]")
     return value
+
+
+def _control_status_summary(status: ResidentControlStatus) -> str:
+    segment_state = "complete" if status.act_segment_complete else "running"
+    return (
+        f"phase={status.phase} generation={status.control_generation} "
+        f"active={_binding_summary(status.active)} "
+        f"target={_binding_summary(status.target)} "
+        f"act_segment={status.act_segment_generation}:"
+        f"{status.act_segment_completed_steps}/"
+        f"{status.act_segment_max_steps}:{segment_state} "
+        f"rl_active={status.rl_is_active} act_active={status.act_is_active} "
+        f"lease_active={status.mission_lease_active}"
+    )
+
+
+def _binding_summary(binding: ResidentPolicyBinding | None) -> str:
+    if binding is None:
+        return "none"
+    return f"{binding.source}/{binding.mode}"
 
 
 def _absolute_posix_path(value: str | PurePosixPath, field: str) -> str:

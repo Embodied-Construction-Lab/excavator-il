@@ -73,11 +73,16 @@ class SystemPreparedDumpAdapter:
             self._log_dir
             / f"hybrid_mission_{timestamp}.prepared-dump.start"
         )
+        self._plan_gate_path = (
+            self._log_dir
+            / f"hybrid_mission_{timestamp}.prepared-dump.plan"
+        )
         self._log_path = (
             self._log_dir
             / f"hybrid_mission_{timestamp}.prepared-dump.log"
         )
         self._process: Any | None = None
+        self._plan_requested = False
 
     def start_prepare(self) -> None:
         """Spawn planning and return without waiting for the ready marker."""
@@ -99,7 +104,8 @@ class SystemPreparedDumpAdapter:
                 "prepared dump path does not exist: " + ", ".join(missing)
             )
         self._log_dir.mkdir(parents=True, exist_ok=True)
-        self._gate_path.unlink(missing_ok=True)
+        self._unlink_gates()
+        self._plan_requested = False
         command = self._shell_command()
         self._process = self._line_process_factory(
             ["/bin/zsh", "-lc", command],
@@ -108,10 +114,25 @@ class SystemPreparedDumpAdapter:
             output=self._output,
         )
 
+    def trigger_prepare(self) -> None:
+        """Freeze fresh live inputs and request planning from the warm child."""
+
+        process = self._process
+        if process is None:
+            raise RuntimeError("prepared dump process has not been started")
+        if process.returncode is not None:
+            raise RuntimeError("prepared dump process exited before planning")
+        if self._plan_requested:
+            raise RuntimeError("prepared dump planning was already requested")
+        self._plan_gate_path.touch(exist_ok=False)
+        self._plan_requested = True
+
     def activate_prepared(self) -> PreparedDumpActivation:
         process = self._process
         if process is None:
             raise RuntimeError("prepared dump process has not been started")
+        if not self._plan_requested:
+            raise RuntimeError("prepared dump planning has not been requested")
         try:
             try:
                 process.wait_for(
@@ -139,7 +160,7 @@ class SystemPreparedDumpAdapter:
                 context="after the start gate",
             )
         finally:
-            self._gate_path.unlink(missing_ok=True)
+            self._unlink_gates()
 
     def cancel(self) -> None:
         self._cancel_current()
@@ -171,7 +192,12 @@ class SystemPreparedDumpAdapter:
             if process is not None and process.returncode is None:
                 process.stop(signal.SIGINT, timeout_s=3.0)
         finally:
-            self._gate_path.unlink(missing_ok=True)
+            self._plan_requested = False
+            self._unlink_gates()
+
+    def _unlink_gates(self) -> None:
+        self._plan_gate_path.unlink(missing_ok=True)
+        self._gate_path.unlink(missing_ok=True)
 
     def _shell_command(self) -> str:
         command = shlex.join(
@@ -187,6 +213,8 @@ class SystemPreparedDumpAdapter:
                 str(self._wait_s),
                 "--start-gate",
                 str(self._gate_path),
+                "--plan-gate",
+                str(self._plan_gate_path),
                 "--first-waypoint-distance-m",
                 f"{self._start_tolerance_m:g}",
             ]
