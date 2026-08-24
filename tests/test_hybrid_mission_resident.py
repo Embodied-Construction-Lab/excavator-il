@@ -493,6 +493,37 @@ def test_safe_stop_terminally_disarms_the_resident_owner():
     assert events == [("terminal_disarm",)]
 
 
+def test_safe_stop_is_idempotent_after_cancelled_rl_already_disarmed():
+    events = []
+
+    class Control:
+        def ensure_ready(self):
+            return _status()
+
+        def activate_rl(self):
+            return _status(rl_is_active=True)
+
+        def terminal_disarm(self):
+            events.append("terminal_disarm")
+            if events.count("terminal_disarm") > 1:
+                raise RuntimeError("resident motion control request failed")
+            return _status()
+
+    class Behavior:
+        def run_rl_to_dig(self, _target_id):
+            raise KeyboardInterrupt
+
+    operations = ResidentHybridMissionOperations(
+        control=Control(), behavior=Behavior(), act_run_timeout_s=90
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        operations.run_rl_to_dig("dig_01")
+    operations.safe_stop()
+
+    assert events == ["terminal_disarm"]
+
+
 def test_safe_stop_disarms_before_a_potentially_blocking_prepared_cleanup():
     events = []
 

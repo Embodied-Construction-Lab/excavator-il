@@ -292,6 +292,7 @@ class ResidentHybridMissionOperations:
         self._prepared_dump = prepared_dump
         self._prepared_dump_lead_steps = prepared_dump_lead_steps
         self._prepared_dump_started = False
+        self._terminal_disarmed = False
         self._act_run_timeout_s = float(act_run_timeout_s)
         self._handoff_timeout_s = float(handoff_timeout_s)
         self._poll_interval_s = float(poll_interval_s)
@@ -371,7 +372,7 @@ class ResidentHybridMissionOperations:
     def safe_stop(self) -> None:
         errors: list[str] = []
         try:
-            self._control.terminal_disarm()
+            self._terminal_disarm_once()
         except Exception as exc:
             errors.append(f"terminal disarm: {exc}")
         try:
@@ -405,7 +406,7 @@ class ResidentHybridMissionOperations:
         segment: str,
     ) -> None:
         try:
-            self._control.terminal_disarm()
+            self._terminal_disarm_once()
         except Exception:
             raise RuntimeError(
                 f"resident {segment} failed and terminal disarm also failed"
@@ -419,7 +420,7 @@ class ResidentHybridMissionOperations:
     ) -> None:
         errors: list[str] = []
         try:
-            self._control.terminal_disarm()
+            self._terminal_disarm_once()
         except Exception as exc:
             errors.append(f"terminal disarm: {exc}")
         try:
@@ -431,6 +432,12 @@ class ResidentHybridMissionOperations:
                 f"resident {segment} failed and cleanup also failed: "
                 + "; ".join(errors)
             ) from failure
+
+    def _terminal_disarm_once(self) -> None:
+        if self._terminal_disarmed:
+            return
+        self._control.terminal_disarm()
+        self._terminal_disarmed = True
 
     def _cancel_prepared_dump(self) -> None:
         prepared = self._prepared_dump
