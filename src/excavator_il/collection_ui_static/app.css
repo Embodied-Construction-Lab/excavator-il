@@ -121,7 +121,7 @@ h1 { margin: 0; font-size: clamp(28px, 3vw, 43px); letter-spacing: -.045em; }
 .timeline i.done { background: var(--green); }
 
 .camera-panel { min-height: 430px; }
-.camera-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.camera-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
 .camera-view-card { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 16px; background: #f7f9f5; }
 .camera-view-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 1px 8px; }
 .camera-view-heading strong { font-size: 11px; letter-spacing: .06em; }

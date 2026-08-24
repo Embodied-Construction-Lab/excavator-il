@@ -29,8 +29,13 @@ def test_resident_act_launcher_maps_camera_and_shared_runtime_dir_but_not_serial
 
     assert 'front_camera_device=' in script
     assert '"camera_front"' in script
-    assert 'test -c "${front_camera_device}"' in script
-    assert '--device "${front_camera_device}:/dev/video0"' in script
+    assert (
+        'front_camera_device_resolved="$(readlink -e -- '
+        '"${front_camera_device}")"' in script
+    )
+    assert 'test -c "${front_camera_device_resolved}"' in script
+    assert '--device "${front_camera_device_resolved}:/dev/video0"' in script
+    assert '--device "${front_camera_device}:/dev/video0"' not in script
     assert "--device /dev/video0" not in script
     assert "--device /dev/ttyTHS1" not in script
     assert "fuser /dev/ttyTHS1" not in script

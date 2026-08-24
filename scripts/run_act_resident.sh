@@ -45,9 +45,10 @@ if not isinstance(device, str) or not device.startswith("/dev/"):
     raise SystemExit("collection camera_front.device must be an absolute /dev path")
 print(device)
 ' "${collection_config}")"
-camera_gid="$(stat -c '%g' "${front_camera_device}")"
+front_camera_device_resolved="$(readlink -e -- "${front_camera_device}")"
+camera_gid="$(stat -c '%g' "${front_camera_device_resolved}")"
 
-test -c "${front_camera_device}"
+test -c "${front_camera_device_resolved}"
 test -S "${resident_act_socket}"
 test -d "${resident_runtime_root}"
 test -r "${resident_runtime_root}"
@@ -85,7 +86,7 @@ exec "${docker_command[@]}" run --rm \
   --security-opt=no-new-privileges \
   --tmpfs /tmp:rw,noexec,nosuid,size=256m \
   --ulimit memlock=-1 --ulimit stack=67108864 \
-  --device "${front_camera_device}:/dev/video0" \
+  --device "${front_camera_device_resolved}:/dev/video0" \
   -e PYTHONUNBUFFERED=1 \
   -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
   -e HF_HOME=/tmp/huggingface -e XDG_CACHE_HOME=/tmp/cache \
