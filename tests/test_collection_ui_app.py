@@ -23,7 +23,7 @@ from excavator_il import collection_ui_app
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_dual_camera_views_are_stacked_vertically():
+def test_dual_camera_views_are_stacked_vertically_without_stretching_page():
     index = (
         ROOT / "src" / "excavator_il" / "collection_ui_static" / "index.html"
     ).read_text(encoding="utf-8")
@@ -31,8 +31,16 @@ def test_dual_camera_views_are_stacked_vertically():
         ROOT / "src" / "excavator_il" / "collection_ui_static" / "app.css"
     ).read_text(encoding="utf-8")
 
-    assert '/static/app.css?v=20260824-camera-stack' in index
+    assert '/static/app.css?v=20260824-camera-compact' in index
     assert ".camera-grid { display: grid; grid-template-columns: 1fr;" in stylesheet
+    assert "align-items: start;" in stylesheet.split(".collection-grid", 1)[1].split(
+        "}", 1
+    )[0]
+    assert ".camera-frame { position: relative; aspect-ratio: 16 / 9;" in stylesheet
+    assert (
+        ".camera-frame img { display: none; width: 100%; height: 100%; "
+        "object-fit: contain;"
+    ) in stylesheet
     assert (
         ".camera-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));"
         not in stylesheet

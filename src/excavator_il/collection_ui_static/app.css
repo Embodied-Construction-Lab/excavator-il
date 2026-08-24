@@ -44,6 +44,7 @@ h1 { margin: 0; font-size: clamp(28px, 3vw, 43px); letter-spacing: -.045em; }
 
 .collection-grid {
   display: grid;
+  align-items: start;
   grid-template-columns: minmax(500px, 1.12fr) minmax(420px, .88fr);
   gap: 18px;
   max-width: 1460px;
@@ -126,8 +127,8 @@ h1 { margin: 0; font-size: clamp(28px, 3vw, 43px); letter-spacing: -.045em; }
 .camera-view-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 1px 8px; }
 .camera-view-heading strong { font-size: 11px; letter-spacing: .06em; }
 .media-state { padding: 5px 9px; border-radius: 99px; color: var(--green-dark); background: #e4f0e8; font-size: 11px; font-weight: 800; }
-.camera-frame { position: relative; aspect-ratio: 4 / 3; overflow: hidden; border-radius: 16px; background: #0c1714; }
-.camera-frame img { display: none; width: 100%; height: 100%; object-fit: cover; }
+.camera-frame { position: relative; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 16px; background: #0c1714; }
+.camera-frame img { display: none; width: 100%; height: 100%; object-fit: contain; }
 .camera-frame img.ready { display: block; }
 .camera-placeholder { position: absolute; inset: 0; display: grid; place-content: center; padding: 30px; text-align: center; color: #d7dfda; background: radial-gradient(circle at center, #1d332d, #0b1512); }
 .camera-placeholder span { color: var(--lime); font-size: 10px; font-weight: 900; letter-spacing: .2em; }
