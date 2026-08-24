@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -24,6 +25,7 @@ from excavator_il.act_runtime_service import (
     _route_telemetry_frame,
     _startup_stm32,
     _wait_for_hardware_start_gate,
+    run_act_runtime,
 )
 from excavator_il.act_deployment import verify_deployment_manifest
 from excavator_il.collector.camera import RgbCameraFrame
@@ -69,6 +71,44 @@ class _StartupSerial(_Serial):
 
     def readline(self):
         return next(self._post_reset_lines, b"")
+
+
+def test_standard_runtime_accepts_host_and_container_camera_namespaces(monkeypatch):
+    runtime_config = SimpleNamespace(
+        serial=SimpleNamespace(port="/dev/ttyTHS1", baudrate=460800),
+        camera=SimpleNamespace(
+            device="/dev/video0", width=640, height=480, nominal_fps=30
+        ),
+    )
+    observation_config = SimpleNamespace(
+        serial=SimpleNamespace(port="/dev/ttyTHS1", baudrate=460800),
+        camera=SimpleNamespace(
+            device="/dev/v4l/by-path/front-camera",
+            width=640,
+            height=480,
+            nominal_fps=30,
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_service_module,
+        "load_act_runtime_config",
+        lambda _path: runtime_config,
+    )
+    monkeypatch.setattr(
+        runtime_service_module,
+        "load_collection_config",
+        lambda _path: observation_config,
+    )
+
+    def provider_was_reached(_config, _mode):
+        raise RuntimeError("provider reached")
+
+    with pytest.raises(RuntimeError, match="provider reached"):
+        run_act_runtime(
+            "/act.json",
+            operator_observation_config="/collection.json",
+            dig_policy_provider=provider_was_reached,
+        )
 
 
 def _telemetry(stamp=1_000_000_000):

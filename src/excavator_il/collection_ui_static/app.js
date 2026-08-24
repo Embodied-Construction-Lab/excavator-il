@@ -398,6 +398,7 @@ function updateOwnershipControls() {
   const hybridStage = state.hybridSnapshot?.stage || "idle";
   const collectionActive = !terminalStages.has(collectionStage);
   const hybridActive = !hybridTerminalStages.has(hybridStage);
+  const hybridCanStop = state.hybridSnapshot?.can_stop === true;
   const campaignBlocksCollection = Boolean(
     state.config?.campaign_tracking_enabled
     && state.selectedMode !== "teleop"
@@ -425,7 +426,7 @@ function updateOwnershipControls() {
   $("hybrid-auto-start").disabled = collectionActive || hybridActive;
   $("hybrid-cycle-count").disabled = collectionActive || hybridActive;
   $("hybrid-advance").disabled = collectionActive || !hybridStage.startsWith("awaiting_");
-  $("hybrid-stop").disabled = !hybridActive || hybridStage === "stopping";
+  $("hybrid-stop").disabled = !hybridCanStop || hybridStage === "stopping";
   if (state.config.operator_control_enabled) {
     const operatorStage = state.operatorSnapshot?.stage || "stopped";
     const operatorActive = operatorStage === "starting" || operatorStage === "ready";

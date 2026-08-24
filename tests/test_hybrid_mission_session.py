@@ -109,6 +109,28 @@ def _target_reporting_worker(
     )
 
 
+def _failed_worker_that_lingers_during_cleanup(
+    _config_path,
+    _target_id,
+    _start_segment,
+    _automatic,
+    _authorization,
+    events,
+    _commands,
+    _cycle_count=1,
+    _dig_target_ids=(),
+):
+    events.put(
+        {
+            "kind": "terminal",
+            "stage": "failed",
+            "next_segment": "",
+            "error": "Follow failed: MOTION_GATE_CLOSED",
+        }
+    )
+    time.sleep(5.0)
+
+
 def test_segmented_hybrid_supervisor_advances_only_in_contract_order(tmp_path):
     supervisor = HybridMissionSupervisor(
         config_path=tmp_path / "hybrid.json",
@@ -153,6 +175,24 @@ def test_hybrid_snapshot_reports_the_current_cycle_target(tmp_path):
         completed = _wait_for_stage(supervisor, "completed")
 
         assert completed.dig_target_id == "dig_03"
+    finally:
+        supervisor.close()
+
+
+def test_failed_snapshot_keeps_safety_stop_available_while_worker_cleans_up(
+    tmp_path,
+):
+    supervisor = HybridMissionSupervisor(
+        config_path=tmp_path / "hybrid.json",
+        worker_target=_failed_worker_that_lingers_during_cleanup,
+        process_context=multiprocessing.get_context("spawn"),
+    )
+    try:
+        supervisor.start("dig_01", automatic=False, motion_authorization=None)
+
+        failed = _wait_for_stage(supervisor, "failed")
+
+        assert failed.can_stop is True
     finally:
         supervisor.close()
 

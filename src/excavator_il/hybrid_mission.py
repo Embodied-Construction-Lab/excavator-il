@@ -50,6 +50,7 @@ class ResidentMissionConfig:
     handoff_timeout_s: int
     poll_interval_ms: int
     prepared_dump_lead_steps: int
+    prepared_dump_refresh_lead_steps: int
     prepared_ready_grace_ms: int
     prepared_start_tolerance_m: float
 
@@ -60,6 +61,17 @@ class ResidentMissionConfig:
             1,
             2000,
         )
+        _integer(
+            self.prepared_dump_refresh_lead_steps,
+            "resident.prepared_dump_refresh_lead_steps",
+            1,
+            2000,
+        )
+        if self.prepared_dump_refresh_lead_steps >= self.prepared_dump_lead_steps:
+            raise ValueError(
+                "resident.prepared_dump_refresh_lead_steps must be less than "
+                "resident.prepared_dump_lead_steps"
+            )
         _integer(
             self.prepared_ready_grace_ms,
             "resident.prepared_ready_grace_ms",
@@ -288,6 +300,7 @@ def _resident_config(
         "handoff_timeout_s",
         "poll_interval_ms",
         "prepared_dump_lead_steps",
+        "prepared_dump_refresh_lead_steps",
         "prepared_ready_grace_ms",
         "prepared_start_tolerance_m",
     }
@@ -331,6 +344,12 @@ def _resident_config(
         prepared_dump_lead_steps=_integer(
             resident.get("prepared_dump_lead_steps"),
             "resident.prepared_dump_lead_steps",
+            1,
+            2000,
+        ),
+        prepared_dump_refresh_lead_steps=_integer(
+            resident.get("prepared_dump_refresh_lead_steps"),
+            "resident.prepared_dump_refresh_lead_steps",
             1,
             2000,
         ),

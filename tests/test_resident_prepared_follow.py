@@ -81,6 +81,11 @@ def test_prepare_warms_planner_then_releases_a_separate_plan_gate(tmp_path):
         / "logs"
         / "hybrid_mission_20260821_140000.prepared-dump.plan"
     )
+    refresh_gate = (
+        tmp_path
+        / "logs"
+        / "hybrid_mission_20260821_140000.prepared-dump.refresh"
+    )
     assert process.argv == [
         "/bin/zsh",
         "-lc",
@@ -101,6 +106,8 @@ def test_prepare_warms_planner_then_releases_a_separate_plan_gate(tmp_path):
                         str(gate),
                         "--plan-gate",
                         str(plan_gate),
+                        "--refresh-gate",
+                        str(refresh_gate),
                         "--first-waypoint-distance-m 0.15",
                     )
                 ),
@@ -110,10 +117,15 @@ def test_prepare_warms_planner_then_releases_a_separate_plan_gate(tmp_path):
     assert process.kwargs["prefix"] == "prepared-dump"
     assert not gate.exists()
     assert not plan_gate.exists()
+    assert not refresh_gate.exists()
 
     adapter.trigger_prepare()
 
     assert plan_gate.is_file()
+
+    adapter.trigger_refresh()
+
+    assert refresh_gate.is_file()
 
 
 def test_activate_waits_for_stable_ready_marker_then_releases_one_shot_gate(tmp_path):

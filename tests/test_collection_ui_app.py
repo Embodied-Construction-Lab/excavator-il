@@ -551,6 +551,7 @@ def test_collection_ui_exposes_config_status_and_guided_collection_actions(tmp_p
     assert '/static/app.js?v=20260824-log-tools' in page.text
     assert 'id="copy-log"' in page.text
     assert 'id="copy-hybrid-log"' in page.text
+    assert "state.hybridSnapshot?.can_stop === true" in script.text
     assert "采集协议" in page.text
     assert "仅挖掘" in page.text
     assert "挖掘 + 运转 + 倾倒" in page.text

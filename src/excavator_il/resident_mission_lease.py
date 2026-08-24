@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 from typing import Callable
 
 
@@ -19,6 +20,7 @@ class ResidentMissionLeaseHeartbeat:
         renew_lease: Callable[[], object],
         *,
         interval_s: float = 0.4,
+        failure_grace_s: float = 0.0,
     ) -> None:
         if not callable(renew_lease):
             raise ValueError("renew_lease must be callable")
@@ -29,8 +31,16 @@ class ResidentMissionLeaseHeartbeat:
             or not 0.1 <= float(interval_s) <= 0.5
         ):
             raise ValueError("interval_s must be finite and within [0.1, 0.5]")
+        if (
+            isinstance(failure_grace_s, bool)
+            or not isinstance(failure_grace_s, (int, float))
+            or not math.isfinite(float(failure_grace_s))
+            or not 0.0 <= float(failure_grace_s) <= 2.0
+        ):
+            raise ValueError("failure_grace_s must be finite and within [0, 2]")
         self._renew_lease = renew_lease
         self._interval_s = float(interval_s)
+        self._failure_grace_s = float(failure_grace_s)
         self._lock = threading.Lock()
         self._stop: threading.Event | None = None
         self._thread: threading.Thread | None = None
@@ -96,13 +106,21 @@ class ResidentMissionLeaseHeartbeat:
                 self._thread = None
 
     def _run(self, stop: threading.Event) -> None:
+        first_failure_at: float | None = None
         while not stop.wait(self._interval_s):
             try:
                 self._renew_lease()
             except BaseException as exc:
+                now = time.monotonic()
+                if first_failure_at is None:
+                    first_failure_at = now
+                if now - first_failure_at < self._failure_grace_s:
+                    continue
                 with self._lock:
                     self._failure = exc
                 return
+            else:
+                first_failure_at = None
 
     def _raise_failure_locked(self) -> None:
         failure = self._failure

@@ -295,6 +295,20 @@ def test_act_warms_dump_planner_then_triggers_fresh_plan_near_completion():
                 act_segment_completed_steps=110,
             ),
             _status(
+                control_generation=7,
+                act_is_active=True,
+                act_segment_generation=7,
+                act_segment_max_steps=130,
+                act_segment_completed_steps=124,
+            ),
+            _status(
+                control_generation=7,
+                act_is_active=True,
+                act_segment_generation=7,
+                act_segment_max_steps=130,
+                act_segment_completed_steps=125,
+            ),
+            _status(
                 control_generation=8,
                 rl_is_active=True,
                 act_segment_generation=7,
@@ -333,6 +347,9 @@ def test_act_warms_dump_planner_then_triggers_fresh_plan_near_completion():
         def trigger_prepare(self):
             events.append("trigger_prepare")
 
+        def trigger_refresh(self):
+            events.append("trigger_refresh")
+
         def activate_prepared(self):
             events.append("activate_prepared")
             return PreparedDumpActivation.ACTIVATED
@@ -352,6 +369,7 @@ def test_act_warms_dump_planner_then_triggers_fresh_plan_near_completion():
         behavior=Behavior(),
         prepared_dump=Prepared(),
         prepared_dump_lead_steps=20,
+        prepared_dump_refresh_lead_steps=5,
         act_run_timeout_s=90,
         poll_interval_s=0.1,
         sleep=lambda _seconds: events.append("sleep"),
@@ -362,8 +380,10 @@ def test_act_warms_dump_planner_then_triggers_fresh_plan_near_completion():
 
     assert events.count("start_prepare") == 1
     assert events.count("trigger_prepare") == 1
+    assert events.count("trigger_refresh") == 1
     assert events.index("start_prepare") < events.index("status")
     assert events.index("trigger_prepare") > events.index("status")
+    assert events.index("trigger_refresh") > events.index("trigger_prepare")
     assert events[-2:] == ["activate_prepared", "run_dump_action"]
     assert "legacy_dump" not in events
 
@@ -1082,6 +1102,38 @@ def test_ssh_control_exposes_ready_activate_and_disarm_as_short_requests():
         "renew_lease",
         "terminal_disarm",
     ]
+
+
+def test_ssh_lease_renewal_has_a_shorter_timeout_than_other_control_requests():
+    calls = []
+
+    def run_command(argv, **kwargs):
+        calls.append((argv[-1], kwargs["timeout"]))
+        command = "renew_lease" if argv[-1].endswith(" renew_lease") else "status"
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=json.dumps(
+                _wire_response(command, mission_lease_active=True)
+            )
+            + "\n",
+            stderr="",
+        )
+
+    control = SshResidentControlAdapter(
+        ssh_host="jetson16@192.168.50.2",
+        orin_repo="/srv/excavator-orin-runtime",
+        socket_path="/run/excavator/resident-control.sock",
+        ensure_services_ready=lambda: None,
+        run_command=run_command,
+        command_timeout_s=30,
+        lease_command_timeout_s=1,
+    )
+
+    control.status()
+    control.renew_lease()
+
+    assert [timeout for _command, timeout in calls] == [30, 1]
 
 
 def _json_with_status(**changes):

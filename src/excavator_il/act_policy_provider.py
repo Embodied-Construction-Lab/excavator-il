@@ -8,6 +8,7 @@ checkpoint/deployment provenance gates.
 from __future__ import annotations
 
 import hashlib
+import importlib
 from typing import Any, Callable
 
 from .act_runtime import ActPolicySession, RuntimeMode
@@ -58,6 +59,11 @@ def _load_commissioned_lerobot_act(
 ) -> DigPolicy:
     _verify_checkpoint(config)
     _verify_motion_deployment(config, mode=mode)
+    # LeRobot accesses ``packaging.version`` through the package attribute,
+    # but recent packaging releases do not import that submodule eagerly.
+    # Load it at this optional backend boundary so ACT model loading does not
+    # depend on unrelated import order elsewhere in the process.
+    importlib.import_module("packaging.version")
     get_policy_class, make_pre_post_processors = _load_lerobot_policy_api()
     policy_class = get_policy_class("act")
     policy = policy_class.from_pretrained(config.checkpoint_path)

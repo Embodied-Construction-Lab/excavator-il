@@ -88,6 +88,7 @@ class HybridMissionSnapshot:
     requested_cycles: int = 1
     run_id: str = ""
     evidence_error: str = ""
+    can_stop: bool = False
 
 
 def run_hybrid_mission_worker(
@@ -319,7 +320,12 @@ class HybridMissionSupervisor:
 
     def snapshot(self) -> HybridMissionSnapshot:
         with self._lock:
-            return replace(self._state, logs=tuple(self._logs))
+            process = self._process
+            return replace(
+                self._state,
+                logs=tuple(self._logs),
+                can_stop=bool(process is not None and process.is_alive()),
+            )
 
     def retry_evidence_finalization(self) -> None:
         """Retry a failed evidence publication without replaying Mission events."""

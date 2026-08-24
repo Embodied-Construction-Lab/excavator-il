@@ -409,6 +409,7 @@ class SystemResidentHybridMissionOperations:
             else ResidentMissionLeaseHeartbeat(
                 control.renew_lease,
                 interval_s=0.4,
+                failure_grace_s=1.5,
             )
         )
         prepared_dump = prepared_dump_adapter
@@ -432,6 +433,9 @@ class SystemResidentHybridMissionOperations:
             behavior=behavior,
             prepared_dump=prepared_dump,
             prepared_dump_lead_steps=resident.prepared_dump_lead_steps,
+            prepared_dump_refresh_lead_steps=(
+                resident.prepared_dump_refresh_lead_steps
+            ),
             act_run_timeout_s=config.act_run_timeout_s,
             handoff_timeout_s=resident.handoff_timeout_s,
             poll_interval_s=resident.poll_interval_ms / 1000.0,
