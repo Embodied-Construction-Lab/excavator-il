@@ -176,6 +176,28 @@ class _LifetimeTrackedCamera(_ConcurrentFakeCamera):
         )
 
 
+class _SlowStartupCamera(_ConcurrentFakeCamera):
+    read_barrier = threading.Barrier(2)
+
+    def read_rgb(self) -> RgbCameraFrame:
+        if self._first_read:
+            self._first_read = False
+            self.read_barrier.wait(timeout=1.0)
+            time.sleep(0.5)
+        else:
+            time.sleep(0.1)
+        image = np.full(
+            (self._config.height, self._config.width, 3),
+            100,
+            dtype=np.uint8,
+        )
+        return RgbCameraFrame(
+            capture_monotonic_ns=time.monotonic_ns(),
+            rgb=image,
+            encoded_image=b"warmed-jpeg",
+        )
+
+
 def test_dual_camera_diagnostic_samples_both_roles_concurrently(tmp_path: Path) -> None:
     config_path = _write_collection_config(tmp_path)
 
@@ -189,6 +211,7 @@ def test_dual_camera_diagnostic_samples_both_roles_concurrently(tmp_path: Path) 
 
     assert payload["schema_version"] == "excavator_dual_camera_diagnostic.v1"
     assert payload["passed"] is True
+    assert payload["warmup_frame_count"] == 3
     assert payload["devices_distinct"] is True
     assert tuple(payload["cameras"]) == ("front", "dump")
     for role in ("front", "dump"):
@@ -198,6 +221,21 @@ def test_dual_camera_diagnostic_samples_both_roles_concurrently(tmp_path: Path) 
         assert camera["frame_shape"] == [24, 32, 3]
         assert camera["jpeg_sha256"]
         assert camera["failure_reasons"] == []
+
+
+def test_dual_camera_diagnostic_excludes_camera_startup_from_measurement(
+    tmp_path: Path,
+) -> None:
+    report = run_dual_camera_diagnostic(
+        _write_collection_config(tmp_path),
+        duration_s=0.45,
+        camera_factory=_SlowStartupCamera,
+    )
+
+    assert report.passed is True
+    for camera in report.to_dict()["cameras"].values():
+        assert camera["successful_frame_count"] == 4
+        assert camera["measured_fps"] == 8.888889
 
 
 def test_dual_camera_diagnostic_rejects_aliases_of_same_physical_device(
@@ -368,6 +406,7 @@ def test_camera_diagnostic_cli_reports_config_errors_without_traceback(
         ],
         "passed": False,
         "schema_version": "excavator_dual_camera_diagnostic.v1",
+        "warmup_frame_count": 3,
         "thresholds": {
             "fps_relative_tolerance": 1.0 / 6.0,
             "max_near_black_fraction": 0.995,

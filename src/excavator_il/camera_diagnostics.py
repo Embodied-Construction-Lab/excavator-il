@@ -21,6 +21,7 @@ from .collector.config import CameraConfig, load_collection_config
 
 
 DIAGNOSTIC_SCHEMA_VERSION = "excavator_dual_camera_diagnostic.v1"
+WARMUP_FRAME_COUNT = 3
 
 
 class CameraReader(Protocol):
@@ -112,6 +113,7 @@ class DualCameraDiagnosticReport:
             "passed": self.passed,
             "config_path": self.config_path,
             "duration_s": self.duration_s,
+            "warmup_frame_count": WARMUP_FRAME_COUNT,
             "thresholds": asdict(self.thresholds),
             "devices_distinct": self.devices_distinct,
             "cameras": {
@@ -296,6 +298,8 @@ def _sample_camera(
     try:
         camera = camera_factory(config)
         start_barrier.wait(timeout=5.0)
+        for _ in range(WARMUP_FRAME_COUNT):
+            camera.read_rgb()
         start_ns = time.monotonic_ns()
         deadline_ns = start_ns + round(duration_s * 1_000_000_000)
         accumulator = _initial_frame_accumulator()
@@ -482,6 +486,7 @@ def _error_payload(
         "passed": False,
         "config_path": str(config_path.expanduser().resolve()),
         "duration_s": duration_s,
+        "warmup_frame_count": WARMUP_FRAME_COUNT,
         "thresholds": asdict(thresholds),
         "devices_distinct": False,
         "cameras": {},

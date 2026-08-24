@@ -233,7 +233,8 @@ python scripts/diagnose_dual_camera.py \
 ```
 
 该诊断只并发打开 `config/collection.orin.json` 中的 `camera_front` 和 `camera_dump`，不会导入串口
-库、打开 `/dev/ttyTHS1`、创建网络连接或发送动作。只有两路解析到不同物理设备、分辨率均为
+库、打开 `/dev/ttyTHS1`、创建网络连接或发送动作。两路先各自丢弃 3 帧完成 UVC/曝光预热，再进入
+固定 5 秒测量窗口，避免把首次打开设备的等待时间误判为持续掉帧。只有两路解析到不同物理设备、分辨率均为
 `640×480×3`、实测频率均在 `25–35 Hz`、画面没有达到 99.5% 近黑/近白，并且两路均产生有效
 JPEG 时才返回 0。还必须人工查看 `/tmp/icra2027-camera-preflight/front.jpg` 和 `dump.jpg`，确认
 内容、方向和视野正确；算法通过不能替代这一步。任一路返回失败或画面仍黑暗/被遮挡时，不得开始
