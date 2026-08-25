@@ -407,7 +407,7 @@ class SshResidentFixedCycleOperations:
 
     def _request(self, command: str, *arguments: str) -> ResidentFixedCycleRemoteStatus:
         argv = [
-            self._guided.rl_orin_python,
+            str(self._guided.rl_orin_python),
             "-m",
             "edge_runtime.resident_fixed_cycle_control",
             "--socket",

@@ -7,6 +7,7 @@ import pytest
 
 import excavator_il.resident_fixed_cycle_system as resident_module
 from excavator_il.hybrid_mission import REQUIRED_HYBRID_MOTION_AUTHORIZATION
+from excavator_il.guided_episode import GuidedEpisodeConfig
 from excavator_il.resident_fixed_cycle_system import (
     ResidentFixedCyclePcConfig,
     ResidentFixedCycleProcesses,
@@ -158,6 +159,48 @@ def test_ssh_operations_start_once_and_use_only_local_cycle_control(tmp_path):
     assert any("--run-id run-001 --cycles 3 --first-dig-point-id dig_02 start" in command
                for command in ssh_commands)
     assert not any("18083" in command or "Plan" in command for command in ssh_commands)
+
+
+def test_ssh_operations_accept_real_guided_posix_path_fields(tmp_path):
+    """Exercise the production config types at the final shlex boundary."""
+
+    config = ResidentFixedCyclePcConfig.load(_write_config(tmp_path))
+    repo_root = Path(__file__).parents[1]
+    guided = GuidedEpisodeConfig.load(repo_root / "config/guided_episode.pc.json")
+    commands = []
+
+    class Processes:
+        def start(self):
+            return None
+
+    class Host:
+        def run(self, command, *, accepted_returncodes=(0,)):
+            commands.append(command)
+            return json.dumps(
+                {
+                    "schema_version": "resident_fixed_cycle_control.v1",
+                    "ok": True,
+                    "command": "start",
+                    "status": _status("FOLLOW_DIG"),
+                    "error": None,
+                }
+            )
+
+    operations = SshResidentFixedCycleOperations(
+        config,
+        guided_config=guided,
+        processes=Processes(),
+        remote_host=Host(),
+    )
+
+    status = operations.start(
+        run_id="run-real-config",
+        requested_cycles=1,
+        first_dig_point_id="dig_01",
+    )
+
+    assert status.stage == "FOLLOW_DIG"
+    assert commands and str(guided.rl_orin_python) in commands[0]
 
 
 def test_commissioning_owner_command_forwards_flat_exact_authorization(tmp_path):
