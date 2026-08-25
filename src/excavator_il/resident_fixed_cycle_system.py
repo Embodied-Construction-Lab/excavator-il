@@ -27,7 +27,6 @@ from .hybrid_experiment_run import (
 )
 from .remote_runtime import LineProcess, SshRuntimeHost
 
-
 CONFIG_SCHEMA_VERSION = "excavator_resident_fixed_cycle_pc.v2"
 COMMISSIONING_AUTHORIZATION = "ALLOW_V3A_FIXED_TRAJECTORY_COMMISSIONING"
 CONTROL_SCHEMA_VERSION = "resident_fixed_cycle_control.v1"
@@ -70,7 +69,6 @@ _STAGE_TO_UI = {
     "CANCELLED": "cancelled",
 }
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
-
 @dataclass(frozen=True)
 class ResidentFixedCyclePcConfig:
     guided_config: Path
@@ -127,7 +125,6 @@ class ResidentFixedCyclePcConfig:
                 value["commissioning_authorization"]
             ),
         )
-
 @dataclass(frozen=True)
 class ResidentFixedCycleRemoteStatus:
     run_id: str
@@ -270,15 +267,20 @@ class ResidentFixedCycleProcesses:
             self._config.ready_timeout_s,
         )
         self._owner_pid = _remote_pid(line, "RESIDENT_OWNER_PID")
-        process.wait_for(
+        _, ready_line = process.wait_for(
             lambda item: "RESIDENT_FIXED_CYCLE_READY " in item,
             self._config.ready_timeout_s,
         )
+        expected = (
+            f"control_socket={self._config.control_socket} "
+            f"act_socket={self._config.runtime_root / 'act.sock'}"
+        )
+        if expected not in ready_line:
+            raise RuntimeError("V3-A owner announced an unexpected control socket")
         process.wait_for(
             lambda item: "RESIDENT_HARDWARE_READY sensor_valid=True" in item,
             self._config.ready_timeout_s,
         )
-
     def _start_act_worker(self) -> None:
         argv = [
             "env",
@@ -303,7 +305,6 @@ class ResidentFixedCycleProcesses:
             lambda item: "ACT resident worker ready:" in item,
             self._config.ready_timeout_s,
         )
-
     def _spawn(self, command: str, prefix: str) -> Any:
         log_path = Path(self._guided.log_dir) / (
             f"resident_fixed_cycle_{self._timestamp}.{prefix}.log"

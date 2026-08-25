@@ -223,7 +223,7 @@ def test_commissioning_owner_command_forwards_flat_exact_authorization(tmp_path)
         def wait_for(self, predicate, _timeout):
             for line in (
                 "RESIDENT_OWNER_PID=123",
-                "RESIDENT_FIXED_CYCLE_READY control_socket=/tmp/fixed.sock",
+                _owner_ready_line(config),
                 "RESIDENT_HARDWARE_READY sensor_valid=True",
             ):
                 if predicate(line):
@@ -244,6 +244,41 @@ def test_commissioning_owner_command_forwards_flat_exact_authorization(tmp_path)
         "--commissioning-authorization "
         "ALLOW_V3A_FIXED_TRAJECTORY_COMMISSIONING"
     ) in commands[0]
+
+
+def test_owner_readiness_rejects_mismatched_fixed_cycle_socket(tmp_path):
+    config = ResidentFixedCyclePcConfig.load(_write_config(tmp_path))
+
+    class Host:
+        def argv(self, command):
+            return ["ssh", "orin", command]
+
+    class Process:
+        returncode = None
+
+        def wait_for(self, predicate, _timeout):
+            for line in (
+                "RESIDENT_OWNER_PID=123",
+                "RESIDENT_FIXED_CYCLE_READY "
+                "control_socket=/home/jetson16/.local/run/"
+                "excavator-resident/fixed-cycle.sock "
+                "act_socket=/home/jetson16/.local/run/"
+                "excavator-resident-v3a/act.sock",
+                "RESIDENT_HARDWARE_READY sensor_valid=True",
+            ):
+                if predicate(line):
+                    return 0, line
+            raise AssertionError("readiness predicate did not match")
+
+    processes = ResidentFixedCycleProcesses(
+        config,
+        guided_config=_guided(),
+        remote_host=Host(),
+        line_process_factory=lambda *_args, **_kwargs: Process(),
+    )
+
+    with pytest.raises(RuntimeError, match="control socket"):
+        processes._start_owner()
 
 
 def test_remote_process_lifecycle_starts_once_and_releases_owned_devices(tmp_path):
@@ -278,7 +313,7 @@ def test_remote_process_lifecycle_starts_once_and_releases_owned_devices(tmp_pat
         lines = (
             [
                 "RESIDENT_OWNER_PID=321",
-                "RESIDENT_FIXED_CYCLE_READY control_socket=/tmp/fixed.sock",
+                _owner_ready_line(config),
                 "RESIDENT_HARDWARE_READY sensor_valid=True",
             ]
             if index == 0
@@ -324,7 +359,7 @@ def test_process_start_failure_cleans_owner_and_reports_cleanup_error(tmp_path):
         def wait_for(self, predicate, _timeout):
             for line in (
                 "RESIDENT_OWNER_PID=321",
-                "RESIDENT_FIXED_CYCLE_READY control_socket=/tmp/fixed.sock",
+                _owner_ready_line(config),
                 "RESIDENT_HARDWARE_READY sensor_valid=True",
             ):
                 if predicate(line):
@@ -607,6 +642,14 @@ def _guided():
         log_dir = Path("/tmp")
 
     return Guided()
+
+
+def _owner_ready_line(config):
+    return (
+        "RESIDENT_FIXED_CYCLE_READY "
+        f"control_socket={config.control_socket} "
+        f"act_socket={config.runtime_root / 'act.sock'}"
+    )
 
 
 def _status(stage, *, terminal=False, outcome=""):
