@@ -123,10 +123,11 @@ teleop 在创建 UDP socket 前先要求六个 X/Y/Z 轴回中且 deadman 释放
 从 `mission_config` 读取 Dig 目标并执行一次 execution-strict `Plan DIG → Follow`。只有 Follow
 返回 `SUCCEEDED` 且 `quiescence_confirmed=true` 后，脚本才用 `SIGTERM` 触发 RL Runtime 的终态
 归零清理，确认 `/dev/ttyTHS1` 已释放，再启动 Collector。任何一步失败都不会创建 Episode。
-正式 campaign 中，无论选择 RL 定位、人工预定位还是直接采集，Episode 的 `dig_target_m` 都按
-本槽位 `dig_point_id` 从 `rl_preposition.demo_config` 解析；RL 定位结果还必须与该权威坐标一致。
-脚本在预检和每次 Episode 创建前都会重新核对 PC 上该文件的 clean Git HEAD、仓库相对路径、SHA-256
-与目标坐标，并把结果写入 `episode.json.target_source_provenance`；任何漂移都会在录制前拒绝。
+WebUI 中无论选择 RL 定位、人工预定位还是直接采集，Episode 的 `dig_target_m` 都按本条手工填写的
+`dig_point_id` 从 `rl_preposition.demo_config` 解析；RL 定位结果还必须与该权威坐标一致。
+脚本在预检和每次 Episode 创建前都会重新核对 PC 上该目标配置文件相对 HEAD 未修改、仓库相对路径、
+SHA-256 与目标坐标，并把结果写入 `episode.json.target_source_provenance`；目标文件漂移会在录制前
+拒绝，与目标无关的 AiryLidar 工作树修改不会阻止单条采集。
 只有未携带 collection protocol 的旧式诊断入口才兼容使用 `episode.dig_target_m`。该字段只作
 溯源元数据，不是 ACT 输入。
 
@@ -171,10 +172,11 @@ python scripts/run_collection_ui.py
 - `直接采集`：跳过定位，直接等待 Recorder 与 deadman；
 - `仅遥操作`：只启动 Collector 与 PC teleop，不创建 Episode、不占用编号、不写训练数据；按住
   deadman 可用 X/Y 控制工作装置、Z1/Z2 控制左右履带，释放即六轴回零，点击“安全停止”退出；
-- Episode 结束后点击“成功”“失败”或“重录”。页面从 Orin 原始数据根目录只读计算 200 条 campaign
-  的权威下一槽位，自动填写 `task_variant / soil_reset_block_id / dig_point_id` 并显示总进度；每条完成
-  后重新读取，浏览器 `localStorage` 不参与计数。SSH 或 campaign 校验不可用时正式采集会被禁止，
-  但不创建 Episode 的`仅遥操作`仍可使用。
+- 每次点击“开始采集流程”只创建一条 Episode。操作者逐条填写
+  `task_variant / soil_reset_block_id / dig_point_id`，结束后点击“成功”“失败”或“重录”；页面不自动
+  连续采集、不显示或强制 200 条批次进度，也不依赖 campaign inspector 才允许启动下一条。
+- `scripts/inspect_collection_campaign.py` 保留为离线计划与审计工具；它不会被 WebUI 调用，也不会控制
+  Collector、Episode 编号或运动生命周期。单条失败、断连或人工停止后，处理故障即可独立开始下一条。
 - `启动 RL + RViz`：从页面启动既有 AiryLidar `live_commissioning` Operator；不会复制规划、
   策略或可视化实现。录制演示视频时保留弹出的原生 RViz 窗口即可。
 
@@ -387,7 +389,8 @@ excavator-il validate \
 放宽；能定位并确认连续恢复的孤立事件会生成 `training_segments.json`，只隔离故障窗口，无法
 恢复的事件仍校验失败。未通过校验的 Episode 不应转换。
 
-正式 ICRA 2027 campaign 的进度与证据状态应从 Orin 原始目录只读检查，而不是依赖浏览器计数：
+若需要核对 ICRA 2027 的离线采集计划与证据状态，可从 Orin 原始目录只读检查；这些命令不参与
+WebUI 的单条采集启动：
 
 ```bash
 python scripts/inspect_collection_campaign.py \
@@ -402,7 +405,8 @@ python scripts/manage_experiment_run.py verify \
   --run-id collection_episode_0001
 ```
 
-未采满时 `inspect_collection_campaign.py --next` 以退出码 2 返回属于预期；只在
+未采满时 `inspect_collection_campaign.py --next` 以退出码 2 返回属于预期；该结果只供离线安排，
+不会自动填写标签或阻止下一条 Episode。只在
 `complete_and_valid=true` 时表示整批 200 条 campaign 无 duplicate、unplanned 或 malformed
 Episode。`record-collection-run` 与 `manage_experiment_run.py verify` 是幂等的，只追加或核验证据，
 不会改写原始 Episode。正式证据还会读取并快照

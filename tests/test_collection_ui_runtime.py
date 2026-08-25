@@ -6,7 +6,6 @@ from excavator_il.collection_ui_app import CollectionUiMetadata
 from excavator_il.collection_ui_config import CollectionUiConfig
 from excavator_il import collection_ui_runtime
 from excavator_il.collection_ui_runtime import (
-    OrinCampaignInspector,
     build_collection_ui_runtime,
     metadata_from_guided_config,
     run_collection_ui,
@@ -34,36 +33,6 @@ def test_collection_ui_metadata_comes_from_authoritative_guided_config():
     )
 
 
-def test_orin_campaign_inspector_reads_remote_collection_config_without_writes():
-    guided = object.__new__(GuidedEpisodeConfig)
-    object.__setattr__(guided, "orin_ssh_host", "jetson16@192.168.50.2")
-    object.__setattr__(guided, "orin_repo", "/opt/excavator-il")
-    object.__setattr__(guided, "orin_executable", "/opt/env/bin/excavator-il")
-    object.__setattr__(guided, "orin_collection_config", "config/collection.orin.json")
-    calls = []
-
-    class Host:
-        def run(self, command, *, accepted_returncodes=(0,)):
-            calls.append((command, accepted_returncodes))
-            return (
-                '{"schema_version":"excavator_collection_campaign.v1",'
-                '"summary":{"planned":200,"completed":0,'
-                '"ignored_diagnostics":0,"complete_and_valid":false},'
-                '"next_expected_slot":{"slot_id":"slot_001",'
-                '"task_variant":"dig_only","soil_reset_block_id":"block_01",'
-                '"dig_point_id":"dig_01"}}'
-            )
-
-    report = OrinCampaignInspector(guided, remote_host=Host())()
-
-    assert report["next_expected_slot"]["slot_id"] == "slot_001"
-    assert calls[0][1] == (0, 2)
-    assert "cd /opt/excavator-il" in calls[0][0]
-    assert "/opt/env/bin/python" in calls[0][0]
-    assert "scripts/inspect_collection_campaign.py" in calls[0][0]
-    assert "--collection-config config/collection.orin.json --next" in calls[0][0]
-
-
 def test_collection_ui_runtime_composes_config_supervisor_and_app(
     monkeypatch, tmp_path
 ):
@@ -82,6 +51,7 @@ def test_collection_ui_runtime_composes_config_supervisor_and_app(
     object.__setattr__(guided, "rl_demo_config", None)
     supervisor = object()
     app = object()
+    captured = {}
 
     monkeypatch.setattr(
         collection_ui_runtime, "load_collection_ui_config", lambda _path: ui_config
@@ -95,13 +65,14 @@ def test_collection_ui_runtime_composes_config_supervisor_and_app(
     monkeypatch.setattr(
         collection_ui_runtime,
         "create_collection_ui_app",
-        lambda **kwargs: app if kwargs["supervisor"] is supervisor else None,
+        lambda **kwargs: captured.update(kwargs) or app,
     )
-
     runtime = build_collection_ui_runtime(tmp_path / "ui.json")
 
     assert runtime.config is ui_config
     assert runtime.app is app
+    assert captured["supervisor"] is supervisor
+    assert "campaign_inspector" not in captured
 
 
 def test_collection_ui_runtime_composes_optional_hybrid_supervisor(
@@ -173,7 +144,7 @@ def test_collection_ui_runtime_composes_optional_hybrid_supervisor(
     assert hybrid_kwargs["dig_target_ids"] == ("dig_01", "dig_02", "dig_03")
 
 
-def test_collection_ui_runtime_selects_v3a_local_cycle_without_pc_operator(
+def test_collection_ui_runtime_selects_v3a_local_cycle_with_display_only_operator(
     monkeypatch, tmp_path
 ):
     guided_path = tmp_path / "guided.json"
@@ -198,11 +169,13 @@ def test_collection_ui_runtime_selects_v3a_local_cycle_without_pc_operator(
     object.__setattr__(guided, "dig_target_m", (0.8, 0.0, -0.2))
     object.__setattr__(guided, "orin_ssh_host", "jetson16@192.168.50.2")
     object.__setattr__(guided, "rl_demo_config", None)
+    object.__setattr__(guided, "log_dir", tmp_path / "logs")
     operations = object()
     local_supervisor = object()
     captured = {}
     operation_kwargs = {}
     supervisor_kwargs = {}
+    operator_kwargs = {}
     evidence_config = object()
 
     class EvidenceFactory:
@@ -252,6 +225,12 @@ def test_collection_ui_runtime_selects_v3a_local_cycle_without_pc_operator(
         "ResidentFixedCycleSupervisor",
         lambda **kwargs: supervisor_kwargs.update(kwargs) or local_supervisor,
     )
+    operator = object()
+    monkeypatch.setattr(
+        collection_ui_runtime,
+        "AiryOperatorSupervisor",
+        lambda **kwargs: operator_kwargs.update(kwargs) or operator,
+    )
     monkeypatch.setattr(
         collection_ui_runtime,
         "create_collection_ui_app",
@@ -261,7 +240,12 @@ def test_collection_ui_runtime_selects_v3a_local_cycle_without_pc_operator(
     build_collection_ui_runtime(tmp_path / "ui.json")
 
     assert captured["hybrid_supervisor"] is local_supervisor
-    assert captured["operator_supervisor"] is None
+    assert captured["operator_supervisor"] is operator
+    assert operator_kwargs["profile"] == "live_shadow"
+    assert operator_kwargs["behavior_port"] is None
+    assert operator_kwargs["trajectory_path"] == (
+        tmp_path / "logs/v3a_active_trajectory.json"
+    ).resolve()
     assert captured["metadata"].hybrid_runtime_backend == "resident_fixed_cycle"
     assert captured["metadata"].hybrid_act_max_steps == 130
     assert callable(operation_kwargs["output"])

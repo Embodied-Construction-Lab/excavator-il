@@ -37,14 +37,11 @@ const state = {
   snapshot: null,
   hybridSnapshot: null,
   operatorSnapshot: null,
-  campaignStatus: null,
-  campaignError: null,
   cameraStreams: {}
 };
 const $ = (id) => document.getElementById(id);
 const CAMERA_RETRY_MS = 1000;
 const CAMERA_REFRESH_MS = 100;
-const CAMPAIGN_REFRESH_MS = 5000;
 const LOG_BOTTOM_TOLERANCE_PX = 24;
 const logAutofollow = new Map();
 
@@ -143,59 +140,6 @@ function renderConfig(config) {
   if (previewUrls.dump) {
     $("camera-dump-container")?.classList.remove("hidden");
     setupCameraPreview("dump", previewUrls.dump);
-  }
-}
-
-function renderCampaignStatus(payload) {
-  state.campaignStatus = payload;
-  state.campaignError = null;
-  $("collection-protocol-panel")?.classList.remove("campaign-error");
-  const completed = Number(payload.completed || 0);
-  const planned = Number(payload.planned || 0);
-  const ignored = Number(payload.ignored_diagnostics || 0);
-  $("campaign-progress").textContent = `${completed} / ${planned}`;
-  const slot = payload.next_expected_slot;
-  if (!slot) {
-    $("campaign-next-slot").textContent = payload.complete_and_valid
-      ? `采集计划已完成 · 已忽略诊断 ${ignored} 条`
-      : "没有剩余槽位，但 campaign 校验未通过";
-    updateOwnershipControls();
-    return;
-  }
-  const target = (state.config?.rl_dig_targets || [])
-    .find(candidate => candidate.target_id === slot.dig_point_id);
-  if (!target) {
-    renderCampaignUnavailable(
-      `权威下一槽位 ${slot.slot_id} 的挖掘点 ${slot.dig_point_id} 未配置`,
-    );
-    return;
-  }
-  $("campaign-next-slot").textContent = `${slot.slot_id} · 已忽略诊断 ${ignored} 条`;
-  const collectionStage = state.snapshot?.stage || "idle";
-  if (terminalStages.has(collectionStage)) {
-    $("task-variant").value = slot.task_variant;
-    $("soil-reset-block-id").value = slot.soil_reset_block_id;
-    $("dig-point-id").value = slot.dig_point_id;
-    selectTarget(target);
-  }
-  updateOwnershipControls();
-}
-
-function renderCampaignUnavailable(message) {
-  state.campaignStatus = null;
-  state.campaignError = message;
-  $("campaign-progress").textContent = "Orin campaign 不可用";
-  $("campaign-next-slot").textContent = message;
-  $("collection-protocol-panel")?.classList.add("campaign-error");
-  updateOwnershipControls();
-}
-
-async function refreshCampaignStatus() {
-  if (!state.config?.campaign_tracking_enabled) return;
-  try {
-    renderCampaignStatus(await api("/api/campaign/status"));
-  } catch (error) {
-    renderCampaignUnavailable(error.message);
   }
 }
 
@@ -316,7 +260,6 @@ function scheduleCameraRefresh(cameraId, delayMs) {
 }
 
 function renderSnapshot(snapshot) {
-  const previousStage = state.snapshot?.stage || "idle";
   state.snapshot = snapshot;
   const stage = snapshot.stage || "idle";
   const active = !terminalStages.has(stage);
@@ -328,7 +271,6 @@ function renderSnapshot(snapshot) {
     renderSelectedMode();
   }
   $("stage-label").textContent = stageLabels[stage] || stage;
-  $("completed-count").textContent = String(snapshot.completed_count || 0);
   $("status-dot").className = `status-dot${active ? " active" : ""}${stage === "failed" ? " error" : ""}`;
 
   const manual = stage === "manual_positioning";
@@ -355,13 +297,6 @@ function renderSnapshot(snapshot) {
   $("error-banner").classList.toggle("hidden", !snapshot.error);
   renderProgress(stage);
   updateOwnershipControls();
-  if (
-    stage === "completed"
-    && previousStage !== "completed"
-    && state.config?.campaign_tracking_enabled
-  ) {
-    void refreshCampaignStatus();
-  }
 }
 
 function renderHybridSnapshot(snapshot) {
@@ -406,14 +341,6 @@ function updateOwnershipControls() {
   const collectionActive = !terminalStages.has(collectionStage);
   const hybridActive = !hybridTerminalStages.has(hybridStage);
   const hybridCanStop = state.hybridSnapshot?.can_stop === true;
-  const campaignBlocksCollection = Boolean(
-    state.config?.campaign_tracking_enabled
-    && state.selectedMode !== "teleop"
-    && (
-      state.campaignError
-      || !state.campaignStatus?.next_expected_slot
-    )
-  );
   if (hybridActive) {
     $("stage-label").textContent = `闭环 · ${hybridStageLabels[hybridStage] || hybridStage}`;
     $("status-dot").className = `status-dot active${hybridStage === "failed" ? " error" : ""}`;
@@ -421,7 +348,7 @@ function updateOwnershipControls() {
     $("stage-label").textContent = stageLabels[collectionStage] || collectionStage;
     $("status-dot").className = `status-dot${collectionActive ? " active" : ""}${collectionStage === "failed" ? " error" : ""}`;
   }
-  $("start-button").disabled = collectionActive || hybridActive || campaignBlocksCollection;
+  $("start-button").disabled = collectionActive || hybridActive;
   $("stop-button").disabled = !collectionActive || collectionStage === "stopping";
   document.querySelectorAll(".mode-card").forEach(card => { card.disabled = collectionActive || hybridActive; });
   document.querySelectorAll(".target-card").forEach(card => { card.disabled = collectionActive || hybridActive; });
@@ -473,6 +400,12 @@ function bindActions() {
     copyLogContent("hybrid-log")
       .then(() => toast("Mission 日志已复制"))
       .catch(error => toast(error.message, true));
+  });
+  $("clear-log")?.addEventListener("click", () => {
+    command("/api/collection/logs/clear");
+  });
+  $("clear-hybrid-log")?.addEventListener("click", () => {
+    commandHybrid("/api/hybrid/logs/clear");
   });
   document.querySelectorAll(".mode-card").forEach(card => card.addEventListener("click", () => {
     state.selectedMode = card.dataset.mode;
@@ -636,10 +569,6 @@ async function boot() {
   renderHybridCycleButton();
   try {
     renderConfig(await api("/api/config"));
-    await refreshCampaignStatus();
-    if (state.config?.campaign_tracking_enabled) {
-      window.setInterval(refreshCampaignStatus, CAMPAIGN_REFRESH_MS);
-    }
     await refreshStatus();
     window.setInterval(refreshStatus, 500);
     await refreshHybridStatus();

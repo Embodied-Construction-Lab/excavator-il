@@ -10,8 +10,6 @@ from excavator_il.airy_operator import AiryOperatorSnapshot
 from excavator_il.collection_ui_app import (
     CollectionUiMetadata,
     StartCollectionRequest,
-    _campaign_status_view,
-    _require_expected_campaign_slot,
     create_collection_ui_app,
 )
 from excavator_il.collection_ui_config import CollectionUiConfig
@@ -31,7 +29,7 @@ def test_dual_camera_views_are_stacked_vertically_without_stretching_page():
         ROOT / "src" / "excavator_il" / "collection_ui_static" / "app.css"
     ).read_text(encoding="utf-8")
 
-    assert '/static/app.css?v=20260824-camera-compact' in index
+    assert '/static/app.css?v=20260825-single-episode' in index
     assert ".camera-grid { display: grid; grid-template-columns: 1fr;" in stylesheet
     assert "align-items: start;" in stylesheet.split(".collection-grid", 1)[1].split(
         "}", 1
@@ -45,6 +43,48 @@ def test_dual_camera_views_are_stacked_vertically_without_stretching_page():
         ".camera-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));"
         not in stylesheet
     )
+
+
+def test_collection_ui_collects_one_episode_with_manual_labels_not_campaign_progress():
+    index = (
+        ROOT / "src" / "excavator_il" / "collection_ui_static" / "index.html"
+    ).read_text(encoding="utf-8")
+
+    assert "本条 Episode 标记" in index
+    assert 'id="soil-reset-block-id"' in index
+    assert '<input id="soil-reset-block-id"' in index
+    assert "200 条采集进度" not in index
+    assert "权威下一条" not in index
+    assert "slot_" not in index
+    assert "本次 UI 已完成" not in index
+    assert 'id="completed-count"' not in index
+
+
+def test_collection_ui_has_no_runtime_campaign_api_or_configuration(tmp_path):
+    app = create_collection_ui_app(
+        config=CollectionUiConfig(
+            guided_config=tmp_path / "guided.json",
+            host="127.0.0.1",
+            port=8088,
+            camera_preview_url="http://192.168.50.2:18092/camera/front.mjpg",
+            visualization_url="",
+        ),
+        metadata=CollectionUiMetadata(
+            operator_id="zhaoshuai",
+            task="ExecuteDig",
+            dig_target_m=(1.0, 0.0, 0.0),
+            orin_host="192.168.50.2",
+            rl_dig_targets=(),
+        ),
+        supervisor=_Supervisor(),
+    )
+
+    with TestClient(app) as client:
+        config = client.get("/api/config").json()
+        campaign = client.get("/api/campaign/status")
+
+    assert "campaign_tracking_enabled" not in config
+    assert campaign.status_code == 404
 
 
 class _Supervisor:
@@ -91,6 +131,10 @@ class _Supervisor:
     def stop(self):
         self.calls.append(("stop",))
 
+    def clear_logs(self):
+        self.calls.append(("clear_logs",))
+        self.state = CollectionSessionSnapshot(stage=self.state.stage)
+
     def close(self):
         self.calls.append(("close",))
 
@@ -120,6 +164,10 @@ class _HybridSupervisor:
     def stop(self):
         self.calls.append(("stop",))
 
+    def clear_logs(self):
+        self.calls.append(("clear_logs",))
+        self.state = HybridMissionSnapshot(stage=self.state.stage)
+
     def close(self):
         self.calls.append(("close",))
 
@@ -144,91 +192,14 @@ class _OperatorSupervisor:
         self.calls.append(("close",))
 
 
-def _campaign_report(next_slot=None):
-    return {
-        "schema_version": "excavator_collection_campaign.v1",
-        "summary": {
-            "planned": 200,
-            "completed": 17,
-            "ignored_diagnostics": 2,
-            "complete_and_valid": False,
-        },
-        "next_expected_slot": next_slot
-        or {
-            "slot_id": "slot_018",
-            "task_variant": "dig_transport_dump",
-            "soil_reset_block_id": "block_02",
-            "dig_point_id": "dig_02",
-        },
-    }
-
-
-def test_campaign_status_view_exposes_only_valid_authoritative_progress():
-    view = _campaign_status_view(_campaign_report())
-
-    assert view == {
-        "planned": 200,
-        "completed": 17,
-        "ignored_diagnostics": 2,
-        "complete_and_valid": False,
-        "next_expected_slot": {
-            "slot_id": "slot_018",
-            "task_variant": "dig_transport_dump",
-            "soil_reset_block_id": "block_02",
-            "dig_point_id": "dig_02",
-        },
-    }
-
-
-def test_formal_collection_must_match_authoritative_next_slot():
-    status = _campaign_status_view(_campaign_report())
-
-    _require_expected_campaign_slot(
-        status,
-        task_variant="dig_transport_dump",
-        soil_reset_block_id="block_02",
-        dig_point_id="dig_02",
-    )
-    with pytest.raises(RuntimeError, match="next expected slot slot_018"):
-        _require_expected_campaign_slot(
-            status,
-            task_variant="dig_only",
-            soil_reset_block_id="block_02",
-            dig_point_id="dig_02",
-        )
-
-
-def test_campaign_status_rejects_malformed_remote_payload():
-    with pytest.raises(ValueError, match="campaign summary"):
-        _campaign_status_view({"schema_version": "excavator_collection_campaign.v1"})
-
-
-def test_incomplete_invalid_campaign_without_remaining_slot_blocks_collection():
-    report = _campaign_report()
-    report["summary"]["completed"] = 200
-    report["next_expected_slot"] = None
-    status = _campaign_status_view(report)
-
-    with pytest.raises(RuntimeError, match="not complete and valid"):
-        _require_expected_campaign_slot(
-            status,
-            task_variant="dig_only",
-            soil_reset_block_id="block_01",
-            dig_point_id="dig_01",
-        )
-
-
 def _route_endpoint(app, path: str):
     return next(route.endpoint for route in app.routes if route.path == path)
 
 
-def test_campaign_inspection_failure_blocks_formal_collection_but_not_teleop(
+def test_single_episode_collection_uses_operator_supplied_labels(
     tmp_path,
 ):
     supervisor = _Supervisor()
-
-    def unavailable_campaign():
-        raise OSError("SSH unavailable")
 
     app = create_collection_ui_app(
         config=CollectionUiConfig(
@@ -246,25 +217,22 @@ def test_campaign_inspection_failure_blocks_formal_collection_but_not_teleop(
             rl_dig_targets=(),
         ),
         supervisor=supervisor,
-        campaign_inspector=unavailable_campaign,
     )
     start = _route_endpoint(app, "/api/collection/start")
 
-    with pytest.raises(HTTPException, match="authoritative Orin") as blocked:
-        start(
-            StartCollectionRequest(
-                positioning_mode="direct",
-                task_variant="dig_only",
-                soil_reset_block_id="block_01",
-                dig_point_id="dig_01",
-            ),
-            ui_header="1",
-        )
-    assert blocked.value.status_code == 409
-    assert supervisor.calls == []
+    start(
+        StartCollectionRequest(
+            positioning_mode="direct",
+            task_variant="dig_only",
+            soil_reset_block_id="soil_after_rain",
+            dig_point_id="dig_03",
+        ),
+        ui_header="1",
+    )
 
-    start(StartCollectionRequest(positioning_mode="teleop"), ui_header="1")
-    assert supervisor.calls[0] == ("start", "teleop", None, None, None, None)
+    assert supervisor.calls == [
+        ("start", "direct", None, "dig_only", "soil_after_rain", "dig_03")
+    ]
 
 
 def test_collection_ui_can_start_and_stop_airy_operator(tmp_path):
@@ -301,6 +269,49 @@ def test_collection_ui_can_start_and_stop_airy_operator(tmp_path):
     assert started.json()["stage"] == "ready"
     assert stopped.json()["stage"] == "stopped"
     assert operator.calls == [("start",), ("stop",), ("close",)]
+
+
+def test_collection_ui_can_clear_collection_and_hybrid_logs(tmp_path):
+    collection = _Supervisor()
+    collection.state = CollectionSessionSnapshot(logs=("collector line",))
+    hybrid = _HybridSupervisor()
+    hybrid.state = HybridMissionSnapshot(logs=("mission line",))
+    app = create_collection_ui_app(
+        config=CollectionUiConfig(
+            guided_config=tmp_path / "guided.json",
+            hybrid_mission_config=tmp_path / "hybrid.json",
+            host="127.0.0.1",
+            port=8088,
+            camera_preview_url="http://192.168.50.2:18092/camera/front.mjpg",
+            visualization_url="",
+        ),
+        metadata=CollectionUiMetadata(
+            operator_id="zhaoshuai",
+            task="ExecuteDig",
+            dig_target_m=(1.0, 0.0, 0.0),
+            orin_host="192.168.50.2",
+            rl_dig_targets=(("dig_01", (1.0, 0.2, 0.0)),),
+        ),
+        supervisor=collection,
+        hybrid_supervisor=hybrid,
+    )
+
+    with TestClient(app) as client:
+        cleared_collection = client.post(
+            "/api/collection/logs/clear",
+            headers={"X-Excavator-UI": "1"},
+        )
+        cleared_hybrid = client.post(
+            "/api/hybrid/logs/clear",
+            headers={"X-Excavator-UI": "1"},
+        )
+
+    assert cleared_collection.status_code == 200
+    assert cleared_collection.json()["logs"] == []
+    assert cleared_hybrid.status_code == 200
+    assert cleared_hybrid.json()["logs"] == []
+    assert ("clear_logs",) in collection.calls
+    assert ("clear_logs",) in hybrid.calls
 
 
 def test_hybrid_start_automatically_starts_airy_operator_when_stopped(tmp_path):
@@ -548,11 +559,15 @@ def test_collection_ui_exposes_config_status_and_guided_collection_actions(tmp_p
     assert "RViz / Foxglove 扩展位" not in page.text
     assert "连续自动完成 1～9 铲装车循环" in page.text
     assert '<option value="9">9 铲</option>' in page.text
-    assert '/static/app.js?v=20260825-v3a' in page.text
+    assert '/static/app.js?v=20260825-single-episode' in page.text
     assert 'id="copy-log"' in page.text
     assert 'id="copy-hybrid-log"' in page.text
+    assert 'id="clear-log"' in page.text
+    assert 'id="clear-hybrid-log"' in page.text
+    assert 'command("/api/collection/logs/clear")' in script.text
+    assert 'commandHybrid("/api/hybrid/logs/clear")' in script.text
     assert "state.hybridSnapshot?.can_stop === true" in script.text
-    assert "采集协议" in page.text
+    assert "本条 Episode 标记" in page.text
     assert "仅挖掘" in page.text
     assert "挖掘 + 运转 + 倾倒" in page.text
     assert stylesheet.status_code == 200

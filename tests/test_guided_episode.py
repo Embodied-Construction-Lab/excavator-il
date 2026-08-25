@@ -57,9 +57,6 @@ class _FakeOperations:
             "dirty": False,
         }
 
-    def require_expected_campaign_slot(self, **protocol):
-        self.events.append(("require_expected_campaign_slot", protocol))
-
     def stop_rl_runtime_and_wait_for_serial(self):
         self.events.append("stop_rl_runtime_and_wait_for_serial")
 
@@ -173,13 +170,7 @@ def test_formal_collection_validates_and_propagates_live_target_source_before_pr
         if isinstance(event, tuple)
         and event[0] == "require_expected_campaign_slot"
     ]
-    expected_gate_count = 1 if mode is PositioningMode.DIRECT else 2
-    assert len(gate_indices) == expected_gate_count
-    if mode is PositioningMode.RL:
-        assert gate_indices[0] < operations.events.index("start_rl_runtime")
-    elif mode is PositioningMode.MANUAL:
-        assert gate_indices[0] < operations.events.index("start_teleop")
-    assert gate_indices[-1] < operations.events.index("start_episode")
+    assert gate_indices == []
     assert capture_indices[-1] < operations.events.index("start_episode")
     assert operations.episode_purposes == ["demonstration"]
     provenance_event = next(
@@ -235,7 +226,7 @@ def test_formal_collection_rejects_target_source_drift_before_episode_creation(
     assert "start_episode" not in operations.events
 
 
-def test_formal_collection_rejects_non_next_campaign_slot_before_episode_creation(
+def test_single_episode_collection_does_not_consult_campaign_slot(
     tmp_path,
 ):
     config = _guided_config(tmp_path)
@@ -254,90 +245,30 @@ def test_formal_collection_rejects_non_next_campaign_slot_before_episode_creatio
     )
     object.__setattr__(config, "rl_demo_config", demo_path)
 
-    class RejectingCampaignOperations(_FakeOperations):
+    class OfflineCampaignOperations(_FakeOperations):
         def require_expected_campaign_slot(self, **protocol):
             self.events.append(("require_expected_campaign_slot", protocol))
-            raise RuntimeError(
-                "formal collection must match next expected slot slot_002"
-            )
+            raise AssertionError("single Episode collection must not inspect campaign")
 
-    operations = RejectingCampaignOperations()
+    operations = OfflineCampaignOperations()
 
-    with pytest.raises(RuntimeError, match="next expected slot slot_002"):
-        run_guided_episode(
-            config,
-            operations,
-            positioning_mode=PositioningMode.DIRECT,
-            input_fn=lambda _prompt: "s",
-            output=lambda _message: None,
-            task_variant="dig_only",
-            soil_reset_block_id="block_01",
-            dig_point_id="dig_01",
-        )
-
-    assert (
-        "require_expected_campaign_slot",
-        {
-            "task_variant": "dig_only",
-            "soil_reset_block_id": "block_01",
-            "dig_point_id": "dig_01",
-        },
-    ) in operations.events
-    assert "start_episode" not in operations.events
-
-
-@pytest.mark.parametrize(
-    ("mode", "motion_events"),
-    (
-        (PositioningMode.RL, {"start_rl_runtime", "run_rl_preposition"}),
-        (PositioningMode.MANUAL, {"start_teleop"}),
-    ),
-)
-def test_formal_collection_rejects_non_next_slot_before_positioning_motion(
-    tmp_path,
-    mode,
-    motion_events,
-):
-    config = _guided_config(tmp_path)
-    demo_path = tmp_path / "AiryLidar/mission/config/excavation_demo.json"
-    demo_path.parent.mkdir(parents=True, exist_ok=True)
-    demo_path.write_text(
-        json.dumps(
-            {
-                "schema_version": "excavation_demo.v1",
-                "dig_points": [
-                    {"point_id": "dig_01", "position_m": [1.0, 0.0, 0.0]}
-                ],
-            }
-        ),
-        encoding="utf-8",
+    run_guided_episode(
+        config,
+        operations,
+        positioning_mode=PositioningMode.DIRECT,
+        input_fn=lambda _prompt: "s",
+        output=lambda _message: None,
+        task_variant="dig_only",
+        soil_reset_block_id="block_07",
+        dig_point_id="dig_01",
     )
-    object.__setattr__(config, "rl_demo_config", demo_path)
 
-    class RejectingCampaignOperations(_FakeOperations):
-        def require_expected_campaign_slot(self, **protocol):
-            self.events.append(("require_expected_campaign_slot", protocol))
-            raise RuntimeError(
-                "formal collection must match next expected slot slot_002"
-            )
-
-    operations = RejectingCampaignOperations()
-
-    with pytest.raises(RuntimeError, match="next expected slot slot_002"):
-        run_guided_episode(
-            config,
-            operations,
-            positioning_mode=mode,
-            input_fn=lambda _prompt: "c",
-            output=lambda _message: None,
-            task_variant="dig_only",
-            soil_reset_block_id="block_01",
-            dig_point_id="dig_01",
-        )
-
-    assert "preflight" in operations.events
-    assert not any(event in operations.events for event in motion_events)
-    assert "start_episode" not in operations.events
+    assert not any(
+        isinstance(event, tuple)
+        and event[0] == "require_expected_campaign_slot"
+        for event in operations.events
+    )
+    assert "start_episode" in operations.events
 
 
 def test_guided_episode_passes_collection_protocol_to_every_recording_attempt(tmp_path):
@@ -405,11 +336,8 @@ def test_guided_episode_passes_collection_protocol_to_every_recording_attempt(tm
         for index, event in enumerate(operations.events)
         if event == "start_episode"
     ]
-    assert len(gate_indices) == len(start_indices) == 2
-    assert all(
-        gate_index < start_index
-        for gate_index, start_index in zip(gate_indices, start_indices)
-    )
+    assert gate_indices == []
+    assert len(start_indices) == 2
 
 
 def test_direct_collection_persists_selected_dig_point_coordinates(tmp_path):
@@ -848,7 +776,7 @@ def test_system_operations_captures_actual_clean_airy_target_source(tmp_path):
     }
 
 
-def test_system_operations_rejects_dirty_airy_source(tmp_path):
+def test_system_operations_allows_unrelated_dirty_airy_files(tmp_path):
     repo, demo_path = _prepare_clean_airy_repo(tmp_path)
     (repo / "untracked.txt").write_text("drift", encoding="utf-8")
     config = _guided_config(tmp_path)
@@ -856,7 +784,25 @@ def test_system_operations_rejects_dirty_airy_source(tmp_path):
     object.__setattr__(config, "rl_demo_config", demo_path)
     operations = SystemGuidedEpisodeOperations(config, output=lambda _message: None)
 
-    with pytest.raises(ValueError, match="clean AiryLidar repository"):
+    provenance = operations.capture_target_source_provenance(
+        "dig_02", (1.0, 0.0, 0.0)
+    )
+
+    assert provenance["path"] == "mission/config/excavation_demo.json"
+    assert provenance["dirty"] is False
+
+
+def test_system_operations_rejects_modified_airy_target_config(tmp_path):
+    repo, demo_path = _prepare_clean_airy_repo(tmp_path)
+    payload = json.loads(demo_path.read_text(encoding="utf-8"))
+    payload["note"] = "uncommitted target change"
+    demo_path.write_text(json.dumps(payload), encoding="utf-8")
+    config = _guided_config(tmp_path)
+    object.__setattr__(config, "rl_airy_repo", repo)
+    object.__setattr__(config, "rl_demo_config", demo_path)
+    operations = SystemGuidedEpisodeOperations(config, output=lambda _message: None)
+
+    with pytest.raises(ValueError, match="target config to match HEAD"):
         operations.capture_target_source_provenance(
             "dig_02", (1.0, 0.0, 0.0)
         )
@@ -873,96 +819,6 @@ def test_system_operations_rejects_missing_airy_source(tmp_path):
     with pytest.raises(ValueError, match="must be a file inside"):
         operations.capture_target_source_provenance(
             "dig_02", (1.0, 0.0, 0.0)
-        )
-
-
-def test_system_campaign_gate_uses_authoritative_inspector_and_rejects_non_next_slot(
-    tmp_path,
-):
-    operations = SystemGuidedEpisodeOperations(
-        _guided_config(tmp_path), output=lambda _message: None
-    )
-    calls = []
-
-    def run_ssh(command, *, accepted_returncodes=(0,)):
-        calls.append((command, accepted_returncodes))
-        return json.dumps(
-            {
-                "schema_version": "excavator_collection_campaign.v1",
-                "raw_root": "/data/excavator_il/raw",
-                "complete_and_valid": False,
-                "summary": {
-                    "planned": 200,
-                    "completed": 1,
-                    "ignored_diagnostics": 0,
-                    "complete_and_valid": False,
-                },
-                "next_expected_slot": {
-                    "slot_id": "slot_002",
-                    "task_variant": "dig_only",
-                    "soil_reset_block_id": "block_01",
-                    "dig_point_id": "dig_02",
-                },
-            }
-        )
-
-    operations._run_ssh = run_ssh
-
-    with pytest.raises(RuntimeError, match="next expected slot slot_002"):
-        operations.require_expected_campaign_slot(
-            task_variant="dig_only",
-            soil_reset_block_id="block_01",
-            dig_point_id="dig_01",
-        )
-
-    assert len(calls) == 1
-    command, accepted_returncodes = calls[0]
-    assert "scripts/inspect_collection_campaign.py" in command
-    assert "--collection-config config/collection.orin.json --next" in command
-    assert accepted_returncodes == (0, 2)
-
-
-def test_system_campaign_gate_accepts_exact_next_slot(tmp_path):
-    operations = SystemGuidedEpisodeOperations(
-        _guided_config(tmp_path), output=lambda _message: None
-    )
-    operations._run_ssh = lambda *_args, **_kwargs: json.dumps(
-        {
-            "schema_version": "excavator_collection_campaign.v1",
-            "summary": {"complete_and_valid": False},
-            "next_expected_slot": {
-                "slot_id": "slot_002",
-                "task_variant": "dig_only",
-                "soil_reset_block_id": "block_01",
-                "dig_point_id": "dig_02",
-            },
-        }
-    )
-
-    operations.require_expected_campaign_slot(
-        task_variant="dig_only",
-        soil_reset_block_id="block_01",
-        dig_point_id="dig_02",
-    )
-
-
-def test_system_campaign_gate_rejects_completed_campaign(tmp_path):
-    operations = SystemGuidedEpisodeOperations(
-        _guided_config(tmp_path), output=lambda _message: None
-    )
-    operations._run_ssh = lambda *_args, **_kwargs: json.dumps(
-        {
-            "schema_version": "excavator_collection_campaign.v1",
-            "summary": {"complete_and_valid": True},
-            "next_expected_slot": None,
-        }
-    )
-
-    with pytest.raises(RuntimeError, match="campaign is already complete"):
-        operations.require_expected_campaign_slot(
-            task_variant="dig_only",
-            soil_reset_block_id="block_01",
-            dig_point_id="dig_02",
         )
 
 

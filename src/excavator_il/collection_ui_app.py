@@ -6,7 +6,7 @@ import json
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping, Protocol
+from typing import Any, Callable, Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import urlopen
@@ -19,7 +19,6 @@ from pydantic import BaseModel, Field
 from .airy_operator import AiryOperatorSnapshot
 from .collection_ui_config import CollectionUiConfig
 from .collection_ui_session import CollectionSessionSnapshot
-from .collection_campaign import COLLECTION_CAMPAIGN_SCHEMA_VERSION
 from .collector.config import validate_collection_protocol
 from .hybrid_mission_session import (
     MAX_HYBRID_CYCLE_COUNT,
@@ -40,6 +39,8 @@ class CollectionUiMetadata:
 
 class CollectionSupervisor(Protocol):
     def snapshot(self) -> CollectionSessionSnapshot: ...
+
+    def clear_logs(self) -> None: ...
 
     def start(
         self,
@@ -62,6 +63,8 @@ class CollectionSupervisor(Protocol):
 
 class HybridSupervisor(Protocol):
     def snapshot(self) -> HybridMissionSnapshot: ...
+
+    def clear_logs(self) -> None: ...
 
     def start(
         self,
@@ -114,99 +117,6 @@ class AdvanceHybridMissionRequest(BaseModel):
 
 _STATIC_DIR = Path(__file__).with_name("collection_ui_static")
 _MAX_CAMERA_SNAPSHOT_BYTES = 4 * 1024 * 1024
-CampaignInspector = Callable[[], Mapping[str, Any]]
-
-
-def _campaign_status_view(report: Mapping[str, Any]) -> dict[str, Any]:
-    if report.get("schema_version") != COLLECTION_CAMPAIGN_SCHEMA_VERSION:
-        raise ValueError(
-            f"campaign schema_version must be {COLLECTION_CAMPAIGN_SCHEMA_VERSION}"
-        )
-    summary = report.get("summary")
-    if not isinstance(summary, Mapping):
-        raise ValueError("campaign summary must be an object")
-
-    def count(field: str) -> int:
-        value = summary.get(field)
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise ValueError(f"campaign summary.{field} must be non-negative integer")
-        return value
-
-    planned = count("planned")
-    completed = count("completed")
-    ignored_diagnostics = count("ignored_diagnostics")
-    if completed > planned:
-        raise ValueError("campaign summary.completed cannot exceed planned")
-    complete_and_valid = summary.get("complete_and_valid")
-    if not isinstance(complete_and_valid, bool):
-        raise ValueError("campaign summary.complete_and_valid must be boolean")
-    next_slot = report.get("next_expected_slot")
-    normalized_slot: dict[str, str] | None = None
-    if next_slot is not None:
-        if not isinstance(next_slot, Mapping):
-            raise ValueError("campaign next_expected_slot must be an object or null")
-        fields = (
-            "slot_id",
-            "task_variant",
-            "soil_reset_block_id",
-            "dig_point_id",
-        )
-        if any(
-            not isinstance(next_slot.get(field), str) or not next_slot[field]
-            for field in fields
-        ):
-            raise ValueError("campaign next_expected_slot fields must be non-empty text")
-        normalized_slot = {field: str(next_slot[field]) for field in fields}
-    if complete_and_valid and normalized_slot is not None:
-        raise ValueError(
-            "campaign completion state and next_expected_slot are inconsistent"
-        )
-    if normalized_slot is None and completed < planned:
-        raise ValueError(
-            "campaign progress and next_expected_slot are inconsistent"
-        )
-    if normalized_slot is not None and completed >= planned:
-        raise ValueError(
-            "campaign progress and next_expected_slot are inconsistent"
-        )
-    return {
-        "planned": planned,
-        "completed": completed,
-        "ignored_diagnostics": ignored_diagnostics,
-        "complete_and_valid": complete_and_valid,
-        "next_expected_slot": normalized_slot,
-    }
-
-
-def _require_expected_campaign_slot(
-    status: Mapping[str, Any],
-    *,
-    task_variant: str | None,
-    soil_reset_block_id: str | None,
-    dig_point_id: str | None,
-) -> None:
-    slot = status.get("next_expected_slot")
-    if slot is None:
-        if status.get("complete_and_valid") is True:
-            raise RuntimeError("collection campaign is already complete")
-        raise RuntimeError(
-            "collection campaign has no remaining slot but is not complete and valid"
-        )
-    assert isinstance(slot, Mapping)
-    actual = (task_variant, soil_reset_block_id, dig_point_id)
-    expected = (
-        slot["task_variant"],
-        slot["soil_reset_block_id"],
-        slot["dig_point_id"],
-    )
-    if actual != expected:
-        raise RuntimeError(
-            f"formal collection must match next expected slot {slot['slot_id']}: "
-            f"task_variant={expected[0]} soil_reset_block_id={expected[1]} "
-            f"dig_point_id={expected[2]}"
-        )
-
-
 def _camera_snapshot_url(preview_url: str) -> str:
     parsed = urlsplit(preview_url)
     if not parsed.path.endswith(".mjpg"):
@@ -254,7 +164,6 @@ def create_collection_ui_app(
     supervisor: CollectionSupervisor,
     hybrid_supervisor: HybridSupervisor | None = None,
     operator_supervisor: OperatorSupervisor | None = None,
-    campaign_inspector: CampaignInspector | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -292,7 +201,6 @@ def create_collection_ui_app(
             "positioning_modes": ["rl", "manual", "direct", "teleop"],
             "hybrid_mission_enabled": hybrid_supervisor is not None,
             "operator_control_enabled": operator_supervisor is not None,
-            "campaign_tracking_enabled": campaign_inspector is not None,
             "hybrid_act_max_steps": metadata.hybrid_act_max_steps,
             "hybrid_runtime_backend": metadata.hybrid_runtime_backend,
             "rl_dig_targets": [
@@ -300,23 +208,6 @@ def create_collection_ui_app(
                 for target_id, position in metadata.rl_dig_targets
             ],
         }
-
-    def inspect_campaign() -> dict[str, Any]:
-        if campaign_inspector is None:
-            raise RuntimeError("collection campaign tracking is disabled")
-        try:
-            return _campaign_status_view(campaign_inspector())
-        except Exception as exc:
-            raise RuntimeError(
-                f"cannot read authoritative Orin collection campaign: {exc}"
-            ) from exc
-
-    @app.get("/api/campaign/status")
-    def campaign_status() -> dict[str, Any]:
-        try:
-            return inspect_campaign()
-        except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @app.get("/api/status")
     def status() -> dict[str, Any]:
@@ -403,16 +294,6 @@ def create_collection_ui_app(
                     "and dig_point_id"
                 ),
             )
-        if request.positioning_mode != "teleop" and campaign_inspector is not None:
-            try:
-                _require_expected_campaign_slot(
-                    inspect_campaign(),
-                    task_variant=request.task_variant,
-                    soil_reset_block_id=request.soil_reset_block_id,
-                    dig_point_id=request.dig_point_id,
-                )
-            except RuntimeError as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
         if (
             request.positioning_mode == "rl"
             and request.dig_point_id != request.dig_target_id
@@ -455,6 +336,13 @@ def create_collection_ui_app(
     ) -> dict[str, Any]:
         _require_ui_request(ui_header)
         return _operator_action(supervisor.stop, supervisor)
+
+    @app.post("/api/collection/logs/clear")
+    def clear_collection_logs(
+        ui_header: str | None = Header(default=None, alias="X-Excavator-UI"),
+    ) -> dict[str, Any]:
+        _require_ui_request(ui_header)
+        return _operator_action(supervisor.clear_logs, supervisor)
 
     @app.get("/api/hybrid/status")
     def hybrid_status() -> dict[str, Any]:
@@ -548,6 +436,15 @@ def create_collection_ui_app(
         if hybrid_supervisor is None:
             raise HTTPException(status_code=503, detail="hybrid Mission is disabled")
         return _operator_action(hybrid_supervisor.stop, hybrid_supervisor)
+
+    @app.post("/api/hybrid/logs/clear")
+    def clear_hybrid_logs(
+        ui_header: str | None = Header(default=None, alias="X-Excavator-UI"),
+    ) -> dict[str, Any]:
+        _require_ui_request(ui_header)
+        if hybrid_supervisor is None:
+            raise HTTPException(status_code=503, detail="hybrid Mission is disabled")
+        return _operator_action(hybrid_supervisor.clear_logs, hybrid_supervisor)
 
     return app
 

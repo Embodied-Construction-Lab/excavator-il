@@ -16,7 +16,6 @@ COLLECTION_CONFIG_SCHEMA_VERSION = "excavator_collection_config.v2"
 LEGACY_COLLECTION_CONFIG_SCHEMA_VERSION = "excavator_collection_config.v1"
 COLLECTION_TASK_VARIANTS = frozenset({"dig_only", "dig_transport_dump"})
 RECORDING_PURPOSES = frozenset({"demonstration", "diagnostic"})
-_SOIL_RESET_BLOCK_ID = re.compile(r"block_(?:0[1-9]|1[0-9]|20)")
 _PROTOCOL_ID = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*")
 _GIT_COMMIT = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -142,8 +141,14 @@ def validate_collection_protocol(
     assert dig_point_id is not None
     if task_variant not in COLLECTION_TASK_VARIANTS:
         raise ValueError("task_variant must be dig_only or dig_transport_dump")
-    if _SOIL_RESET_BLOCK_ID.fullmatch(soil_reset_block_id) is None:
-        raise ValueError("soil_reset_block_id must be block_01 through block_20")
+    if (
+        len(soil_reset_block_id) > 48
+        or _PROTOCOL_ID.fullmatch(soil_reset_block_id) is None
+    ):
+        raise ValueError(
+            "soil_reset_block_id must be a normalized lowercase underscore "
+            "identifier of at most 48 characters"
+        )
     if _PROTOCOL_ID.fullmatch(dig_point_id) is None:
         raise ValueError(
             "dig_point_id must be a normalized lowercase underscore identifier"

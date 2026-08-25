@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import json
-import shlex
 import threading
 import webbrowser
 from dataclasses import dataclass, replace
-from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from pathlib import Path
+from typing import Any
 
 from .airy_operator import AiryOperatorSupervisor
 from .collection_ui_app import CollectionUiMetadata, create_collection_ui_app
@@ -21,56 +19,18 @@ from .hybrid_experiment_run import (
 )
 from .hybrid_mission import HybridMissionConfig
 from .hybrid_mission_session import HybridMissionSupervisor
-from .remote_runtime import SshRuntimeHost
 from .resident_fixed_cycle_system import (
     ResidentFixedCyclePcConfig,
     ResidentFixedCycleSupervisor,
     SshResidentFixedCycleOperations,
 )
+from .resident_fixed_cycle_visualization import v3a_trajectory_path
 
 
 @dataclass(frozen=True)
 class CollectionUiRuntime:
     config: CollectionUiConfig
     app: object
-
-
-class OrinCampaignInspector:
-    """Read-only adapter for the campaign state beside the Orin raw Episodes."""
-
-    def __init__(
-        self,
-        config: GuidedEpisodeConfig,
-        *,
-        remote_host: SshRuntimeHost | None = None,
-    ) -> None:
-        self._config = config
-        self._remote_host = remote_host or SshRuntimeHost(config.orin_ssh_host)
-
-    def __call__(self) -> Mapping[str, Any]:
-        repo = PurePosixPath(self._config.orin_repo)
-        executable = PurePosixPath(self._config.orin_executable)
-        python = executable.parent / "python"
-        argv = [
-            "env",
-            "PYTHONPATH=src",
-            str(python),
-            "scripts/inspect_collection_campaign.py",
-            "--collection-config",
-            str(self._config.orin_collection_config),
-            "--next",
-        ]
-        command = f"cd {shlex.quote(str(repo))} && {shlex.join(argv)}"
-        output = self._remote_host.run(command, accepted_returncodes=(0, 2))
-        try:
-            report = json.loads(output)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                f"remote campaign inspector returned invalid JSON: {exc}"
-            ) from exc
-        if not isinstance(report, dict):
-            raise RuntimeError("remote campaign inspector must return an object")
-        return report
 
 
 def metadata_from_guided_config(
@@ -152,6 +112,12 @@ def build_collection_ui_runtime(
             config_path=ui_config.resident_fixed_cycle_config,
             evidence_run_factory=evidence_run_factory,
         )
+        operator_supervisor = AiryOperatorSupervisor(
+            guided_config=guided_config,
+            behavior_port=None,
+            profile="live_shadow",
+            trajectory_path=v3a_trajectory_path(guided_config.log_dir),
+        )
         metadata = replace(
             metadata,
             hybrid_act_max_steps=fixed_config.act_max_steps,
@@ -178,7 +144,6 @@ def build_collection_ui_runtime(
         supervisor=supervisor,
         hybrid_supervisor=hybrid_supervisor,
         operator_supervisor=operator_supervisor,
-        campaign_inspector=OrinCampaignInspector(guided_config),
     )
     return CollectionUiRuntime(config=ui_config, app=app)
 

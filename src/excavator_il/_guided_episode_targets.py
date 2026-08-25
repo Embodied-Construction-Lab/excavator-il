@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import subprocess
 from pathlib import PurePosixPath
 from typing import Any, Mapping
 
@@ -81,7 +82,7 @@ def capture_target_source_provenance(
     point_id: str,
     expected_target_m: tuple[float, float, float],
 ) -> Mapping[str, str | bool]:
-    """Bind a formal Episode to the clean Airy config read on this PC."""
+    """Bind an Episode to the committed Airy target config read on this PC."""
     source = config.rl_demo_config
     if source is None:
         raise ValueError("formal collection requires rl_preposition.demo_config")
@@ -106,8 +107,10 @@ def capture_target_source_provenance(
         )
 
     before = capture_repository_state(repository)
-    if before.dirty:
-        raise ValueError("formal collection requires a clean AiryLidar repository")
+    if _target_source_status(repository, relative_path):
+        raise ValueError(
+            "formal collection requires the AiryLidar target config to match HEAD"
+        )
     fingerprint = fingerprint_path(source)
     if fingerprint.object_type != "file":
         raise ValueError("rl_preposition.demo_config must be a regular file")
@@ -120,9 +123,12 @@ def capture_target_source_provenance(
             "selected DIG target changed while source provenance was captured"
         )
     after = capture_repository_state(repository)
-    if after.dirty or after.commit != before.commit:
+    if (
+        after.commit != before.commit
+        or _target_source_status(repository, relative_path)
+    ):
         raise ValueError(
-            "AiryLidar repository changed while target provenance was captured"
+            "AiryLidar target config changed while source provenance was captured"
         )
     return validate_target_source_provenance(
         {
@@ -133,3 +139,24 @@ def capture_target_source_provenance(
             "dirty": False,
         }
     )
+
+
+def _target_source_status(repository: Any, relative_path: str) -> str:
+    try:
+        result = subprocess.run(
+            (
+                "git",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--",
+                relative_path,
+            ),
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValueError(f"cannot inspect AiryLidar target config status: {exc}") from exc
+    return result.stdout.strip()

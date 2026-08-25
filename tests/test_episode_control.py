@@ -229,7 +229,7 @@ def test_episode_controller_rejects_unknown_recording_purpose(tmp_path):
     ("field", "value", "message"),
     [
         ("task_variant", "other", "task_variant"),
-        ("soil_reset_block_id", "block_21", "block_01 through block_20"),
+        ("soil_reset_block_id", "Soil Block", "normalized lowercase"),
         ("dig_point_id", "DIG 01", "normalized lowercase"),
     ],
 )

@@ -327,6 +327,12 @@ class HybridMissionSupervisor:
                 can_stop=bool(process is not None and process.is_alive()),
             )
 
+    def clear_logs(self) -> None:
+        """Clear the operator-visible log without changing Mission state."""
+
+        with self._lock:
+            self._logs.clear()
+
     def retry_evidence_finalization(self) -> None:
         """Retry a failed evidence publication without replaying Mission events."""
 

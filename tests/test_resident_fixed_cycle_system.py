@@ -113,6 +113,7 @@ def test_remote_status_rejects_invalid_wire_values(change, message):
 def test_ssh_operations_start_once_and_use_only_local_cycle_control(tmp_path):
     config = ResidentFixedCyclePcConfig.load(_write_config(tmp_path))
     calls = []
+    trajectory_updates = []
 
     class Processes:
         def start(self):
@@ -126,7 +127,7 @@ def test_ssh_operations_start_once_and_use_only_local_cycle_control(tmp_path):
 
     responses = {
         "start": _status("FOLLOW_DIG"),
-        "heartbeat": _status("ACT_DIG"),
+        "heartbeat": _status("ACT_DIG", active_trajectory=_trajectory()),
         "cancel": _status("CANCELLED", terminal=True, outcome="CANCELLED"),
     }
 
@@ -134,22 +135,29 @@ def test_ssh_operations_start_once_and_use_only_local_cycle_control(tmp_path):
         def run(self, command, *, accepted_returncodes=(0,)):
             calls.append(("ssh", command, accepted_returncodes))
             selected = next(name for name in responses if command.endswith(name))
-            return json.dumps({"schema_version": "resident_fixed_cycle_control.v1",
+            return json.dumps({"schema_version": "resident_fixed_cycle_control.v2",
                                "ok": True, "command": selected,
                                "status": responses[selected], "error": None})
+
+    class TrajectoryFile:
+        def update(self, trajectory):
+            trajectory_updates.append(trajectory)
 
     operations = SshResidentFixedCycleOperations(
         config,
         guided_config=_guided(),
         processes=Processes(),
         remote_host=Host(),
+        trajectory_file=TrajectoryFile(),
     )
+    assert trajectory_updates == [None]
 
     start = operations.start(
         run_id="run-001", requested_cycles=3, first_dig_point_id="dig_02"
     )
     status = operations.status()
     cancelled = operations.cancel()
+    operations.release(terminal_disarmed=True)
 
     assert start.stage == "FOLLOW_DIG"
     assert status.stage == "ACT_DIG"
@@ -159,6 +167,8 @@ def test_ssh_operations_start_once_and_use_only_local_cycle_control(tmp_path):
     assert any("--run-id run-001 --cycles 3 --first-dig-point-id dig_02 start" in command
                for command in ssh_commands)
     assert not any("18083" in command or "Plan" in command for command in ssh_commands)
+    assert any(update is not None for update in trajectory_updates)
+    assert trajectory_updates[-1] is None
 
 
 def test_ssh_operations_accept_real_guided_posix_path_fields(tmp_path):
@@ -178,7 +188,7 @@ def test_ssh_operations_accept_real_guided_posix_path_fields(tmp_path):
             commands.append(command)
             return json.dumps(
                 {
-                    "schema_version": "resident_fixed_cycle_control.v1",
+                    "schema_version": "resident_fixed_cycle_control.v2",
                     "ok": True,
                     "command": "start",
                     "status": _status("FOLLOW_DIG"),
@@ -413,6 +423,7 @@ def test_supervisor_maps_complete_local_cycle_to_existing_ui_snapshot():
             _remote_status("ACT_DIG", completed=0),
             _remote_status("FOLLOW_DUMP", completed=0),
             _remote_status("EXECUTE_DUMP", completed=0),
+            _remote_status("FOLLOW_DIG", completed=2),
             _remote_status(
                 "COMPLETED", completed=2, terminal=True, outcome="SUCCEEDED"
             ),
@@ -597,8 +608,17 @@ def test_supervisor_maps_local_dump_and_return_phases_to_existing_ui_contract():
     supervisor._apply_status(_remote_status("FOLLOW_DIG", completed=1))
     assert supervisor.snapshot().stage == "running_rl_return_to_dig"
 
+    supervisor._apply_status(_remote_status("FOLLOW_DIG", completed=2))
+    assert supervisor.snapshot().stage == "running_rl_return_to_dig"
+    assert supervisor.snapshot().run_completed_cycles == 2
+
     supervisor.append_external_log("[resident-owner] hardware ready")
     assert supervisor.snapshot().logs[-1] == "[resident-owner] hardware ready"
+
+    stage_before_clear = supervisor.snapshot().stage
+    supervisor.clear_logs()
+    assert supervisor.snapshot().logs == ()
+    assert supervisor.snapshot().stage == stage_before_clear
 
 
 @pytest.mark.parametrize(
@@ -609,7 +629,7 @@ def test_supervisor_maps_local_dump_and_return_phases_to_existing_ui_contract():
         (
             json.dumps(
                 {
-                    "schema_version": "resident_fixed_cycle_control.v1",
+                    "schema_version": "resident_fixed_cycle_control.v2",
                     "ok": False,
                     "command": "status",
                     "status": None,
@@ -652,7 +672,7 @@ def _owner_ready_line(config):
     )
 
 
-def _status(stage, *, terminal=False, outcome=""):
+def _status(stage, *, terminal=False, outcome="", active_trajectory=None):
     return {
         "run_id": "run-001",
         "stage": stage,
@@ -662,6 +682,17 @@ def _status(stage, *, terminal=False, outcome=""):
         "terminal": terminal,
         "outcome": outcome,
         "reason_code": "",
+        "active_trajectory": active_trajectory,
+    }
+
+
+def _trajectory():
+    return {
+        "frame_id": "machine_root_ros",
+        "target_id": "dig_02",
+        "waypoints": [[0.2, 0.0, 0.1], [0.3, 0.1, 0.1], [0.4, 0.2, 0.1]],
+        "current_waypoint_index": 1,
+        "waypoint_tolerance_m": 0.4,
     }
 
 

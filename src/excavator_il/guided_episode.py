@@ -64,14 +64,6 @@ class GuidedEpisodeOperations(Protocol):
         expected_target_m: tuple[float, float, float],
     ) -> Mapping[str, str | bool]: ...
 
-    def require_expected_campaign_slot(
-        self,
-        *,
-        task_variant: str,
-        soil_reset_block_id: str,
-        dig_point_id: str,
-    ) -> None: ...
-
     def start_collector(self) -> None: ...
 
     def start_teleop(self) -> None: ...
@@ -251,7 +243,6 @@ def run_guided_episode(
             raise ValueError(
                 "AiryLidar target source changed before Episode creation"
             )
-        operations.require_expected_campaign_slot(**protocol)
         return operations.start_episode(
             episode_target_m,
             **protocol,
@@ -261,8 +252,6 @@ def run_guided_episode(
     try:
         emit_stage(GuidedEpisodeStage.PREFLIGHT)
         operations.preflight()
-        if protocol and mode in {PositioningMode.RL, PositioningMode.MANUAL}:
-            operations.require_expected_campaign_slot(**protocol)
         if mode is PositioningMode.RL:
             emit_stage(GuidedEpisodeStage.RL_POSITIONING)
             output(

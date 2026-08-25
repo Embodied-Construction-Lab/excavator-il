@@ -17,19 +17,21 @@ from typing import Any, Callable, Mapping
 
 from .guided_episode import GuidedEpisodeConfig
 from .hybrid_mission import REQUIRED_HYBRID_MOTION_AUTHORIZATION
-from .hybrid_mission_session import (
-    MAX_HYBRID_CYCLE_COUNT,
-    HybridMissionSnapshot,
-)
+from .hybrid_mission_session import MAX_HYBRID_CYCLE_COUNT, HybridMissionSnapshot
 from .hybrid_experiment_run import (
     HybridMissionEvidenceLifecycle,
     HybridMissionRunRequest,
 )
 from .remote_runtime import LineProcess, SshRuntimeHost
+from .resident_fixed_cycle_visualization import (
+    ResidentFixedCycleRemoteStatus,
+    V3aTrajectoryFile,
+    v3a_trajectory_path,
+)
 
 CONFIG_SCHEMA_VERSION = "excavator_resident_fixed_cycle_pc.v2"
 COMMISSIONING_AUTHORIZATION = "ALLOW_V3A_FIXED_TRAJECTORY_COMMISSIONING"
-CONTROL_SCHEMA_VERSION = "resident_fixed_cycle_control.v1"
+CONTROL_SCHEMA_VERSION = "resident_fixed_cycle_control.v2"
 _CONFIG_FIELDS = frozenset(
     {
         "schema_version",
@@ -45,18 +47,6 @@ _CONFIG_FIELDS = frozenset(
         "commissioning_authorization",
     }
 )
-_STATUS_FIELDS = frozenset(
-    {
-        "run_id",
-        "stage",
-        "requested_cycles",
-        "completed_cycles",
-        "current_dig_point_id",
-        "terminal",
-        "outcome",
-        "reason_code",
-    }
-)
 _TERMINAL_UI_STAGES = frozenset({"completed", "failed", "cancelled"})
 _STAGE_TO_UI = {
     "IDLE": "idle",
@@ -68,7 +58,8 @@ _STAGE_TO_UI = {
     "FAILED": "failed",
     "CANCELLED": "cancelled",
 }
-_SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+
+
 @dataclass(frozen=True)
 class ResidentFixedCyclePcConfig:
     guided_config: Path
@@ -125,54 +116,6 @@ class ResidentFixedCyclePcConfig:
                 value["commissioning_authorization"]
             ),
         )
-@dataclass(frozen=True)
-class ResidentFixedCycleRemoteStatus:
-    run_id: str
-    stage: str
-    requested_cycles: int
-    completed_cycles: int
-    current_dig_point_id: str
-    terminal: bool
-    outcome: str
-    reason_code: str
-
-    @classmethod
-    def from_mapping(
-        cls, value: Mapping[str, Any]
-    ) -> "ResidentFixedCycleRemoteStatus":
-        if not isinstance(value, Mapping) or set(value) != _STATUS_FIELDS:
-            raise ValueError("V3-A status fields are invalid")
-        stage = _text(value["stage"], "status.stage")
-        if stage not in _STAGE_TO_UI:
-            raise ValueError("V3-A status stage is invalid")
-        requested = _bounded_integer(
-            value["requested_cycles"], "status.requested_cycles", 0, 9
-        )
-        completed = _bounded_integer(
-            value["completed_cycles"], "status.completed_cycles", 0, 9
-        )
-        if completed > requested:
-            raise ValueError("completed_cycles cannot exceed requested_cycles")
-        terminal = value["terminal"]
-        if not isinstance(terminal, bool):
-            raise ValueError("status.terminal must be boolean")
-        if terminal != (stage in {"COMPLETED", "FAILED", "CANCELLED"}):
-            raise ValueError("V3-A terminal flag and stage disagree")
-        return cls(
-            run_id=_optional_identifier(value["run_id"], "status.run_id"),
-            stage=stage,
-            requested_cycles=requested,
-            completed_cycles=completed,
-            current_dig_point_id=_optional_identifier(
-                value["current_dig_point_id"], "status.current_dig_point_id"
-            ),
-            terminal=terminal,
-            outcome=_text(value["outcome"], "status.outcome", allow_empty=True),
-            reason_code=_text(
-                value["reason_code"], "status.reason_code", allow_empty=True
-            ),
-        )
-
 class ResidentFixedCycleProcesses:
     """Own the V3-A resident owner and ACT worker remote processes."""
 
@@ -367,6 +310,7 @@ class SshResidentFixedCycleOperations:
         guided_config: GuidedEpisodeConfig,
         processes: Any | None = None,
         remote_host: Any | None = None,
+        trajectory_file: V3aTrajectoryFile | None = None,
         output: Callable[[str], None] = print,
     ) -> None:
         self._config = config
@@ -378,6 +322,12 @@ class SshResidentFixedCycleOperations:
             remote_host=self._remote_host,
             output=output,
         )
+        self._trajectory_file = trajectory_file or V3aTrajectoryFile(
+            v3a_trajectory_path(guided_config.log_dir)
+        )
+        # A previous UI/Mission may have been killed before release().  Clear its
+        # read-only RViz artifact before any new operator display can consume it.
+        self._trajectory_file.update(None)
 
     def start(
         self,
@@ -386,6 +336,7 @@ class SshResidentFixedCycleOperations:
         requested_cycles: int,
         first_dig_point_id: str,
     ) -> ResidentFixedCycleRemoteStatus:
+        self._trajectory_file.update(None)
         self._processes.start()
         return self._request(
             "start",
@@ -404,7 +355,10 @@ class SshResidentFixedCycleOperations:
         return self._request("cancel")
 
     def release(self, *, terminal_disarmed: bool) -> None:
-        self._processes.stop(terminal_disarmed=terminal_disarmed)
+        try:
+            self._processes.stop(terminal_disarmed=terminal_disarmed)
+        finally:
+            self._trajectory_file.update(None)
 
     def _request(self, command: str, *arguments: str) -> ResidentFixedCycleRemoteStatus:
         argv = [
@@ -421,7 +375,9 @@ class SshResidentFixedCycleOperations:
             + shlex.join(argv)
         )
         output = self._remote_host.run(remote)
-        return _parse_control_response(output, command)
+        status = _parse_control_response(output, command)
+        self._trajectory_file.update(status.active_trajectory)
+        return status
 
 
 class ResidentFixedCycleSupervisor:
@@ -466,9 +422,11 @@ class ResidentFixedCycleSupervisor:
                 can_stop=bool(thread is not None and thread.is_alive()),
             )
 
-    def append_external_log(self, message: str) -> None:
-        """Forward resident owner/ACT output into the existing WebUI log."""
+    def clear_logs(self) -> None:
+        with self._lock:
+            self._logs.clear()
 
+    def append_external_log(self, message: str) -> None:
         self._append_log(_text(message, "resident log"))
 
     def start(
@@ -737,13 +695,6 @@ def _text(value: Any, field: str, *, allow_empty: bool = False) -> str:
     if not isinstance(value, str) or (not allow_empty and not value.strip()):
         raise ValueError(f"{field} must be text")
     return value
-
-
-def _optional_identifier(value: Any, field: str) -> str:
-    text = _text(value, field, allow_empty=True)
-    if text and _SAFE_ID.fullmatch(text) is None:
-        raise ValueError(f"{field} must be an identifier")
-    return text
 
 
 def _absolute_posix(value: Any, field: str) -> PurePosixPath:

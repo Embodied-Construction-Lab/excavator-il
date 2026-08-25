@@ -159,6 +159,12 @@ class GuidedCollectionSupervisor:
         with self._lock:
             return replace(self._state, logs=tuple(self._logs))
 
+    def clear_logs(self) -> None:
+        """Clear the operator-visible log without changing session state."""
+
+        with self._lock:
+            self._logs.clear()
+
     def start(
         self,
         positioning_mode: str,
