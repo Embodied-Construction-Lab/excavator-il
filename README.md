@@ -192,7 +192,27 @@ python scripts/run_collection_ui.py
 原生 RViz 是 Qt 桌面程序，当前 Web UI 不嵌入 RViz/Foxglove，也不显示三维可视化占位。
 需要录制三维状态时，使用页面“启动 RL + RViz”打开的原生 RViz 窗口。
 
-### RL + ACT 混合 Mission（分段验收）
+### V3-A Orin 本地固定点闭环
+
+默认 `config/collection_ui.pc.json` 已选择 V3-A：PC 只负责 WebUI、Experiment Run 证据以及
+start/cancel/400 ms supervisory heartbeat；`FollowDig → ACT Dig → FollowDump → ExecuteDump`
+和下一铲切换全部在 Orin 常驻 owner 内完成，不再发送 PC Behavior RPC 或在线 Plan 请求。PC/网络
+失联超过约 3 秒会触发 terminal-disarm，不能让无人监督的多铲任务继续。
+
+正式入口只接受 `deploy/v3a/field/fixed_cycle.field.json`。首次现场验收使用独立配置：
+
+```bash
+python scripts/run_collection_ui.py \
+  --config config/collection_ui.v3a-commissioning.pc.json
+```
+
+commissioning 配置明确携带候选轨迹授权，普通配置没有该授权。先发动机关闭启动并安全停止，再在
+急停可用、作业区无人时执行 1 铲和覆盖三个 DIG 点的 3 铲验收；通过后按 Orin Runtime README
+填写 validation record 并显式晋升。未晋升前普通 UI 启动失败是预期的 fail-closed 行为。
+每次 V3-A Mission 会在 `EvaluationReport/experiment_runs` 记录策略、配置、仓库 commit、固定轨迹
+状态和终态结果。V2 已冻结于 `icra2027-v2-freeze-20260824`，仅用于回退。
+
+### V2 RL + ACT 混合 Mission（冻结备份）
 
 同一个本地 UI 还提供一个与采集状态机互斥的混合 Mission Module。它不是在浏览器里直接拼接
 shell，而是按固定状态机执行：

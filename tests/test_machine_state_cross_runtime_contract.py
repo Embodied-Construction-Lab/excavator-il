@@ -29,7 +29,12 @@ def _load_orin_runtime():
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    runtime_root = str(ORIN_RUNTIME.parent)
+    sys.path.insert(0, runtime_root)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(runtime_root)
     return module
 
 

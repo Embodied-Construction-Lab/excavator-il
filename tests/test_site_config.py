@@ -29,6 +29,7 @@ def test_site_config_check_reports_the_exact_drift(tmp_path):
         "collection.orin.json",
         "collection_ui.pc.json",
         "hybrid_mission.pc.json",
+        "resident_fixed_cycle.pc.json",
     ):
         (tmp_path / name).write_bytes((source / name).read_bytes())
     teleop_path = tmp_path / "teleop.pc.json"

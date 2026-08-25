@@ -1,0 +1,13 @@
+{
+  "schema_version": "excavator_resident_fixed_cycle_pc.v2",
+  "guided_config": "guided_episode.pc.json",
+  "fixed_cycle_plan": "/home/jetson16/workspace_excavator/excavator-orin-runtime/deploy/v3a/field/fixed_cycle.field.json",
+  "runtime_root": "/home/jetson16/.local/run/excavator-resident-v3a",
+  "owner_script": "scripts/run_resident_mission_runtime.sh",
+  "act_worker_script": "scripts/run_act_resident.sh",
+  "control_socket": "/home/jetson16/.local/run/excavator-resident-v3a/fixed-cycle.sock",
+  "ready_timeout_s": 120,
+  "status_poll_ms": 400,
+  "act_max_steps": 130,
+  "commissioning_authorization": ""
+}

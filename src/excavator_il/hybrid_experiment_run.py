@@ -23,7 +23,9 @@ from .guided_episode import GuidedEpisodeConfig
 from .hybrid_mission import HybridMissionConfig
 
 
-_AUTOMATIC_CONFIG_LABELS = frozenset({"guided_episode", "hybrid_mission"})
+_AUTOMATIC_CONFIG_LABELS = frozenset(
+    {"guided_episode", "hybrid_mission", "resident_fixed_cycle"}
+)
 HYBRID_POLICY_EVIDENCE_ROLES = (
     "act_deployment_manifest",
     "act_policy_checkpoint",
@@ -592,12 +594,23 @@ class HybridExperimentRunFactory:
         hybrid_config_loader: Callable[[str | Path], Any] = HybridMissionConfig.load,
         guided_config_loader: Callable[[str | Path], Any] = GuidedEpisodeConfig.load,
         path_is_available: Callable[[Path], bool] = lambda path: path.exists(),
+        runtime_config_label: str = "hybrid_mission",
+        runtime_backend: str | None = None,
     ) -> None:
+        if runtime_config_label not in {
+            "hybrid_mission",
+            "resident_fixed_cycle",
+        }:
+            raise ValueError("runtime_config_label is unsupported")
+        if runtime_backend is not None:
+            _config_text(runtime_backend, "runtime_backend")
         self._config = config
         self._run_creator = run_creator
         self._hybrid_config_loader = hybrid_config_loader
         self._guided_config_loader = guided_config_loader
         self._path_is_available = path_is_available
+        self._runtime_config_label = runtime_config_label
+        self._runtime_backend = runtime_backend
 
     def preflight(self) -> None:
         """Validate static host-local evidence inputs without starting hardware."""
@@ -674,7 +687,7 @@ class HybridExperimentRunFactory:
         config_paths = {
             **self._config.config_paths,
             "guided_episode": guided_path,
-            "hybrid_mission": request.config_path,
+            self._runtime_config_label: request.config_path,
         }
         run = self._run_creator(
             self._config.evidence_root,
@@ -703,7 +716,11 @@ class HybridExperimentRunFactory:
                     "runtime_selected",
                     {
                         "run_id": _require_run_id(run),
-                        "runtime_backend": str(hybrid.runtime_backend),
+                        "runtime_backend": (
+                            self._runtime_backend
+                            if self._runtime_backend is not None
+                            else str(hybrid.runtime_backend)
+                        ),
                         "automatic": request.automatic,
                         "requested_cycles": request.requested_cycles,
                     },

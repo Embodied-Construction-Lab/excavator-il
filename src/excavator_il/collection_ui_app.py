@@ -35,6 +35,7 @@ class CollectionUiMetadata:
     orin_host: str
     rl_dig_targets: tuple[tuple[str, tuple[float, float, float]], ...]
     hybrid_act_max_steps: int = 0
+    hybrid_runtime_backend: str = "disabled"
 
 
 class CollectionSupervisor(Protocol):
@@ -293,6 +294,7 @@ def create_collection_ui_app(
             "operator_control_enabled": operator_supervisor is not None,
             "campaign_tracking_enabled": campaign_inspector is not None,
             "hybrid_act_max_steps": metadata.hybrid_act_max_steps,
+            "hybrid_runtime_backend": metadata.hybrid_runtime_backend,
             "rl_dig_targets": [
                 {"target_id": target_id, "position_m": list(position)}
                 for target_id, position in metadata.rl_dig_targets

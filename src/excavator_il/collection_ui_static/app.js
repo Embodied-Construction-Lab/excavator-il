@@ -125,6 +125,13 @@ function renderConfig(config) {
   if (config.hybrid_mission_enabled) {
     $("hybrid-panel").classList.remove("hidden");
     $("hybrid-act-steps").textContent = String(config.hybrid_act_max_steps);
+    const localCycle = config.hybrid_runtime_backend === "resident_fixed_cycle";
+    $("hybrid-segmented-start").classList.toggle("hidden", localCycle);
+    $("hybrid-advance").classList.toggle("hidden", localCycle);
+    if (localCycle) {
+      $("hybrid-runtime-description").textContent =
+        "V3-A：PC 只启动/取消/显示，固定点轨迹与 RL/ACT 切换均在 Orin 本地完成。";
+    }
   }
   if (config.operator_control_enabled) {
     $("operator-control").classList.remove("hidden");

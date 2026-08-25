@@ -14,6 +14,7 @@ from excavator_il.collection_ui_runtime import (
 from excavator_il.guided_episode import GuidedEpisodeConfig
 from excavator_il.hybrid_mission import HybridMissionConfig
 from excavator_il.hybrid_experiment_run import HybridExperimentRunConfig
+from excavator_il.resident_fixed_cycle_system import ResidentFixedCyclePcConfig
 
 
 def test_collection_ui_metadata_comes_from_authoritative_guided_config():
@@ -170,6 +171,105 @@ def test_collection_ui_runtime_composes_optional_hybrid_supervisor(
     assert captured["hybrid_supervisor"] is hybrid
     assert captured["metadata"].hybrid_act_max_steps == 130
     assert hybrid_kwargs["dig_target_ids"] == ("dig_01", "dig_02", "dig_03")
+
+
+def test_collection_ui_runtime_selects_v3a_local_cycle_without_pc_operator(
+    monkeypatch, tmp_path
+):
+    guided_path = tmp_path / "guided.json"
+    fixed_path = tmp_path / "fixed-cycle.json"
+    evidence_path = tmp_path / "hybrid-evidence.json"
+    ui_config = CollectionUiConfig(
+        guided_config=guided_path,
+        resident_fixed_cycle_config=fixed_path,
+        hybrid_evidence_config=evidence_path,
+        host="127.0.0.1",
+        port=8088,
+        camera_preview_url="http://192.168.50.2:18092/camera/front.mjpg",
+        visualization_url="",
+    )
+    fixed_config = object.__new__(ResidentFixedCyclePcConfig)
+    object.__setattr__(fixed_config, "guided_config", guided_path)
+    object.__setattr__(fixed_config, "status_poll_s", 0.1)
+    object.__setattr__(fixed_config, "act_max_steps", 130)
+    guided = object.__new__(GuidedEpisodeConfig)
+    object.__setattr__(guided, "operator_id", "zhaoshuai")
+    object.__setattr__(guided, "task", "ExecuteDig")
+    object.__setattr__(guided, "dig_target_m", (0.8, 0.0, -0.2))
+    object.__setattr__(guided, "orin_ssh_host", "jetson16@192.168.50.2")
+    object.__setattr__(guided, "rl_demo_config", None)
+    operations = object()
+    local_supervisor = object()
+    captured = {}
+    operation_kwargs = {}
+    supervisor_kwargs = {}
+    evidence_config = object()
+
+    class EvidenceFactory:
+        def __init__(self, config, **kwargs):
+            assert config is evidence_config
+            self.kwargs = kwargs
+            self.preflighted = False
+
+        def preflight(self):
+            self.preflighted = True
+
+    monkeypatch.setattr(
+        collection_ui_runtime, "load_collection_ui_config", lambda _path: ui_config
+    )
+    monkeypatch.setattr(GuidedEpisodeConfig, "load", lambda _path: guided)
+    monkeypatch.setattr(
+        ResidentFixedCyclePcConfig,
+        "load",
+        classmethod(lambda _cls, path: fixed_config if path == fixed_path else None),
+    )
+    monkeypatch.setattr(
+        HybridExperimentRunConfig,
+        "load",
+        classmethod(lambda _cls, path: evidence_config if path == evidence_path else None),
+    )
+    monkeypatch.setattr(
+        collection_ui_runtime,
+        "HybridExperimentRunFactory",
+        EvidenceFactory,
+    )
+    monkeypatch.setattr(
+        collection_ui_runtime,
+        "load_rl_dig_targets",
+        lambda _config: (
+            ("dig_01", (1.0, 0.26, 0.0)),
+            ("dig_02", (1.0, 0.0, 0.0)),
+            ("dig_03", (1.0, -0.26, 0.0)),
+        ),
+    )
+    monkeypatch.setattr(
+        collection_ui_runtime,
+        "SshResidentFixedCycleOperations",
+        lambda *_args, **kwargs: operation_kwargs.update(kwargs) or operations,
+    )
+    monkeypatch.setattr(
+        collection_ui_runtime,
+        "ResidentFixedCycleSupervisor",
+        lambda **kwargs: supervisor_kwargs.update(kwargs) or local_supervisor,
+    )
+    monkeypatch.setattr(
+        collection_ui_runtime,
+        "create_collection_ui_app",
+        lambda **kwargs: captured.update(kwargs) or object(),
+    )
+
+    build_collection_ui_runtime(tmp_path / "ui.json")
+
+    assert captured["hybrid_supervisor"] is local_supervisor
+    assert captured["operator_supervisor"] is None
+    assert captured["metadata"].hybrid_runtime_backend == "resident_fixed_cycle"
+    assert captured["metadata"].hybrid_act_max_steps == 130
+    assert callable(operation_kwargs["output"])
+    factory = supervisor_kwargs["evidence_run_factory"]
+    assert factory.preflighted is True
+    assert factory.kwargs["runtime_config_label"] == "resident_fixed_cycle"
+    assert factory.kwargs["runtime_backend"] == "resident_fixed_cycle"
+    assert supervisor_kwargs["config_path"] == fixed_path
 
 
 def test_runtime_preflights_and_injects_hybrid_evidence_before_supervisors(

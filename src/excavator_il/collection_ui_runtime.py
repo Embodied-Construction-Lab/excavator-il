@@ -22,6 +22,11 @@ from .hybrid_experiment_run import (
 from .hybrid_mission import HybridMissionConfig
 from .hybrid_mission_session import HybridMissionSupervisor
 from .remote_runtime import SshRuntimeHost
+from .resident_fixed_cycle_system import (
+    ResidentFixedCyclePcConfig,
+    ResidentFixedCycleSupervisor,
+    SshResidentFixedCycleOperations,
+)
 
 
 @dataclass(frozen=True)
@@ -89,12 +94,18 @@ def build_collection_ui_runtime(
     metadata = metadata_from_guided_config(guided_config)
     hybrid_config = None
     evidence_run_factory = None
+    evidence_config = None
     if (
         ui_config.hybrid_evidence_config is not None
         and ui_config.hybrid_mission_config is None
+        and ui_config.resident_fixed_cycle_config is None
     ):
         raise ValueError(
-            "hybrid_evidence_config requires hybrid_mission_config"
+            "hybrid_evidence_config requires a hybrid runtime config"
+        )
+    if ui_config.hybrid_evidence_config is not None:
+        evidence_config = HybridExperimentRunConfig.load(
+            ui_config.hybrid_evidence_config
         )
     if ui_config.hybrid_mission_config is not None:
         hybrid_config = HybridMissionConfig.load(ui_config.hybrid_mission_config)
@@ -102,16 +113,50 @@ def build_collection_ui_runtime(
             raise ValueError(
                 "collection UI and hybrid Mission must reference the same guided config"
             )
-        if ui_config.hybrid_evidence_config is not None:
-            evidence_config = HybridExperimentRunConfig.load(
-                ui_config.hybrid_evidence_config
-            )
+        if evidence_config is not None:
             evidence_run_factory = HybridExperimentRunFactory(evidence_config)
             evidence_run_factory.preflight()
 
     supervisor = GuidedCollectionSupervisor(config_path=ui_config.guided_config)
     hybrid_supervisor = None
     operator_supervisor = None
+    if ui_config.resident_fixed_cycle_config is not None:
+        fixed_config = ResidentFixedCyclePcConfig.load(
+            ui_config.resident_fixed_cycle_config
+        )
+        if fixed_config.guided_config != ui_config.guided_config:
+            raise ValueError(
+                "collection UI and V3-A fixed cycle must reference the same guided config"
+            )
+        if evidence_config is not None:
+            evidence_run_factory = HybridExperimentRunFactory(
+                evidence_config,
+                hybrid_config_loader=ResidentFixedCyclePcConfig.load,
+                runtime_config_label="resident_fixed_cycle",
+                runtime_backend="resident_fixed_cycle",
+            )
+            evidence_run_factory.preflight()
+        def forward_fixed_cycle_log(message: str) -> None:
+            if hybrid_supervisor is not None:
+                hybrid_supervisor.append_external_log(message)
+
+        operations = SshResidentFixedCycleOperations(
+            fixed_config,
+            guided_config=guided_config,
+            output=forward_fixed_cycle_log,
+        )
+        hybrid_supervisor = ResidentFixedCycleSupervisor(
+            operations=operations,
+            dig_target_ids=tuple(target_id for target_id, _ in metadata.rl_dig_targets),
+            poll_interval_s=fixed_config.status_poll_s,
+            config_path=ui_config.resident_fixed_cycle_config,
+            evidence_run_factory=evidence_run_factory,
+        )
+        metadata = replace(
+            metadata,
+            hybrid_act_max_steps=fixed_config.act_max_steps,
+            hybrid_runtime_backend="resident_fixed_cycle",
+        )
     if hybrid_config is not None:
         hybrid_supervisor = HybridMissionSupervisor(
             config_path=ui_config.hybrid_mission_config,
@@ -125,6 +170,7 @@ def build_collection_ui_runtime(
         metadata = replace(
             metadata,
             hybrid_act_max_steps=hybrid_config.act_max_steps,
+            hybrid_runtime_backend="resident_v2",
         )
     app = create_collection_ui_app(
         config=ui_config,

@@ -1,7 +1,7 @@
 {
   "schema_version": "excavator_collection_ui_config.v3",
   "guided_config": "guided_episode.pc.json",
-  "resident_fixed_cycle_config": "resident_fixed_cycle.pc.json",
+  "resident_fixed_cycle_config": "resident_fixed_cycle.commissioning.pc.json",
   "hybrid_evidence_config": "hybrid_evidence.pc.json",
   "server": {
     "host": "127.0.0.1",

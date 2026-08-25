@@ -89,18 +89,44 @@ def test_collection_ui_v1_remains_compatible_without_hybrid_evidence(tmp_path):
     assert config.hybrid_evidence_config is None
 
 
-def test_commissioned_ui_config_binds_preflighted_hybrid_evidence():
+def test_collection_ui_v3_selects_resident_fixed_cycle_exclusively(tmp_path):
+    path = tmp_path / "collection-ui.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "excavator_collection_ui_config.v3",
+                "guided_config": "guided.json",
+                "resident_fixed_cycle_config": "resident-fixed-cycle.json",
+                "hybrid_evidence_config": "hybrid-evidence.json",
+                "server": {"host": "127.0.0.1", "port": 8088},
+                "camera_preview_url": "http://192.168.50.2:18092/camera/front.mjpg",
+                "camera_dump_preview_url": "http://192.168.50.2:18092/camera/dump.mjpg",
+                "telemetry_url": "http://192.168.50.2:18092/telemetry/latest.json",
+                "visualization_url": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_collection_ui_config(path)
+
+    assert config.resident_fixed_cycle_config == (
+        tmp_path / "resident-fixed-cycle.json"
+    ).resolve()
+    assert config.hybrid_mission_config is None
+    assert config.hybrid_evidence_config == (
+        tmp_path / "hybrid-evidence.json"
+    ).resolve()
+
+
+def test_active_ui_config_selects_v3a_resident_fixed_cycle():
     config_dir = Path(__file__).parents[1] / "config"
 
     ui_config = load_collection_ui_config(config_dir / "collection_ui.pc.json")
+    assert ui_config.resident_fixed_cycle_config == (
+        config_dir / "resident_fixed_cycle.pc.json"
+    ).resolve()
+    assert ui_config.hybrid_mission_config is None
     assert ui_config.hybrid_evidence_config == (
         config_dir / "hybrid_evidence.pc.json"
     ).resolve()
-
-    evidence = HybridExperimentRunConfig.load(ui_config.hybrid_evidence_config)
-    HybridExperimentRunFactory(evidence).preflight()
-
-    assert evidence.policy_ids == {
-        "dig_policy": "lerobot_act:swing_zero_seed2026_step200000",
-        "trajectory_controller": "onnx_rl:scale_v3_deadzone_reward_03_p003",
-    }
