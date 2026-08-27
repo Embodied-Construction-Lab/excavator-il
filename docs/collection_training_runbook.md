@@ -708,28 +708,61 @@ excavator-il smoke-train
 全量数据集；repo ID 由各自的 `split_provenance.json` 产生，不手写猜测。此次必须训练两个互相
 独立的模型，不能把两类 Episode 合并后只训练一个 checkpoint。
 
-推荐使用已经做过数据指纹、CUDA、权重缓存和输出目录门禁的顺序训练脚本。先只检查，再正式启动：
+推荐使用已经做过数据指纹、CUDA、权重缓存和输出目录门禁的训练脚本。脚本支持单独训练一个模型，
+不会因为仅挖掘模型已经完成而阻止完整动作模型启动。原始 split 的相机 dtype 是 `image`，JPEG 实际
+嵌在 Parquet 中；在这种数据上设置 `--dataset.video_backend=pyav` 不会自动变成视频读取。先生成
+新的、带 source/output 指纹的视频派生 split，再测量输入吞吐：
 
 ```bash
-bash scripts/train_icra2027_two_act_models.sh --preflight-only
-bash scripts/train_icra2027_two_act_models.sh
+PYTHONPATH=src python scripts/derive_video_training_split.py \
+  data/lerobot/icra2027_transport_dump_dual_rgb_split \
+  data/lerobot/icra2027_transport_dump_dual_rgb_split_video
+
+FULL_VIDEO_SPLIT=data/lerobot/icra2027_transport_dump_dual_rgb_split_video
+FULL_VIDEO_REPO=$(python3 -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["train_repo_id"])' \
+  "$FULL_VIDEO_SPLIT/split_provenance.json")
+PYTHONPATH=src python scripts/benchmark_act_training_input.py \
+  "$FULL_VIDEO_SPLIT/train" "$FULL_VIDEO_REPO" \
+  --batch-size 4 --num-workers 2
+
+bash scripts/train_icra2027_two_act_models.sh \
+  --model full --dataset-format video --preflight-only
+bash scripts/train_icra2027_two_act_models.sh \
+  --model full --dataset-format video
 ```
 
-脚本先训练仅挖掘模型；只有第一项正常结束才会启动挖掘—运转—倾倒模型。终端实时显示完整训练
-输出，同时分别写入 `logs/icra2027_dig_only_front_swing_zero_seed2027.log` 和
-`logs/icra2027_transport_dump_dual_rgb_seed2027.log`。参考上一轮 200,000 steps / 73.5 等效 epoch
-训练仍持续下降且真机 110--130 steps 已验证有效的结果，本轮按数据规模分别设置为：仅挖掘
-400,000 steps（约 76.7 等效 epoch），挖掘—运转—倾倒 300,000 steps（约 104.6 等效
-epoch）。batch size 保持已经通过单/双相机标准 52M ACT 显存预检的 2，seed 为 2027，每
-10,000 steps 保存 checkpoint。网络和优化器显式冻结为上一轮成功配置：ResNet18 ImageNet 初始化、
+若训练在至少保存过一个 checkpoint 后被中断，使用同一模型、数据表示、seed 和 batch 环境变量续训，
+不要删除输出目录或训练计划，也不要重新执行一份同名新训练：
+
+```bash
+bash scripts/train_icra2027_two_act_models.sh \
+  --model full --dataset-format video --resume
+```
+
+`--resume` 只允许单模型，严格要求 `checkpoints/last` 与原训练计划同时存在，并由 LeRobot 恢复
+模型、优化器、scheduler、随机数状态和已完成 step；实时输出追加到原日志。
+
+终端实时显示完整训练输出并同时写日志。默认样本曝光预算仍为：仅挖掘 800,000、挖掘—运转—倾倒
+600,000。步数由 `ceil(sample_budget / batch_size)` 计算，因此完整动作模型从 batch 2 提升为 batch 4
+后训练 150,000 updates，仍约 104.6 等效 epoch，并不是把旧 300,000 updates 原样放大成双倍训练量。
+checkpoint 间隔也按 20,000 个已见样本换算，完整动作模型每 5,000 updates 保存一次。默认 workers
+仍为 2，避免当前 32 GB RAM / 8 GB swap 在大 Parquet 和双路解码下继续增加内存压力。seed 为 2027。
+网络和优化器显式冻结为上一轮成功配置：ResNet18 ImageNet 初始化、
 `dim_model=512`、8 heads、4 层 encoder、1 层 decoder、latent 32、KL 10，以及 AdamW
 `lr=1e-5` / `weight_decay=1e-4`；本轮不引入未经真机验证的新 scheduler 或图像增强。训练完成后
 脚本会自动在各自严格隔离的 validation Episode 上扫描
 全部数值 checkpoint，按有限、`[-1,1]` 安全门禁后的最低 `deployment_prior_l1` 选优，而不是默认
-采用最后一步。按上一轮训练吞吐和本次双相机 validation 单 checkpoint 约 20 分钟的实测，两套
-训练约需 35--45 小时，完整 checkpoint 扫描还可能需要 15--20 小时，总计约 50--65 小时。
-checkpoint 约占 40 GB；启动前应保留至少
-60 GB 可用空间。脚本拒绝覆盖任何已有正式输出目录。下面保留展开命令供审计和单独重现实验使用。
+采用最后一步。输入优化后的预计时长必须以 `benchmark_act_training_input.py` 和正式训练前 500--1000
+updates 的 `samples/s` 为准，不再拿不同 batch 的 `steps/s` 直接比较。脚本拒绝覆盖任何已有正式输出
+目录；完整动作的新 job 名包含 `video_b4`，不会覆盖之前中断的 image/batch2 输出。下面保留展开命令
+供审计和单独重现实验使用。
+
+2026-08-27 在 RTX 5070 Ti 主机上，用完整动作 train partition、batch 4、workers 2、warmup 20、
+测量 200 batches 的纯输入热缓存 A/B 结果为：Parquet 内嵌 JPEG 约 76.5 samples/s，H.264/GOP 2
+约 128.4 samples/s（约 `1.68x`）。该值只证明解码路径改善，不包含 ACT 前向/反向，不能直接当作正式
+训练吞吐或论文性能结果；正式启动前仍需做有限 updates 端到端短跑并检查 loss、gradient、GPU/RAM。
+
 评估的完整实时输出写入两个 `*_checkpoint_evaluation.log`，纯 JSON 结果写入对应
 `*_checkpoint_evaluation.json`；其中 `selected_checkpoint` 才是后续离线回载和真机门禁的候选，
 不是 `checkpoints/last`。
@@ -771,7 +804,7 @@ lerobot-train \
 挖掘、运转、倾倒模型保留 swing 标签并同时读取 front 与 dump：
 
 ```bash
-SPLIT=data/lerobot/icra2027_transport_dump_dual_rgb_split
+SPLIT=data/lerobot/icra2027_transport_dump_dual_rgb_split_video
 TRAIN_REPO=$(python3 -c \
   'import json,sys; print(json.load(open(sys.argv[1]))["train_repo_id"])' \
   "$SPLIT/split_provenance.json")
@@ -785,13 +818,13 @@ lerobot-train \
   --policy.push_to_hub=false \
   --policy.chunk_size=20 \
   --policy.n_action_steps=10 \
-  --output_dir=outputs/icra2027_transport_dump_dual_rgb_seed2027 \
-  --job_name=icra2027_transport_dump_dual_rgb_seed2027 \
-  --batch_size=2 \
+  --output_dir=outputs/icra2027_transport_dump_dual_rgb_video_b4_seed2027 \
+  --job_name=icra2027_transport_dump_dual_rgb_video_b4_seed2027 \
+  --batch_size=4 \
   --num_workers=2 \
-  --steps=300000 \
+  --steps=150000 \
   --save_checkpoint=true \
-  --save_freq=10000 \
+  --save_freq=5000 \
   --log_freq=100 \
   --seed=2027 \
   --wandb.enable=false
@@ -812,12 +845,12 @@ excavator-il smoke-infer \
   --repo-id "$DIG_TRAIN_REPO" \
   --sample-index 0 --device cuda
 
-FULL_SPLIT=data/lerobot/icra2027_transport_dump_dual_rgb_split
+FULL_SPLIT=data/lerobot/icra2027_transport_dump_dual_rgb_split_video
 FULL_TRAIN_REPO=$(python3 -c \
   'import json,sys; print(json.load(open(sys.argv[1]))["train_repo_id"])' \
   "$FULL_SPLIT/split_provenance.json")
 excavator-il smoke-infer \
-  outputs/icra2027_transport_dump_dual_rgb_seed2027/checkpoints/last/pretrained_model \
+  outputs/icra2027_transport_dump_dual_rgb_video_b4_seed2027/checkpoints/last/pretrained_model \
   --dataset-root "$FULL_SPLIT/train" \
   --repo-id "$FULL_TRAIN_REPO" \
   --sample-index 0 --device cuda
@@ -828,7 +861,8 @@ excavator-il smoke-infer \
 双相机模型投入真机前还必须把 `dump` 接入 Resident ACT 的因果观测缓冲；当前常驻真机入口只构造
 `front` 观测，因此双相机离线 checkpoint 通过不等于已经具备真机部署条件。
 
-16 GB 显存先使用已验证过的 `--batch_size=2`；仍不足时降为 1，有充分余量后才尝试升为 4。
+完整动作默认使用已通过 preflight 后的 `--batch_size=4`；若真实短跑发生 CUDA OOM，先回退到 2，
+同时让脚本按同一 600,000 样本预算自动恢复为 300,000 updates，不能只改 batch 而改变曝光预算。
 长训练预算不代表应固定选最后 checkpoint；
 checkpoint 选择只使用 materialized validation partition。训练开始前创建 `run_kind=training` 的
 Experiment Run，记录 GPU、LeRobot 版本、split manifest/provenance、配置、代码 commit、随机种子、
