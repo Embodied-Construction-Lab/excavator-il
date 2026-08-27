@@ -173,6 +173,9 @@ def test_episode_recorder_v2_persists_two_semantic_rgb_streams_and_protocol(tmp_
             task_variant="dig_transport_dump",
             soil_reset_block_id="block_03",
             dig_point_id="dig_02",
+            collection_zone_id="zone_05",
+            dig_repeat_index=2,
+            operator_note="中排土壤偏硬",
             target_source_provenance={
                 "repository": "airylidar",
                 "path": "mission/config/excavation_demo.json",
@@ -216,6 +219,11 @@ def test_episode_recorder_v2_persists_two_semantic_rgb_streams_and_protocol(tmp_
         "task_variant": "dig_transport_dump",
         "soil_reset_block_id": "block_03",
         "dig_point_id": "dig_02",
+    }
+    assert metadata["collection_labels"] == {
+        "collection_zone_id": "zone_05",
+        "dig_repeat_index": 2,
+        "operator_note": "中排土壤偏硬",
     }
     assert metadata["target_source_provenance"] == {
         "repository": "airylidar",

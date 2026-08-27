@@ -85,6 +85,17 @@ class _FakeOperations:
         target_source = protocol.pop("target_source_provenance", None)
         if target_source is not None:
             self.events.append(("target_source_provenance", target_source))
+        labels = {
+            name: protocol.pop(name)
+            for name in (
+                "collection_zone_id",
+                "dig_repeat_index",
+                "operator_note",
+            )
+            if name in protocol
+        }
+        if labels:
+            self.events.append(("collection_labels", labels))
         if protocol:
             self.events.append(("collection_protocol", protocol))
         self.episode_index += 1
@@ -150,6 +161,9 @@ def test_formal_collection_validates_and_propagates_live_target_source_before_pr
         task_variant="dig_only",
         soil_reset_block_id="block_01",
         dig_point_id="dig_01",
+        collection_zone_id="zone_04",
+        dig_repeat_index=2,
+        operator_note="近排左侧第二次",
     )
 
     assert operations.events.index("capture_target_source_provenance") < (
@@ -173,6 +187,16 @@ def test_formal_collection_validates_and_propagates_live_target_source_before_pr
     assert gate_indices == []
     assert capture_indices[-1] < operations.events.index("start_episode")
     assert operations.episode_purposes == ["demonstration"]
+    labels_event = next(
+        event
+        for event in operations.events
+        if isinstance(event, tuple) and event[0] == "collection_labels"
+    )
+    assert labels_event[1] == {
+        "collection_zone_id": "zone_04",
+        "dig_repeat_index": 2,
+        "operator_note": "近排左侧第二次",
+    }
     provenance_event = next(
         event
         for event in operations.events
@@ -2015,12 +2039,18 @@ def test_system_start_episode_sends_target_source_as_one_immutable_json_argument
         task_variant="dig_only",
         soil_reset_block_id="block_01",
         dig_point_id="dig_02",
+        collection_zone_id="zone_05",
+        dig_repeat_index=2,
+        operator_note="中排偏硬",
         target_source_provenance=provenance,
     )
 
     command = calls[0][0]
     wire_index = command.index("--target-source-provenance-json")
     assert json.loads(command[wire_index + 1]) == provenance
+    assert command[command.index("--collection-zone-id") + 1] == "zone_05"
+    assert command[command.index("--dig-repeat-index") + 1] == "2"
+    assert command[command.index("--operator-note") + 1] == "中排偏硬"
 
 
 def test_stop_collector_does_not_kill_remote_pid_after_collector_exited(

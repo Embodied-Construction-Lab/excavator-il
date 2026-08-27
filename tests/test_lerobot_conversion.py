@@ -307,6 +307,14 @@ def test_convert_dual_camera_opt_in_preserves_protocol_group_labels(
     tmp_path, rgb_episode_factory
 ):
     episode = rgb_episode_factory(step_count=3, dual_camera=True)
+    metadata_path = episode / "episode.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["collection_labels"] = {
+        "collection_zone_id": "zone_05",
+        "dig_repeat_index": 2,
+        "operator_note": "中排偏硬",
+    }
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     output = tmp_path / "dual_camera_dataset"
 
     summary = convert_episodes(
@@ -324,6 +332,31 @@ def test_convert_dual_camera_opt_in_preserves_protocol_group_labels(
     assert row["source.task_variant"] == "dig_transport_dump"
     assert row["source.soil_reset_block_id"] == "block_01"
     assert row["source.dig_point_id"] == "dig_01"
+    assert row["source.collection_zone_id"] == "zone_05"
+    assert row["source.dig_repeat_index"] == "2"
+
+
+def test_convert_can_override_incorrect_raw_task_variant(
+    tmp_path, rgb_episode_factory
+):
+    episode = rgb_episode_factory(step_count=3, dual_camera=True)
+    output = tmp_path / "task_override_dataset"
+
+    convert_episodes(
+        [episode],
+        output,
+        "local/task_override_dataset",
+        camera_roles=("front", "dump"),
+        task_variant_override="dig_transport_dump",
+    )
+
+    dataset = LeRobotDataset(
+        repo_id="local/task_override_dataset", root=output
+    )
+    assert (
+        dataset.hf_dataset[0]["source.task_variant"]
+        == "dig_transport_dump"
+    )
 
 
 def test_convert_default_preserves_both_cameras_for_dual_raw_episode(

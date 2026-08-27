@@ -17,7 +17,12 @@ from .lerobot_conversion import STATE_FIELDS
 from .act_runtime_contract import REQUIRED_MOTION_AUTHORIZATION
 from .raw_episode import ACTION_FIELDS
 from .collector.camera import RgbCameraFrame
-from .dig_policy import DigPolicy, DigPolicyDescriptor, DigPolicyObservation
+from .dig_policy import (
+    DigPolicy,
+    DigPolicyDescriptor,
+    DigPolicyObservation,
+    saturate_normalized_action,
+)
 from .stm32_protocol import Stm32TelemetryFrame
 
 _ZERO_ACTION = (0.0, 0.0, 0.0, 0.0)
@@ -380,12 +385,10 @@ class LeRobotActDigPolicyAdapter:
         with torch.no_grad():
             action = self._postprocessor(self._policy.select_action(processed))
         values = tuple(float(value) for value in action.detach().cpu().reshape(-1))
-        if len(values) != len(ACTION_FIELDS) or not all(
-            math.isfinite(value) and -1.000001 <= value <= 1.000001
-            for value in values
-        ):
-            raise ValueError("ACT runtime produced an invalid normalized action")
-        return values
+        try:
+            return saturate_normalized_action(values)
+        except ValueError as exc:
+            raise ValueError("ACT runtime produced an invalid normalized action") from exc
 
     def warmup(self) -> tuple[float, ...]:
         observation = DigPolicyObservation(

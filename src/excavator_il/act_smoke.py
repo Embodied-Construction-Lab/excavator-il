@@ -16,6 +16,9 @@ from .lerobot_conversion import STATE_FIELDS
 from .raw_episode import ACTION_FIELDS
 
 
+_MAX_TOLERATED_RAW_ACTION_ABS = 1.05
+
+
 @dataclass(frozen=True)
 class ActSmokeResult:
     loss: float
@@ -31,6 +34,9 @@ class ActCheckpointInferenceResult:
     action_dim: int
     action_min: float
     action_max: float
+    raw_action_min: float
+    raw_action_max: float
+    saturated_value_count: int
     all_finite: bool
     inference_ms: float
     inference_min_ms: float
@@ -44,12 +50,16 @@ def _validate_excavator_act_contract(config: object, dataset: LeRobotDataset) ->
         raise ValueError("ACT checkpoint must use chunk_size=20 and n_action_steps=10")
     if getattr(config, "temporal_ensemble_coeff", None) is not None:
         raise ValueError("ACT checkpoint must disable temporal ensemble")
+    camera_features = set(config.input_features) - {"observation.state"}
+    if camera_features not in (
+        {"observation.images.front"},
+        {"observation.images.front", "observation.images.dump"},
+    ):
+        raise ValueError("ACT checkpoint must use front RGB and optional dump RGB")
     required_inputs = {
         "observation.state": (len(STATE_FIELDS),),
-        "observation.images.front": None,
+        **{key: None for key in camera_features},
     }
-    if set(config.input_features) != set(required_inputs):
-        raise ValueError("ACT checkpoint must use exactly one front RGB camera")
     for key, expected_shape in required_inputs.items():
         if key not in config.input_features:
             raise ValueError(f"ACT checkpoint is missing required input feature: {key}")
@@ -59,7 +69,7 @@ def _validate_excavator_act_contract(config: object, dataset: LeRobotDataset) ->
                 f"ACT checkpoint state shape {shape} does not match {expected_shape}"
             )
         if expected_shape is None and (len(shape) != 3 or shape[0] != 3):
-            raise ValueError(f"ACT checkpoint front RGB shape is invalid: {shape}")
+            raise ValueError(f"ACT checkpoint RGB shape is invalid for {key}: {shape}")
     output = config.output_features.get("action")
     if output is None or tuple(output.shape) != (len(ACTION_FIELDS),):
         raise ValueError("ACT checkpoint must use the authoritative four-axis action")
@@ -80,26 +90,44 @@ def _validate_excavator_act_contract(config: object, dataset: LeRobotDataset) ->
         raise ValueError("dataset action shape does not match the four-axis contract")
     if tuple(features["action"].get("names") or ()) != ACTION_FIELDS:
         raise ValueError("dataset action names do not match [boom, stick, bucket, swing]")
-    image_shape = tuple(features["observation.images.front"]["shape"])
-    policy_image_shape = tuple(config.input_features["observation.images.front"].shape)
-    if len(image_shape) != 3 or image_shape[2] != 3:
-        raise ValueError(f"dataset front RGB shape is invalid: {image_shape}")
-    if policy_image_shape != (3, image_shape[0], image_shape[1]):
-        raise ValueError("checkpoint and dataset front RGB shapes do not match")
+    for key in sorted(camera_features):
+        image_shape = tuple(features[key]["shape"])
+        policy_image_shape = tuple(config.input_features[key].shape)
+        if len(image_shape) != 3 or image_shape[2] != 3:
+            raise ValueError(f"dataset RGB shape is invalid for {key}: {image_shape}")
+        if policy_image_shape != (3, image_shape[0], image_shape[1]):
+            raise ValueError(f"checkpoint and dataset RGB shapes do not match for {key}")
 
 
-def _summarize_action_chunks(action_chunks: list[torch.Tensor]) -> tuple[float, float]:
+def _raw_action_stats(
+    action_chunks: list[torch.Tensor],
+) -> tuple[float, float, int]:
     if not action_chunks or not all(
         bool(torch.isfinite(chunk).all().item()) for chunk in action_chunks
     ):
         raise ValueError("ACT checkpoint inference produced non-finite actions")
-    action_range = (
-        min(float(chunk.min().item()) for chunk in action_chunks),
-        max(float(chunk.max().item()) for chunk in action_chunks),
+    raw_min = min(float(chunk.min().item()) for chunk in action_chunks)
+    raw_max = max(float(chunk.max().item()) for chunk in action_chunks)
+    if max(abs(raw_min), abs(raw_max)) > _MAX_TOLERATED_RAW_ACTION_ABS:
+        raise ValueError(
+            "ACT checkpoint inference raw action magnitude exceeds "
+            f"{_MAX_TOLERATED_RAW_ACTION_ABS:.3f}: "
+            f"range=[{raw_min:.6f}, {raw_max:.6f}]"
+        )
+    saturated_value_count = sum(
+        int(((chunk < -1.0) | (chunk > 1.0)).sum().item())
+        for chunk in action_chunks
     )
-    if action_range[0] < -1.000001 or action_range[1] > 1.000001:
-        raise ValueError(f"ACT checkpoint inference action range {action_range} exceeds [-1, 1]")
-    return action_range
+    return raw_min, raw_max, saturated_value_count
+
+
+def _summarize_action_chunks(action_chunks: list[torch.Tensor]) -> tuple[float, float]:
+    _raw_action_stats(action_chunks)
+    saturated = [chunk.clamp(min=-1.0, max=1.0) for chunk in action_chunks]
+    return (
+        min(float(chunk.min().item()) for chunk in saturated),
+        max(float(chunk.max().item()) for chunk in saturated),
+    )
 
 
 def _enforce_inference_budget(
@@ -258,6 +286,9 @@ def run_act_checkpoint_inference(
         raise ValueError(
             f"ACT action chunk shape {tuple(action_chunk.shape)} does not match {expected_shape}"
         )
+    raw_action_min, raw_action_max, saturated_value_count = _raw_action_stats(
+        action_chunks
+    )
     action_min, action_max = _summarize_action_chunks(action_chunks)
     _enforce_inference_budget(max(durations_ms), max_inference_ms)
     return ActCheckpointInferenceResult(
@@ -268,6 +299,9 @@ def run_act_checkpoint_inference(
         action_dim=action_dim,
         action_min=action_min,
         action_max=action_max,
+        raw_action_min=raw_action_min,
+        raw_action_max=raw_action_max,
+        saturated_value_count=saturated_value_count,
         all_finite=True,
         inference_ms=sum(durations_ms) / len(durations_ms),
         inference_min_ms=min(durations_ms),

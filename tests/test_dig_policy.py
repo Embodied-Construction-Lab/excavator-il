@@ -89,16 +89,17 @@ def test_factory_rejects_unknown_or_mislabelled_backends():
         factory.create("lerobot_act")
 
 
-def test_checked_policy_rejects_actions_outside_normalized_manual_contract():
+def test_checked_policy_saturates_finite_actions_to_normalized_manual_contract():
     factory = DigPolicyFactory(
         {
             "lerobot_act": lambda: _ConstantAdapter(
-                "lerobot_act", (1.01, 0.0, 0.0, 0.0)
+                "lerobot_act", (1.01, -1.024, 0.25, -0.5)
             )
         }
     )
 
     policy = factory.create("lerobot_act")
 
-    with pytest.raises(ValueError, match="normalized manual action"):
-        policy.select_action(_observation())
+    assert policy.select_action(_observation()) == pytest.approx(
+        (1.0, -1.0, 0.25, -0.5)
+    )

@@ -16,6 +16,7 @@ from .raw_episode import ACTION_FIELDS
 TRAINING_LOSS_DEPLOYMENT_MANIFEST_SCHEMA_VERSION = "excavator_act_deployment.v3"
 VALIDATION_SELECTION_REASON = "lowest safe validation deployment-prior L1"
 TRAINING_LOSS_SELECTION_REASON = "operator-authorized lowest saved training loss"
+FINAL_CHECKPOINT_SELECTION_REASON = "operator-authorized final training checkpoint"
 
 
 def verify_deployment_manifest(
@@ -50,10 +51,18 @@ def verify_deployment_manifest(
         if schema_version != DEPLOYMENT_MANIFEST_SCHEMA_VERSION:
             raise ValueError("ACT deployment manifest schema is invalid")
         _verify_validation_evaluation(evaluation)
-    elif selection_reason == TRAINING_LOSS_SELECTION_REASON:
+    elif selection_reason in {
+        TRAINING_LOSS_SELECTION_REASON,
+        FINAL_CHECKPOINT_SELECTION_REASON,
+    }:
         if schema_version != TRAINING_LOSS_DEPLOYMENT_MANIFEST_SCHEMA_VERSION:
             raise ValueError("ACT deployment manifest schema is invalid")
-        _verify_training_loss_selection(selection)
+        expected_method = (
+            "training_loss"
+            if selection_reason == TRAINING_LOSS_SELECTION_REASON
+            else "final_checkpoint"
+        )
+        _verify_training_selection(selection, expected_method=expected_method)
     else:
         raise ValueError("ACT deployment manifest selection reason is invalid")
 
@@ -132,7 +141,7 @@ def _verify_validation_evaluation(evaluation: Any) -> None:
         raise ValueError("ACT deployment manifest evaluation is unsafe")
 
 
-def _verify_training_loss_selection(selection: Any) -> None:
+def _verify_training_selection(selection: Any, *, expected_method: str) -> None:
     expected_fields = {
         "method",
         "checkpoint_step",
@@ -145,7 +154,7 @@ def _verify_training_loss_selection(selection: Any) -> None:
     step = selection.get("checkpoint_step")
     loss = selection.get("training_loss")
     if (
-        selection.get("method") != "training_loss"
+        selection.get("method") != expected_method
         or isinstance(step, bool)
         or not isinstance(step, int)
         or step <= 0

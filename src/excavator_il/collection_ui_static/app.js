@@ -141,6 +141,7 @@ function renderConfig(config) {
     $("camera-dump-container")?.classList.remove("hidden");
     setupCameraPreview("dump", previewUrls.dump);
   }
+  renderTaskRecordingHint();
 }
 
 function cameraElements(cameraId) {
@@ -230,6 +231,7 @@ function renderSelectedMode() {
   $("batch-hint").textContent = isTeleop
     ? "仅遥操作不会启动 Recorder 或创建 Episode；点击安全停止后释放串口和相机。"
     : "每条完成后可直接选择下一点并再次开始；计数只统计本次 UI 运行期间成功完成校验的 Episode。";
+  renderTaskRecordingHint();
   if (!isRl) {
     $("dig-target").textContent = state.config.dig_target_m
       .map(value => Number(value).toFixed(2)).join(", ");
@@ -240,6 +242,14 @@ function renderSelectedMode() {
     .find(target => target.target_id === state.selectedTargetId);
   if (selected) selectTarget(selected);
   updateOwnershipControls();
+}
+
+function renderTaskRecordingHint() {
+  const hint = $("task-recording-hint");
+  if (!hint) return;
+  hint.textContent = $("task-variant")?.value === "dig_transport_dump"
+    ? "连续完成挖掘、提升、回转和倾倒；动作全部结束并稳定后再松开 deadman。"
+    : "完成挖掘与提升并稳定后松开 deadman；不要录入后续回转和倾倒。";
 }
 
 function loadCameraPreview(cameraId = "front") {
@@ -288,6 +298,13 @@ function renderSnapshot(snapshot) {
   if (snapshot.task_variant) $("task-variant").value = snapshot.task_variant;
   if (snapshot.soil_reset_block_id) $("soil-reset-block-id").value = snapshot.soil_reset_block_id;
   if (snapshot.dig_point_id) $("dig-point-id").value = snapshot.dig_point_id;
+  if (snapshot.collection_zone_id) $("collection-zone-id").value = snapshot.collection_zone_id;
+  if (snapshot.dig_repeat_index) $("dig-repeat-index").value = String(snapshot.dig_repeat_index);
+  if (terminalStages.has(stage)) {
+    $("operator-note").value = "";
+  } else if (snapshot.operator_note !== undefined) {
+    $("operator-note").value = snapshot.operator_note;
+  }
   if ($("episode-context")) {
     $("episode-context").textContent = protocolLine.replace("[episode-context] ", "");
   }
@@ -352,7 +369,14 @@ function updateOwnershipControls() {
   $("stop-button").disabled = !collectionActive || collectionStage === "stopping";
   document.querySelectorAll(".mode-card").forEach(card => { card.disabled = collectionActive || hybridActive; });
   document.querySelectorAll(".target-card").forEach(card => { card.disabled = collectionActive || hybridActive; });
-  ["task-variant", "soil-reset-block-id", "dig-point-id"].forEach(id => {
+  [
+    "task-variant",
+    "soil-reset-block-id",
+    "dig-point-id",
+    "collection-zone-id",
+    "dig-repeat-index",
+    "operator-note",
+  ].forEach(id => {
     if ($(id)) $(id).disabled = collectionActive || hybridActive;
   });
   if (!state.config?.hybrid_mission_enabled) return;
@@ -417,6 +441,8 @@ function bindActions() {
       .find(candidate => candidate.target_id === event.target.value);
     if (target) selectTarget(target);
   });
+  $("task-variant")?.addEventListener("change", renderTaskRecordingHint);
+  $("collection-zone-id")?.addEventListener("change", updateReferenceDigPoint);
   $("start-button").addEventListener("click", () => command(
     "/api/collection/start",
     collectionStartPayload(),
@@ -455,13 +481,30 @@ function bindActions() {
 
 function collectionStartPayload() {
   const teleop = state.selectedMode === "teleop";
+  updateReferenceDigPoint();
   return {
     positioning_mode: state.selectedMode,
     dig_target_id: state.selectedMode === "rl" ? state.selectedTargetId : null,
     task_variant: teleop ? null : $("task-variant")?.value || null,
     soil_reset_block_id: teleop ? null : $("soil-reset-block-id")?.value || null,
     dig_point_id: teleop ? null : $("dig-point-id")?.value || state.selectedTargetId,
+    collection_zone_id: teleop ? null : $("collection-zone-id")?.value || null,
+    dig_repeat_index: teleop
+      ? null
+      : Number.parseInt($("dig-repeat-index")?.value || "", 10),
+    operator_note: teleop ? null : $("operator-note")?.value?.trim() || "",
   };
+}
+
+function updateReferenceDigPoint() {
+  if (state.selectedMode === "rl") return;
+  const zoneId = $("collection-zone-id")?.value || "zone_01";
+  const zoneNumber = Number.parseInt(zoneId.slice(-2), 10);
+  const column = Number.isInteger(zoneNumber) ? ((zoneNumber - 1) % 3) + 1 : 1;
+  const targetId = `dig_${String(column).padStart(2, "0")}`;
+  const configured = (state.config?.rl_dig_targets || [])
+    .some(target => target.target_id === targetId);
+  if (configured && $("dig-point-id")) $("dig-point-id").value = targetId;
 }
 
 function collectionProtocolLine(snapshot) {
@@ -469,7 +512,10 @@ function collectionProtocolLine(snapshot) {
   return "[episode-context] "
     + `task_variant=${snapshot.task_variant} `
     + `soil_reset_block_id=${snapshot.soil_reset_block_id} `
-    + `dig_point_id=${snapshot.dig_point_id}`;
+    + `dig_point_id=${snapshot.dig_point_id} `
+    + `collection_zone_id=${snapshot.collection_zone_id} `
+    + `dig_repeat_index=${snapshot.dig_repeat_index}`
+    + (snapshot.operator_note ? ` operator_note=${snapshot.operator_note}` : "");
 }
 
 function hybridMotionAuthorization() {

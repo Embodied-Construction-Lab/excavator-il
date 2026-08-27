@@ -72,6 +72,29 @@ def test_policy_session_converts_live_observation_and_uses_lerobot_select_action
     assert float(batch["observation.images.front"].max()) == pytest.approx(17 / 255)
 
 
+def test_policy_session_saturates_finite_checkpoint_output_before_control():
+    policy = _Policy()
+    policy.select_action = lambda _batch: torch.tensor(
+        [[1.2, -1.024, 0.3, -0.4]], dtype=torch.float32
+    )
+    session = ActPolicySession(
+        policy=policy,
+        preprocessor=lambda batch: batch,
+        postprocessor=lambda action: action,
+        device="cpu",
+    )
+    observation = ActObservation(
+        state=(0.0,) * 11,
+        front_rgb=np.zeros((2, 3, 3), dtype=np.uint8),
+        state_monotonic_ns=2_000,
+        camera_monotonic_ns=1_900,
+    )
+
+    assert session.select_action(observation) == pytest.approx(
+        (1.0, -1.0, 0.3, -0.4)
+    )
+
+
 def test_lerobot_act_adapter_exposes_the_dig_policy_contract_and_lifecycle():
     policy = _Policy()
     adapter = ActPolicySession(

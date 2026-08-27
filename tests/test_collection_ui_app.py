@@ -29,7 +29,7 @@ def test_dual_camera_views_are_stacked_vertically_without_stretching_page():
         ROOT / "src" / "excavator_il" / "collection_ui_static" / "app.css"
     ).read_text(encoding="utf-8")
 
-    assert '/static/app.css?v=20260825-single-episode' in index
+    assert '/static/app.css?v=20260826-collection-labels' in index
     assert ".camera-grid { display: grid; grid-template-columns: 1fr;" in stylesheet
     assert "align-items: start;" in stylesheet.split(".collection-grid", 1)[1].split(
         "}", 1
@@ -53,6 +53,10 @@ def test_collection_ui_collects_one_episode_with_manual_labels_not_campaign_prog
     assert "本条 Episode 标记" in index
     assert 'id="soil-reset-block-id"' in index
     assert '<input id="soil-reset-block-id"' in index
+    assert 'id="collection-zone-id"' in index
+    assert index.count('value="zone_') == 6
+    assert 'id="dig-repeat-index"' in index
+    assert 'id="operator-note"' in index
     assert "200 条采集进度" not in index
     assert "权威下一条" not in index
     assert "slot_" not in index
@@ -103,23 +107,30 @@ class _Supervisor:
         task_variant=None,
         soil_reset_block_id=None,
         dig_point_id=None,
+        collection_zone_id=None,
+        dig_repeat_index=None,
+        operator_note=None,
     ):
-        self.calls.append(
-            (
-                "start",
-                mode,
-                dig_target_id,
-                task_variant,
-                soil_reset_block_id,
-                dig_point_id,
-            )
+        call = (
+            "start",
+            mode,
+            dig_target_id,
+            task_variant,
+            soil_reset_block_id,
+            dig_point_id,
         )
+        if collection_zone_id is not None:
+            call = (*call, collection_zone_id, dig_repeat_index, operator_note)
+        self.calls.append(call)
         self.state = CollectionSessionSnapshot(
             stage="starting",
             positioning_mode=mode,
             task_variant=task_variant or "",
             soil_reset_block_id=soil_reset_block_id or "",
             dig_point_id=dig_point_id or "",
+            collection_zone_id=collection_zone_id or "",
+            dig_repeat_index=dig_repeat_index or 0,
+            operator_note=operator_note or "",
         )
 
     def complete_manual_positioning(self):
@@ -226,12 +237,25 @@ def test_single_episode_collection_uses_operator_supplied_labels(
             task_variant="dig_only",
             soil_reset_block_id="soil_after_rain",
             dig_point_id="dig_03",
+            collection_zone_id="zone_06",
+            dig_repeat_index=3,
+            operator_note="远排右侧第三次",
         ),
         ui_header="1",
     )
 
     assert supervisor.calls == [
-        ("start", "direct", None, "dig_only", "soil_after_rain", "dig_03")
+        (
+            "start",
+            "direct",
+            None,
+            "dig_only",
+            "soil_after_rain",
+            "dig_03",
+            "zone_06",
+            3,
+            "远排右侧第三次",
+        )
     ]
 
 
@@ -559,7 +583,7 @@ def test_collection_ui_exposes_config_status_and_guided_collection_actions(tmp_p
     assert "RViz / Foxglove 扩展位" not in page.text
     assert "连续自动完成 1～9 铲装车循环" in page.text
     assert '<option value="9">9 铲</option>' in page.text
-    assert '/static/app.js?v=20260825-single-episode' in page.text
+    assert '/static/app.js?v=20260826-collection-labels' in page.text
     assert 'id="copy-log"' in page.text
     assert 'id="copy-hybrid-log"' in page.text
     assert 'id="clear-log"' in page.text

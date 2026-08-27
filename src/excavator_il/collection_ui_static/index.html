@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>挖掘机实验与演示台</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260825-single-episode">
+    <link rel="stylesheet" href="/static/app.css?v=20260826-collection-labels">
   </head>
   <body data-app="excavator-collection-ui">
     <header class="topbar">
@@ -66,12 +66,37 @@
               pattern="[a-z0-9]+(?:_[a-z0-9]+)*" autocomplete="off"
               placeholder="例如 block_01">
           </label>
-          <label>
-            <span>挖掘点编号</span>
+          <label class="reference-label">
+            <span>坐标参考（自动匹配）</span>
             <select id="dig-point-id">
               <option value="dig_01">dig_01</option>
             </select>
           </label>
+          <label>
+            <span>人工采集区域</span>
+            <select id="collection-zone-id">
+              <option value="zone_01">zone_01 · 近排左</option>
+              <option value="zone_02">zone_02 · 近排中</option>
+              <option value="zone_03">zone_03 · 近排右</option>
+              <option value="zone_04">zone_04 · 远排左</option>
+              <option value="zone_05">zone_05 · 远排中</option>
+              <option value="zone_06">zone_06 · 远排右</option>
+            </select>
+          </label>
+          <label>
+            <span>该区域第几次挖掘</span>
+            <select id="dig-repeat-index">
+              <option value="1">第 1 次</option>
+              <option value="2">第 2 次</option>
+              <option value="3">第 3 次</option>
+            </select>
+          </label>
+          <label>
+            <span>本条备注（可选）</span>
+            <input id="operator-note" maxlength="200" autocomplete="off"
+              placeholder="例如：土壤偏硬、掉土、动作中断">
+          </label>
+          <p id="task-recording-hint" class="protocol-task-hint"></p>
         </fieldset>
 
         <div class="machine-strip">
@@ -245,6 +270,6 @@
       </section>
     </main>
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20260825-single-episode" defer></script>
+    <script src="/static/app.js?v=20260826-collection-labels" defer></script>
   </body>
 </html>

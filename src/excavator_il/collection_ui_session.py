@@ -26,6 +26,9 @@ class CollectionSessionSnapshot:
     task_variant: str = ""
     soil_reset_block_id: str = ""
     dig_point_id: str = ""
+    collection_zone_id: str = ""
+    dig_repeat_index: int = 0
+    operator_note: str = ""
     episode_path: str = ""
     error: str = ""
     logs: tuple[str, ...] = ()
@@ -41,6 +44,9 @@ def run_guided_collection_worker(
     task_variant: str | None = None,
     soil_reset_block_id: str | None = None,
     dig_point_id: str | None = None,
+    collection_zone_id: str | None = None,
+    dig_repeat_index: int | None = None,
+    operator_note: str | None = None,
 ) -> None:
     """Run the existing guided workflow behind structured process messages."""
     from .guided_episode import (
@@ -97,6 +103,8 @@ def run_guided_collection_worker(
                     f"task_variant={task_variant} "
                     f"soil_reset_block_id={soil_reset_block_id} "
                     f"dig_point_id={dig_point_id}"
+                    f" collection_zone_id={collection_zone_id}"
+                    f" dig_repeat_index={dig_repeat_index}"
                 )
             run_options: dict[str, Any] = {
                 "positioning_mode": PositioningMode(positioning_mode),
@@ -110,6 +118,9 @@ def run_guided_collection_worker(
                     task_variant=task_variant,
                     soil_reset_block_id=soil_reset_block_id,
                     dig_point_id=dig_point_id,
+                    collection_zone_id=collection_zone_id,
+                    dig_repeat_index=dig_repeat_index,
+                    operator_note=operator_note,
                 )
             episode_path = run_guided_episode(config, operations, **run_options)
     except KeyboardInterrupt:
@@ -173,15 +184,26 @@ class GuidedCollectionSupervisor:
         task_variant: str | None = None,
         soil_reset_block_id: str | None = None,
         dig_point_id: str | None = None,
+        collection_zone_id: str | None = None,
+        dig_repeat_index: int | None = None,
+        operator_note: str | None = None,
     ) -> None:
         if positioning_mode not in _POSITIONING_MODES:
             raise ValueError("positioning_mode must be rl, manual, direct or teleop")
-        from .collector.config import validate_collection_protocol
+        from .collector.config import (
+            validate_collection_labels,
+            validate_collection_protocol,
+        )
 
         protocol = validate_collection_protocol(
             task_variant=task_variant,
             soil_reset_block_id=soil_reset_block_id,
             dig_point_id=dig_point_id,
+        )
+        collection_labels = validate_collection_labels(
+            collection_zone_id=collection_zone_id,
+            dig_repeat_index=dig_repeat_index,
+            operator_note=operator_note,
         )
         if positioning_mode == "teleop" and protocol:
             raise ValueError("teleop does not create an Episode or accept collection protocol")
@@ -205,20 +227,31 @@ class GuidedCollectionSupervisor:
                 task_variant=task_variant or "",
                 soil_reset_block_id=soil_reset_block_id or "",
                 dig_point_id=dig_point_id or "",
+                collection_zone_id=collection_zone_id or "",
+                dig_repeat_index=dig_repeat_index or 0,
+                operator_note=operator_note or "",
                 completed_count=self._completed_count,
             )
+            worker_args = (
+                str(self._config_path),
+                positioning_mode,
+                dig_target_id,
+                self._commands,
+                self._events,
+                task_variant,
+                soil_reset_block_id,
+                dig_point_id,
+            )
+            if collection_labels:
+                worker_args = (
+                    *worker_args,
+                    collection_zone_id,
+                    dig_repeat_index,
+                    operator_note,
+                )
             process = self._context.Process(
                 target=self._worker_target,
-                args=(
-                    str(self._config_path),
-                    positioning_mode,
-                    dig_target_id,
-                    self._commands,
-                    self._events,
-                    task_variant,
-                    soil_reset_block_id,
-                    dig_point_id,
-                ),
+                args=worker_args,
                 name="guided-collection-worker",
             )
             try:

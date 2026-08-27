@@ -587,8 +587,15 @@ done
 
 ## 5. 转换 LeRobotDataset
 
-先把通过验证的成功 Episode 从 Orin 只读同步到训练 PC。完整双 RGB 数据集用于证据保留和后续
-双视觉策略；当前 ACT v1 在线 contract 仍是单前视，因此另建一个显式 front-only 训练视图：
+先把通过验证的成功 Episode 从 Orin 只读同步到训练 PC。此次采集包含两个不同任务，必须转换为
+两个互不混合的数据集并分别训练模型：
+
+- `episode_0001` 至 `episode_0110` 是仅挖掘任务，只使用 `front`；
+- `episode_0111` 至 `episode_0145` 是挖掘、运转、倾倒任务，使用 `front,dump`。
+
+转换前必须根据 `episode.json` 与 `quality_report.json` 只选择 `complete + success=true` 的 Episode。
+不得再用 `"$RAW"/episode_*` 直接转换整个目录。当前原始标签不能可靠区分两类任务，因此这次转换
+在完成质量筛选后使用显式 `--task-variant-override` 修正派生数据集标签；原始 Episode 保持只读。
 
 ```bash
 cd /home/zhaoshuai/workspace_uinty/RL_prj/excavator-il
@@ -596,40 +603,46 @@ conda activate excavator-il
 
 RAW=data/raw/icra2027-dual-rgb-campaign-v1
 
-excavator-il convert "$RAW"/episode_* \
-  --output-root data/lerobot/icra2027_dual_rgb_full \
-  --repo-id local/icra2027_dual_rgb_full --fps 10
+# EPISODES 数组必须来自本次质量审计结果；以下省略具体展开。
+# 仅挖掘：104 条通过质量门禁的 Episode，仅保留前视相机。
+excavator-il convert "${DIG_ONLY_EPISODES[@]}" \
+  --output-root data/lerobot/icra2027_dig_only_front_full \
+  --repo-id local/icra2027_dig_only_front_full --fps 10 \
+  --camera-roles front \
+  --task-variant-override dig_only
 
 excavator-il prepare-training-split \
-  --dataset-root data/lerobot/icra2027_dual_rgb_full \
-  --repo-id local/icra2027_dual_rgb_full \
-  --output data/lerobot/icra2027_dual_rgb_split.json \
-  --train-ratio 0.8 --seed 2027
+  --dataset-root data/lerobot/icra2027_dig_only_front_full \
+  --repo-id local/icra2027_dig_only_front_full \
+  --output data/lerobot/icra2027_dig_only_front_split.json \
+  --train-ratio 0.8 --seed 2027 --grouping episode
 
 excavator-il materialize-training-split \
-  --manifest data/lerobot/icra2027_dual_rgb_split.json \
-  --output-root data/lerobot/icra2027_dual_rgb_split
+  --manifest data/lerobot/icra2027_dig_only_front_split.json \
+  --output-root data/lerobot/icra2027_dig_only_front_split
 
-excavator-il convert "$RAW"/episode_* \
-  --output-root data/lerobot/icra2027_act_front_full \
-  --repo-id local/icra2027_act_front_full --fps 10 \
-  --camera-roles front
+# 挖掘、运转、倾倒：35 条通过质量门禁的 Episode，保留双路 RGB。
+excavator-il convert "${TRANSPORT_DUMP_EPISODES[@]}" \
+  --output-root data/lerobot/icra2027_transport_dump_dual_rgb_full \
+  --repo-id local/icra2027_transport_dump_dual_rgb_full --fps 10 \
+  --camera-roles front,dump \
+  --task-variant-override dig_transport_dump
 
 excavator-il prepare-training-split \
-  --dataset-root data/lerobot/icra2027_act_front_full \
-  --repo-id local/icra2027_act_front_full \
-  --output data/lerobot/icra2027_act_front_split.json \
-  --train-ratio 0.8 --seed 2027
+  --dataset-root data/lerobot/icra2027_transport_dump_dual_rgb_full \
+  --repo-id local/icra2027_transport_dump_dual_rgb_full \
+  --output data/lerobot/icra2027_transport_dump_dual_rgb_split.json \
+  --train-ratio 0.8 --seed 2027 --grouping episode
 
 excavator-il materialize-training-split \
-  --manifest data/lerobot/icra2027_act_front_split.json \
-  --output-root data/lerobot/icra2027_act_front_split
+  --manifest data/lerobot/icra2027_transport_dump_dual_rgb_split.json \
+  --output-root data/lerobot/icra2027_transport_dump_dual_rgb_split
 ```
 
 输出目录必须是新的空目录；不要在已有 LeRobotDataset 上重复运行转换。默认 `auto` 只有在全部
-输入均为同一双相机契约时才保留双路；混合 v1/v2 会明确失败。split manifest v2 把同一个
-`soil_reset_block_id` 的所有 parent Episode 和 Training Segment 固定在同一 partition，并按
-`task_variant` 分层；materialize 会重算数据指纹并拒绝漂移或泄漏。LeRobot 原生 Episode 边界会
+输入均为同一双相机契约时才保留双路；混合 v1/v2 会明确失败。本批数据的 block/zone 标记不是
+训练分组依据，因此显式使用 `--grouping episode`，保证同一 parent Episode 不跨 train/validation；
+materialize 会重算数据指纹并拒绝漂移或泄漏。LeRobot 原生 Episode 边界会
 限制 ACT future-action delta indices，并通过 `action_is_pad` 屏蔽片段末端越界动作。
 
 ### 5.1 重复数据的离线管线验证
@@ -691,11 +704,45 @@ excavator-il smoke-infer \
 excavator-il smoke-train
 ```
 
-使用 LeRobot 0.5.2 在训练 PC 上启动 ACT v1。训练必须读取 materialized train，而不是转换后的
-全量数据集；repo ID 由 `split_provenance.json` 产生，不手写猜测：
+使用 LeRobot 0.5.2 在训练 PC 上启动 ACT。训练必须读取 materialized train，而不是转换后的
+全量数据集；repo ID 由各自的 `split_provenance.json` 产生，不手写猜测。此次必须训练两个互相
+独立的模型，不能把两类 Episode 合并后只训练一个 checkpoint。
+
+推荐使用已经做过数据指纹、CUDA、权重缓存和输出目录门禁的顺序训练脚本。先只检查，再正式启动：
 
 ```bash
-SPLIT=data/lerobot/icra2027_act_front_split
+bash scripts/train_icra2027_two_act_models.sh --preflight-only
+bash scripts/train_icra2027_two_act_models.sh
+```
+
+脚本先训练仅挖掘模型；只有第一项正常结束才会启动挖掘—运转—倾倒模型。终端实时显示完整训练
+输出，同时分别写入 `logs/icra2027_dig_only_front_swing_zero_seed2027.log` 和
+`logs/icra2027_transport_dump_dual_rgb_seed2027.log`。参考上一轮 200,000 steps / 73.5 等效 epoch
+训练仍持续下降且真机 110--130 steps 已验证有效的结果，本轮按数据规模分别设置为：仅挖掘
+400,000 steps（约 76.7 等效 epoch），挖掘—运转—倾倒 300,000 steps（约 104.6 等效
+epoch）。batch size 保持已经通过单/双相机标准 52M ACT 显存预检的 2，seed 为 2027，每
+10,000 steps 保存 checkpoint。网络和优化器显式冻结为上一轮成功配置：ResNet18 ImageNet 初始化、
+`dim_model=512`、8 heads、4 层 encoder、1 层 decoder、latent 32、KL 10，以及 AdamW
+`lr=1e-5` / `weight_decay=1e-4`；本轮不引入未经真机验证的新 scheduler 或图像增强。训练完成后
+脚本会自动在各自严格隔离的 validation Episode 上扫描
+全部数值 checkpoint，按有限、`[-1,1]` 安全门禁后的最低 `deployment_prior_l1` 选优，而不是默认
+采用最后一步。按上一轮训练吞吐和本次双相机 validation 单 checkpoint 约 20 分钟的实测，两套
+训练约需 35--45 小时，完整 checkpoint 扫描还可能需要 15--20 小时，总计约 50--65 小时。
+checkpoint 约占 40 GB；启动前应保留至少
+60 GB 可用空间。脚本拒绝覆盖任何已有正式输出目录。下面保留展开命令供审计和单独重现实验使用。
+评估的完整实时输出写入两个 `*_checkpoint_evaluation.log`，纯 JSON 结果写入对应
+`*_checkpoint_evaluation.json`；其中 `selected_checkpoint` 才是后续离线回载和真机门禁的候选，
+不是 `checkpoints/last`。
+
+仅挖掘模型沿用已经在真机验证过的 swing-zero 动作约束，并且只读取 front：
+
+```bash
+excavator-il derive-zero-swing-split \
+  --source-root data/lerobot/icra2027_dig_only_front_split \
+  --output-root data/lerobot/icra2027_dig_only_front_split_swing_zero \
+  --repo-suffix swing_zero
+
+SPLIT=data/lerobot/icra2027_dig_only_front_split_swing_zero
 TRAIN_REPO=$(python3 -c \
   'import json,sys; print(json.load(open(sys.argv[1]))["train_repo_id"])' \
   "$SPLIT/split_provenance.json")
@@ -709,10 +756,40 @@ lerobot-train \
   --policy.push_to_hub=false \
   --policy.chunk_size=20 \
   --policy.n_action_steps=10 \
-  --output_dir=outputs/icra2027_act_front_seed2027 \
-  --job_name=icra2027_act_front_seed2027 \
-  --batch_size=8 \
-  --steps=200000 \
+  --output_dir=outputs/icra2027_dig_only_front_swing_zero_seed2027 \
+  --job_name=icra2027_dig_only_front_swing_zero_seed2027 \
+  --batch_size=2 \
+  --num_workers=2 \
+  --steps=400000 \
+  --save_checkpoint=true \
+  --save_freq=10000 \
+  --log_freq=100 \
+  --seed=2027 \
+  --wandb.enable=false
+```
+
+挖掘、运转、倾倒模型保留 swing 标签并同时读取 front 与 dump：
+
+```bash
+SPLIT=data/lerobot/icra2027_transport_dump_dual_rgb_split
+TRAIN_REPO=$(python3 -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["train_repo_id"])' \
+  "$SPLIT/split_provenance.json")
+
+lerobot-train \
+  --dataset.repo_id="$TRAIN_REPO" \
+  --dataset.root="$SPLIT/train" \
+  --dataset.video_backend=pyav \
+  --policy.type=act \
+  --policy.device=cuda \
+  --policy.push_to_hub=false \
+  --policy.chunk_size=20 \
+  --policy.n_action_steps=10 \
+  --output_dir=outputs/icra2027_transport_dump_dual_rgb_seed2027 \
+  --job_name=icra2027_transport_dump_dual_rgb_seed2027 \
+  --batch_size=2 \
+  --num_workers=2 \
+  --steps=300000 \
   --save_checkpoint=true \
   --save_freq=10000 \
   --log_freq=100 \
@@ -721,21 +798,38 @@ lerobot-train \
 ```
 
 LeRobot 0.5.2 的 ACT 默认要求 Hub repo；本地训练必须显式设置
-`--policy.push_to_hub=false`。短 smoke-train 成功保存 checkpoint 后，使用一条真实转换样本验证
-预处理、checkpoint 回载、动作块推理和反归一化：
+`--policy.push_to_hub=false`。训练完成后分别用各自数据集验证预处理、checkpoint 回载、动作块
+推理和反归一化，不能交叉使用 repo ID：
 
 ```bash
+DIG_SPLIT=data/lerobot/icra2027_dig_only_front_split_swing_zero
+DIG_TRAIN_REPO=$(python3 -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["train_repo_id"])' \
+  "$DIG_SPLIT/split_provenance.json")
 excavator-il smoke-infer \
-  outputs/icra2027_act_front_seed2027/checkpoints/last/pretrained_model \
-  --dataset-root "$SPLIT/train" \
-  --repo-id "$TRAIN_REPO" \
+  outputs/icra2027_dig_only_front_swing_zero_seed2027/checkpoints/last/pretrained_model \
+  --dataset-root "$DIG_SPLIT/train" \
+  --repo-id "$DIG_TRAIN_REPO" \
+  --sample-index 0 --device cuda
+
+FULL_SPLIT=data/lerobot/icra2027_transport_dump_dual_rgb_split
+FULL_TRAIN_REPO=$(python3 -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["train_repo_id"])' \
+  "$FULL_SPLIT/split_provenance.json")
+excavator-il smoke-infer \
+  outputs/icra2027_transport_dump_dual_rgb_seed2027/checkpoints/last/pretrained_model \
+  --dataset-root "$FULL_SPLIT/train" \
+  --repo-id "$FULL_TRAIN_REPO" \
   --sample-index 0 --device cuda
 ```
 
 预期 `predicted_chunk_shape` 为 `[1, 20, 4]`、`action_dim` 为 4 且
 `all_finite=true`。这一步只验证离线推理接口，不授权向 Orin 或 STM32 发送模型动作。
+双相机模型投入真机前还必须把 `dump` 接入 Resident ACT 的因果观测缓冲；当前常驻真机入口只构造
+`front` 观测，因此双相机离线 checkpoint 通过不等于已经具备真机部署条件。
 
-显存不足时先把 `--batch_size` 降为 4 或 2。200k 是训练预算，不代表应固定选最后 checkpoint；
+16 GB 显存先使用已验证过的 `--batch_size=2`；仍不足时降为 1，有充分余量后才尝试升为 4。
+长训练预算不代表应固定选最后 checkpoint；
 checkpoint 选择只使用 materialized validation partition。训练开始前创建 `run_kind=training` 的
 Experiment Run，记录 GPU、LeRobot 版本、split manifest/provenance、配置、代码 commit、随机种子、
 checkpoint 和完整命令。正式实验至少运行 3 个预先冻结的随机种子；第一轮只需跑通一个种子。

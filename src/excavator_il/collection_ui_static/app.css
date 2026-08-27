@@ -86,10 +86,12 @@ h1 { margin: 0; font-size: clamp(28px, 3vw, 43px); letter-spacing: -.045em; }
 .protocol-panel { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 14px 0 0; padding: 12px; border: 1px solid #ccd8cf; border-radius: 14px; background: #f4f7f2; }
 .protocol-panel legend { padding: 0 6px; color: var(--green); font-size: 10px; font-weight: 900; letter-spacing: .04em; }
 .protocol-panel label { min-width: 0; }
+.protocol-panel .reference-label { display: none; }
 .protocol-panel label > span { display: block; margin-bottom: 5px; color: var(--muted); font-size: 10px; font-weight: 800; }
 .protocol-panel select, .protocol-panel input { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; outline: none; color: var(--ink); background: white; font-weight: 700; }
 .protocol-panel select:focus, .protocol-panel input:focus { border-color: var(--green); }
 .protocol-panel select:disabled, .protocol-panel input:disabled { opacity: .5; }
+.protocol-task-hint { grid-column: 1 / -1; margin: 0; padding: 9px 10px; border-radius: 9px; color: var(--green-dark); background: #e7f0e8; font-size: 11px; line-height: 1.5; }
 
 .machine-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; margin: 18px 0; overflow: hidden; border: 1px solid var(--line); border-radius: 13px; background: var(--line); }
 .machine-strip > div { min-width: 0; padding: 11px 12px; background: #fafbf8; }

@@ -676,7 +676,16 @@ def test_motion_manifest_rejects_unsafe_evaluation(tmp_path):
         )
 
 
-def test_motion_manifest_accepts_operator_authorized_training_loss_selection(tmp_path):
+@pytest.mark.parametrize(
+    ("selection_reason", "selection_method"),
+    [
+        ("operator-authorized lowest saved training loss", "training_loss"),
+        ("operator-authorized final training checkpoint", "final_checkpoint"),
+    ],
+)
+def test_motion_manifest_accepts_operator_authorized_training_selection(
+    tmp_path, selection_reason, selection_method
+):
     from hashlib import sha256
     from excavator_il.lerobot_conversion import STATE_FIELDS
 
@@ -695,13 +704,13 @@ def test_motion_manifest_accepts_operator_authorized_training_loss_selection(tmp
                 "schema_version": "excavator_act_deployment.v3",
                 "checkpoint": {
                     "selected": True,
-                    "selection_reason": "operator-authorized lowest saved training loss",
+                    "selection_reason": selection_reason,
                     "files_sha256": {
                         "model.safetensors": sha256(b"model").hexdigest()
                     },
                 },
                 "selection": {
-                    "method": "training_loss",
+                    "method": selection_method,
                     "checkpoint_step": 200000,
                     "training_loss": 0.038,
                     "training_log_sha256": "d" * 64,

@@ -1,0 +1,74 @@
+{
+  "schema_version": "excavator_act_deployment.v3",
+  "checkpoint": {
+    "path_at_selection": "/home/zhaoshuai/workspace_uinty/RL_prj/excavator-il/outputs/icra2027_dig_only_front_swing_zero_seed2027/checkpoints/400000/pretrained_model",
+    "selected": true,
+    "selection_reason": "operator-authorized final training checkpoint",
+    "files_sha256": {
+      "config.json": "93cb5ed474db2f1eda5b488be15e938e72d79c34dc04e9e997b7ac68730ee10b",
+      "model.safetensors": "742a07ad6175af60ab0f14e4cdf409b790b35aad5a33f1e26d3d378952b7a475",
+      "policy_postprocessor.json": "0e1790afcabc4ab149c95f833f8068f8470f6fa923e87734284e63d4d5eb0ee5",
+      "policy_postprocessor_step_0_unnormalizer_processor.safetensors": "950493bf847649ef1ffb1b8b301e7261b615933ce3fbbcd6b6b3e9682e9603c2",
+      "policy_preprocessor.json": "5316da175aa491991d636a5e320392660bd49b1165cf8f763a4d0b79f3668b93",
+      "policy_preprocessor_step_3_normalizer_processor.safetensors": "950493bf847649ef1ffb1b8b301e7261b615933ce3fbbcd6b6b3e9682e9603c2",
+      "train_config.json": "efc215fdd13b9dfbc669ade1a32bcf3ea0ac639b04b7c201b46e125ec395f301"
+    }
+  },
+  "selection": {
+    "method": "final_checkpoint",
+    "checkpoint_step": 400000,
+    "training_loss": 0.037,
+    "training_log_sha256": "648fd560d2294808741cd068f7e3a476da3cce5fad22384fcf5c5477940c8c0d",
+    "validation_performed": false
+  },
+  "data": {
+    "pipeline_validation_present": false,
+    "train_repo_id": "local/icra2027_dig_only_front_full_train_swing_zero",
+    "validation_repo_id": "local/icra2027_dig_only_front_full_validation_swing_zero",
+    "train_dataset_sha256": "5b2f1c6675512b8a20e43bb1aeb8691148f873b2bca8f722f67fb0cad2c16583",
+    "validation_dataset_sha256": "2a90bc8ba2e6f07dfb8009ebb4f0db9896b42ecc64a022ca3e2b778745094278",
+    "source_dataset_sha256": "8d7d1af2d095873fa814ea9cbf2de49ba2f7d5c4905f8b278a14bd17e96c0c46"
+  },
+  "contract": {
+    "action_order": [
+      "boom",
+      "stick",
+      "bucket",
+      "swing"
+    ],
+    "action_fields": [
+      "action_boom",
+      "action_stick",
+      "action_bucket",
+      "action_swing"
+    ],
+    "state_fields": [
+      "boom_pos_m",
+      "stick_pos_m",
+      "bucket_pos_m",
+      "boom_vel_mps",
+      "stick_vel_mps",
+      "bucket_vel_mps",
+      "boom_angle_rad",
+      "arm_angle_rad",
+      "bucket_angle_rad",
+      "swing_angle_rad",
+      "swing_vel_radps"
+    ],
+    "state_dim": 11,
+    "action_dim": 4,
+    "front_rgb_chw": [
+      3,
+      480,
+      640
+    ],
+    "chunk_size": 20,
+    "n_action_steps": 10,
+    "input_feature_keys": [
+      "observation.images.front",
+      "observation.state"
+    ],
+    "temporal_ensemble_coeff": null
+  },
+  "machine_profile_sha256": "4b8c94484389429c2c3871857d928e46ec93fa1b62c66df459336868b00d2f89"
+}

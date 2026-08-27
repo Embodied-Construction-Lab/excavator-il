@@ -19,6 +19,7 @@ from ._guided_episode_targets import (
     capture_target_source_provenance as _capture_target_source_provenance,
 )
 from .collector.config import (
+    validate_collection_labels,
     validate_collection_protocol,
     validate_recording_purpose,
     validate_target_source_provenance,
@@ -350,6 +351,9 @@ class SystemGuidedEpisodeOperations(_GuidedEpisodeRlOperations):
         task_variant: str | None = None,
         soil_reset_block_id: str | None = None,
         dig_point_id: str | None = None,
+        collection_zone_id: str | None = None,
+        dig_repeat_index: int | None = None,
+        operator_note: str | None = None,
         recording_purpose: str = "demonstration",
         target_source_provenance: Mapping[str, Any] | None = None,
     ) -> str:
@@ -358,6 +362,11 @@ class SystemGuidedEpisodeOperations(_GuidedEpisodeRlOperations):
             task_variant=task_variant,
             soil_reset_block_id=soil_reset_block_id,
             dig_point_id=dig_point_id,
+        )
+        collection_labels = validate_collection_labels(
+            collection_zone_id=collection_zone_id,
+            dig_repeat_index=dig_repeat_index,
+            operator_note=operator_note,
         )
         recording_purpose = validate_recording_purpose(recording_purpose)
         normalized_target_source = (
@@ -413,6 +422,19 @@ class SystemGuidedEpisodeOperations(_GuidedEpisodeRlOperations):
                             separators=(",", ":"),
                         ),
                     ]
+                )
+        if collection_labels:
+            command.extend(
+                [
+                    "--collection-zone-id",
+                    str(collection_labels["collection_zone_id"]),
+                    "--dig-repeat-index",
+                    str(collection_labels["dig_repeat_index"]),
+                ]
+            )
+            if collection_labels["operator_note"]:
+                command.extend(
+                    ["--operator-note", str(collection_labels["operator_note"])]
                 )
         response = self._remote_cli(command)
         path = self._episode_path(response)

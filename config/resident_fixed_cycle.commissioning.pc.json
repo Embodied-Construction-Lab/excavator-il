@@ -8,6 +8,6 @@
   "control_socket": "/home/jetson16/.local/run/excavator-resident-v3a/fixed-cycle.sock",
   "ready_timeout_s": 120,
   "status_poll_ms": 400,
-  "act_max_steps": 130,
+  "act_max_steps": 125,
   "commissioning_authorization": "ALLOW_V3A_FIXED_TRAJECTORY_COMMISSIONING"
 }

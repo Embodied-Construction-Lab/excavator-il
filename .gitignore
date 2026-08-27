@@ -10,5 +10,7 @@ dist/
 data/raw/
 data/lerobot/
 outputs/
+models/*
+!models/README.md
 wandb/
 logs

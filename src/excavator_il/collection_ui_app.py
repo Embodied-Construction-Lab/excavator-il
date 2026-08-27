@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from .airy_operator import AiryOperatorSnapshot
 from .collection_ui_config import CollectionUiConfig
 from .collection_ui_session import CollectionSessionSnapshot
-from .collector.config import validate_collection_protocol
+from .collector.config import validate_collection_labels, validate_collection_protocol
 from .hybrid_mission_session import (
     MAX_HYBRID_CYCLE_COUNT,
     HybridMissionSnapshot,
@@ -50,6 +50,9 @@ class CollectionSupervisor(Protocol):
         task_variant: str | None = None,
         soil_reset_block_id: str | None = None,
         dig_point_id: str | None = None,
+        collection_zone_id: str | None = None,
+        dig_repeat_index: int | None = None,
+        operator_note: str | None = None,
     ) -> None: ...
 
     def complete_manual_positioning(self) -> None: ...
@@ -98,6 +101,9 @@ class StartCollectionRequest(BaseModel):
     task_variant: Literal["dig_only", "dig_transport_dump"] | None = None
     soil_reset_block_id: str | None = None
     dig_point_id: str | None = None
+    collection_zone_id: str | None = None
+    dig_repeat_index: int | None = None
+    operator_note: str | None = None
 
 
 class EpisodeOutcomeRequest(BaseModel):
@@ -278,6 +284,11 @@ def create_collection_ui_app(
                 soil_reset_block_id=request.soil_reset_block_id,
                 dig_point_id=request.dig_point_id,
             )
+            collection_labels = validate_collection_labels(
+                collection_zone_id=request.collection_zone_id,
+                dig_repeat_index=request.dig_repeat_index,
+                operator_note=request.operator_note,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if request.positioning_mode == "teleop":
@@ -309,6 +320,9 @@ def create_collection_ui_app(
                 task_variant=request.task_variant,
                 soil_reset_block_id=request.soil_reset_block_id,
                 dig_point_id=request.dig_point_id,
+                collection_zone_id=request.collection_zone_id,
+                dig_repeat_index=request.dig_repeat_index,
+                operator_note=request.operator_note,
             ),
             supervisor,
         )

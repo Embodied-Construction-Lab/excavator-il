@@ -224,6 +224,48 @@ def test_prepare_training_split_rejects_partially_populated_soil_blocks(
         )
 
 
+def test_prepare_training_split_can_explicitly_group_by_episode(
+    tmp_path, rgb_episode_factory
+):
+    episodes = []
+    for index in range(1, 6):
+        episode = rgb_episode_factory(
+            episode_id=f"episode_{index:04d}", step_count=2
+        )
+        _set_collection_protocol(
+            episode,
+            task_variant="dig_only",
+            soil_reset_block_id="block_01",
+        )
+        episodes.append(episode)
+    dataset_root = tmp_path / "dataset"
+    repo_id = "local/episode_grouping_override"
+    convert_episodes(episodes, dataset_root, repo_id)
+
+    split = prepare_training_split(
+        dataset_root=dataset_root,
+        repo_id=repo_id,
+        output_path=tmp_path / "training_split.json",
+        train_ratio=0.8,
+        seed=2027,
+        grouping="episode",
+    )
+
+    assert split.grouping_key == "source.episode_id"
+    assert len(split.train_source_episode_ids) == 4
+    assert len(split.validation_source_episode_ids) == 1
+    assert set(split.train_source_episode_ids).isdisjoint(
+        split.validation_source_episode_ids
+    )
+
+    materialized = materialize_training_split(
+        manifest_path=tmp_path / "training_split.json",
+        output_root=tmp_path / "splits",
+    )
+    assert materialized.train_root.is_dir()
+    assert materialized.validation_root.is_dir()
+
+
 def test_prepare_training_split_keeps_parent_episode_segments_together(
     tmp_path, rgb_episode_factory
 ):

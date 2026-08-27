@@ -23,6 +23,23 @@ def test_validate_episode_accepts_optional_dump_camera(rgb_episode_factory):
     assert report.cameras["dump"].frame_count == 3
 
 
+def test_validate_episode_rejects_invalid_optional_collection_labels(
+    rgb_episode_factory,
+):
+    episode = rgb_episode_factory(dual_camera=True)
+    metadata_path = episode / "episode.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["collection_labels"] = {
+        "collection_zone_id": "zone_07",
+        "dig_repeat_index": 4,
+        "operator_note": "invalid fixture",
+    }
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(EpisodeValidationError, match="collection_labels"):
+        validate_episode(episode)
+
+
 def test_validate_episode_accepts_explicit_dual_camera_diagnostic_without_protocol(
     rgb_episode_factory,
 ):

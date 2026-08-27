@@ -100,6 +100,12 @@ def test_cli_dispatches_collection_tools_without_importing_training_stack(monkey
             "block_07",
             "--dig-point-id",
             "dig_03",
+            "--collection-zone-id",
+            "zone_06",
+            "--dig-repeat-index",
+            "3",
+            "--operator-note",
+            "远排右侧第三次",
             "--recording-purpose",
             "diagnostic",
             "--target-source-provenance-json",
@@ -138,6 +144,9 @@ def test_cli_dispatches_collection_tools_without_importing_training_stack(monkey
         "task_variant": "dig_transport_dump",
         "soil_reset_block_id": "block_07",
         "dig_point_id": "dig_03",
+        "collection_zone_id": "zone_06",
+        "dig_repeat_index": 3,
+        "operator_note": "远排右侧第三次",
         "recording_purpose": "diagnostic",
         "target_source_provenance": {
             "repository": "airylidar",
@@ -360,6 +369,7 @@ def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
         return _Result()
 
     conversion_arguments = []
+    split_arguments = []
     monkeypatch.setattr(
         lerobot_conversion,
         "convert_episodes",
@@ -368,7 +378,11 @@ def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
     )
     monkeypatch.setattr(act_smoke, "run_act_smoke_train_step", lambda **k: _Result())
     monkeypatch.setattr(act_smoke, "run_act_checkpoint_inference", infer)
-    monkeypatch.setattr(training_split, "prepare_training_split", lambda **k: _Result())
+    monkeypatch.setattr(
+        training_split,
+        "prepare_training_split",
+        lambda **kwargs: split_arguments.append(kwargs) or _Result(),
+    )
     monkeypatch.setattr(training_split, "materialize_training_split", lambda **k: _Result())
     monkeypatch.setattr(
         action_dataset_transform, "derive_zero_swing_split", lambda **k: _Result()
@@ -388,8 +402,22 @@ def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
             "front",
         ]
     ) == 0
+    assert main(
+        [
+            "convert",
+            "ep",
+            "--output-root",
+            "out-task-override",
+            "--task-variant-override",
+            "dig_transport_dump",
+        ]
+    ) == 0
     assert conversion_arguments[0][1]["camera_roles"] is None
     assert conversion_arguments[1][1]["camera_roles"] == ("front",)
+    assert (
+        conversion_arguments[2][1]["task_variant_override"]
+        == "dig_transport_dump"
+    )
     assert main(
         [
             "prepare-training-split",
@@ -403,8 +431,11 @@ def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
             "0.8",
             "--seed",
             "7",
+            "--grouping",
+            "episode",
         ]
     ) == 0
+    assert split_arguments[0]["grouping"] == "episode"
     assert main(
         [
             "derive-zero-swing-split",
@@ -456,7 +487,7 @@ def test_cli_dispatches_optional_training_commands(monkeypatch, capsys):
     assert inference_arguments["warmup_runs"] == 2
     assert inference_arguments["timed_runs"] == 3
     assert inference_arguments["max_inference_ms"] == 100.0
-    assert capsys.readouterr().out.count('"value": "ok"') == 8
+    assert capsys.readouterr().out.count('"value": "ok"') == 9
 
 
 def test_cli_synthesizes_pipeline_validation_episodes(monkeypatch, capsys):
