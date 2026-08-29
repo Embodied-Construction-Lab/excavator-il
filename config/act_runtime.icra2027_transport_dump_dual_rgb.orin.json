@@ -1,0 +1,43 @@
+{
+  "schema_version": "excavator_act_runtime_config.v3",
+  "checkpoint_path": "/opt/act-checkpoint",
+  "deployment_manifest_path": "/opt/act-deployment/deployment_manifest.json",
+  "machine_profile_path": "/opt/excavator-config/machine_profile.json",
+  "checkpoint_model_sha256": "54a3ba90e6c2186787b8b7eb1b9e5211e2bcf81e41551e866283ace41ed04f4a",
+  "checkpoint_files_sha256": {
+    "config.json": "ef569f26fa189050adebf82b7d9b06847faf7dcc038eae037bb1e0f91dcee385",
+    "model.safetensors": "54a3ba90e6c2186787b8b7eb1b9e5211e2bcf81e41551e866283ace41ed04f4a",
+    "policy_postprocessor.json": "0e1790afcabc4ab149c95f833f8068f8470f6fa923e87734284e63d4d5eb0ee5",
+    "policy_postprocessor_step_0_unnormalizer_processor.safetensors": "4ef653fb686b15053ad91d76ebe9ffddadbdd0b8f966c02d82140141362a6376",
+    "policy_preprocessor.json": "d99a7a09655919237a444fd59a344896c9ca3ab9f88239d60ccf150b449d2597",
+    "policy_preprocessor_step_3_normalizer_processor.safetensors": "4ef653fb686b15053ad91d76ebe9ffddadbdd0b8f966c02d82140141362a6376",
+    "train_config.json": "15af2bdb108e3a685720dfbe8b79e3d5265b232ac517caf0ecc34879034dacf7"
+  },
+  "log_root": "/opt/act-runtime-logs",
+  "device": "cuda",
+  "dig_policy_backend": "lerobot_act",
+  "stm32_serial": {
+    "port": "/dev/ttyTHS1",
+    "baudrate": 460800
+  },
+  "cameras": {
+    "front": {
+      "device": "/dev/video0",
+      "width": 640,
+      "height": 480,
+      "fps": 30
+    },
+    "dump": {
+      "device": "/dev/video2",
+      "width": 640,
+      "height": 480,
+      "fps": 30
+    }
+  },
+  "timing": {
+    "max_inference_state_age_ms": 100,
+    "state_silence_timeout_ms": 250,
+    "max_camera_age_ms": 120,
+    "max_inference_ms": 100
+  }
+}

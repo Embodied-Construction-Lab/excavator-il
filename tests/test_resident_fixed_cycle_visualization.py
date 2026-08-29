@@ -12,10 +12,12 @@ from excavator_il.resident_fixed_cycle_visualization import (
 def _status(active_trajectory):
     return {
         "run_id": "run-v3a-001",
+        "mission_profile": "regime_factorized",
         "stage": "FOLLOW_DIG",
         "requested_cycles": 2,
         "completed_cycles": 0,
         "current_dig_point_id": "dig_01",
+        "dig_group_id": "all",
         "terminal": False,
         "outcome": "",
         "reason_code": "",
@@ -40,6 +42,7 @@ def _trajectory():
 def test_remote_status_strictly_parses_orin_active_trajectory():
     status = ResidentFixedCycleRemoteStatus.from_mapping(_status(_trajectory()))
 
+    assert status.mission_profile == "regime_factorized"
     assert status.active_trajectory == ResidentTrajectoryVisualization(
         frame_id="machine_root_ros",
         target_id="dig_01",

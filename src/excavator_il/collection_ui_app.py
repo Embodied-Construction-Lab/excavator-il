@@ -14,16 +14,22 @@ from urllib.request import urlopen
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .airy_operator import AiryOperatorSnapshot
 from .collection_ui_config import CollectionUiConfig
 from .collection_ui_session import CollectionSessionSnapshot
-from .collector.config import validate_collection_labels, validate_collection_protocol
 from .hybrid_mission_session import (
     MAX_HYBRID_CYCLE_COUNT,
     HybridMissionSnapshot,
 )
+
+
+@dataclass(frozen=True)
+class HybridDigGroupMetadata:
+    group_id: str
+    label: str
+    point_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -35,6 +41,8 @@ class CollectionUiMetadata:
     rl_dig_targets: tuple[tuple[str, tuple[float, float, float]], ...]
     hybrid_act_max_steps: int = 0
     hybrid_runtime_backend: str = "disabled"
+    hybrid_dig_groups: tuple[HybridDigGroupMetadata, ...] = ()
+    hybrid_default_dig_group_id: str = "all"
 
 
 class CollectionSupervisor(Protocol):
@@ -76,6 +84,7 @@ class HybridSupervisor(Protocol):
         automatic: bool,
         motion_authorization: str | None,
         cycle_count: int = 1,
+        dig_group_id: str = "all",
     ) -> None: ...
 
     def advance(self, *, motion_authorization: str | None) -> None: ...
@@ -96,14 +105,10 @@ class OperatorSupervisor(Protocol):
 
 
 class StartCollectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     positioning_mode: Literal["rl", "manual", "direct", "teleop"]
     dig_target_id: str | None = None
-    task_variant: Literal["dig_only", "dig_transport_dump"] | None = None
-    soil_reset_block_id: str | None = None
-    dig_point_id: str | None = None
-    collection_zone_id: str | None = None
-    dig_repeat_index: int | None = None
-    operator_note: str | None = None
 
 
 class EpisodeOutcomeRequest(BaseModel):
@@ -112,6 +117,10 @@ class EpisodeOutcomeRequest(BaseModel):
 
 class StartHybridMissionRequest(BaseModel):
     dig_target_id: str
+    dig_group_id: str = Field(
+        default="all",
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    )
     automatic: bool = False
     cycle_count: int = Field(default=1, ge=1, le=MAX_HYBRID_CYCLE_COUNT)
     motion_authorization: str | None = None
@@ -209,6 +218,15 @@ def create_collection_ui_app(
             "operator_control_enabled": operator_supervisor is not None,
             "hybrid_act_max_steps": metadata.hybrid_act_max_steps,
             "hybrid_runtime_backend": metadata.hybrid_runtime_backend,
+            "hybrid_default_dig_group_id": metadata.hybrid_default_dig_group_id,
+            "hybrid_dig_groups": [
+                {
+                    "group_id": group.group_id,
+                    "label": group.label,
+                    "point_ids": list(group.point_ids),
+                }
+                for group in _hybrid_groups(metadata)
+            ],
             "rl_dig_targets": [
                 {"target_id": target_id, "position_m": list(position)}
                 for target_id, position in metadata.rl_dig_targets
@@ -278,51 +296,10 @@ def create_collection_ui_app(
                 status_code=422,
                 detail="dig_target_id is only valid for RL positioning",
             )
-        try:
-            protocol = validate_collection_protocol(
-                task_variant=request.task_variant,
-                soil_reset_block_id=request.soil_reset_block_id,
-                dig_point_id=request.dig_point_id,
-            )
-            collection_labels = validate_collection_labels(
-                collection_zone_id=request.collection_zone_id,
-                dig_repeat_index=request.dig_repeat_index,
-                operator_note=request.operator_note,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        if request.positioning_mode == "teleop":
-            if protocol:
-                raise HTTPException(
-                    status_code=422,
-                    detail="teleop does not create an Episode or accept collection protocol",
-                )
-        elif not protocol:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "collection requires task_variant, soil_reset_block_id "
-                    "and dig_point_id"
-                ),
-            )
-        if (
-            request.positioning_mode == "rl"
-            and request.dig_point_id != request.dig_target_id
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail="RL dig_point_id must match dig_target_id",
-            )
         return _operator_action(
             lambda: supervisor.start(
                 request.positioning_mode,
                 request.dig_target_id,
-                task_variant=request.task_variant,
-                soil_reset_block_id=request.soil_reset_block_id,
-                dig_point_id=request.dig_point_id,
-                collection_zone_id=request.collection_zone_id,
-                dig_repeat_index=request.dig_repeat_index,
-                operator_note=request.operator_note,
             ),
             supervisor,
         )
@@ -396,9 +373,15 @@ def create_collection_ui_app(
         _require_ui_request(ui_header)
         if hybrid_supervisor is None:
             raise HTTPException(status_code=503, detail="hybrid Mission is disabled")
-        known_targets = {target_id for target_id, _ in metadata.rl_dig_targets}
-        if request.dig_target_id not in known_targets:
-            raise HTTPException(status_code=422, detail="unknown RL dig_target_id")
+        groups = {group.group_id: group for group in _hybrid_groups(metadata)}
+        selected_group = groups.get(request.dig_group_id)
+        if selected_group is None:
+            raise HTTPException(status_code=422, detail="unknown hybrid dig_group_id")
+        if request.dig_target_id not in selected_group.point_ids:
+            raise HTTPException(
+                status_code=422,
+                detail="dig_target_id is outside the selected hybrid dig group",
+            )
         if _session_active(
             supervisor.snapshot().stage,
             terminal={"idle", "completed", "failed", "cancelled"},
@@ -423,6 +406,7 @@ def create_collection_ui_app(
                 automatic=request.automatic,
                 motion_authorization=request.motion_authorization,
                 cycle_count=request.cycle_count,
+                dig_group_id=request.dig_group_id,
             ),
             hybrid_supervisor,
         )
@@ -461,6 +445,18 @@ def create_collection_ui_app(
         return _operator_action(hybrid_supervisor.clear_logs, hybrid_supervisor)
 
     return app
+
+
+def _hybrid_groups(metadata: CollectionUiMetadata) -> tuple[HybridDigGroupMetadata, ...]:
+    if metadata.hybrid_dig_groups:
+        return metadata.hybrid_dig_groups
+    return (
+        HybridDigGroupMetadata(
+            group_id="all",
+            label=f"全部 {len(metadata.rl_dig_targets)} 点",
+            point_ids=tuple(target_id for target_id, _ in metadata.rl_dig_targets),
+        ),
+    )
 
 
 def _operator_action(

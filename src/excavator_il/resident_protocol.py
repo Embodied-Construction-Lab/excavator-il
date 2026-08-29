@@ -22,7 +22,7 @@ from typing import Any
 
 
 RESIDENT_STATE_SCHEMA_VERSION = "resident_act_state.v1"
-CANDIDATE_SCHEMA_VERSION = "resident_policy_candidate.v1"
+CANDIDATE_SCHEMA_VERSION = "resident_policy_candidate.v2"
 MAX_FRAME_BYTES = 4096
 UINT32_MAX = 0xFFFFFFFF
 UINT64_MAX = 0xFFFFFFFFFFFFFFFF
@@ -76,6 +76,7 @@ _CANDIDATE_FIELDS = frozenset(
         "mode",
         "action_order",
         "action",
+        "action_chunk",
         "created_monotonic_ns",
         "valid_until_monotonic_ns",
     }
@@ -145,6 +146,7 @@ class ResidentPolicyCandidate:
     action: tuple[float, float, float, float]
     created_monotonic_ns: int
     valid_until_monotonic_ns: int
+    action_chunk: tuple[tuple[float, float, float, float], ...] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, str) or not self.source.strip():
@@ -168,6 +170,27 @@ class ResidentPolicyCandidate:
         )
         object.__setattr__(self, "source", self.source.strip())
         object.__setattr__(self, "action", action)
+        if self.action_chunk is not None:
+            if len(self.action_chunk) != 10:
+                raise ValueError("candidate action_chunk must contain exactly ten actions")
+            chunk = tuple(
+                tuple(
+                    _finite_number(f"action_chunk[{row}][{column}]", item)
+                    for column, item in enumerate(chunk_action)
+                )
+                if isinstance(chunk_action, tuple) and len(chunk_action) == len(ACTION_ORDER)
+                else ()
+                for row, chunk_action in enumerate(self.action_chunk)
+            )
+            if any(
+                len(chunk_action) != len(ACTION_ORDER)
+                or any(not -1.0 <= value <= 1.0 for value in chunk_action)
+                for chunk_action in chunk
+            ):
+                raise ValueError("candidate action_chunk items must be normalized actions")
+            if chunk[0] != action:
+                raise ValueError("candidate action must match the first action_chunk item")
+            object.__setattr__(self, "action_chunk", chunk)
 
 
 def encode_resident_state(frame: ResidentActState) -> bytes:
@@ -244,6 +267,11 @@ def encode_policy_candidate(candidate: ResidentPolicyCandidate) -> bytes:
         "mode": candidate.mode,
         "action_order": list(ACTION_ORDER),
         "action": list(candidate.action),
+        "action_chunk": (
+            [list(action) for action in candidate.action_chunk]
+            if candidate.action_chunk is not None
+            else None
+        ),
         "created_monotonic_ns": candidate.created_monotonic_ns,
         "valid_until_monotonic_ns": candidate.valid_until_monotonic_ns,
     }
@@ -261,6 +289,21 @@ def decode_policy_candidate(payload: bytes) -> ResidentPolicyCandidate:
     raw_action = value["action"]
     if not isinstance(raw_action, list) or len(raw_action) != len(ACTION_ORDER):
         raise ValueError("candidate action must contain four values")
+    raw_chunk = value["action_chunk"]
+    if raw_chunk is None:
+        action_chunk = None
+    elif isinstance(raw_chunk, list):
+        action_chunk = tuple(
+            tuple(
+                _finite_number(f"action_chunk[{row}][{column}]", item)
+                for column, item in enumerate(chunk_action)
+            )
+            if isinstance(chunk_action, list)
+            else ()
+            for row, chunk_action in enumerate(raw_chunk)
+        )
+    else:
+        raise ValueError("candidate action_chunk must be a list or null")
     return ResidentPolicyCandidate(
         source=_text("source", value["source"]),
         control_generation=_uint64(
@@ -277,6 +320,7 @@ def decode_policy_candidate(payload: bytes) -> ResidentPolicyCandidate:
         valid_until_monotonic_ns=_uint64(
             "valid_until_monotonic_ns", value["valid_until_monotonic_ns"]
         ),
+        action_chunk=action_chunk,
     )
 
 

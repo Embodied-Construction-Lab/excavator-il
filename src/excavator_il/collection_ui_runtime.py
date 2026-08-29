@@ -9,16 +9,19 @@ from pathlib import Path
 from typing import Any
 
 from .airy_operator import AiryOperatorSupervisor
-from .collection_ui_app import CollectionUiMetadata, create_collection_ui_app
+from .collection_ui_app import (
+    CollectionUiMetadata,
+    HybridDigGroupMetadata,
+    create_collection_ui_app,
+)
 from .collection_ui_config import CollectionUiConfig, load_collection_ui_config
 from .collection_ui_session import GuidedCollectionSupervisor
-from .guided_episode import GuidedEpisodeConfig, load_rl_dig_targets
+from .guided_episode import GuidedEpisodeConfig
+from .dig_point_catalog import load_dig_point_catalog
 from .hybrid_experiment_run import (
     HybridExperimentRunConfig,
     HybridExperimentRunFactory,
 )
-from .hybrid_mission import HybridMissionConfig
-from .hybrid_mission_session import HybridMissionSupervisor
 from .resident_fixed_cycle_system import (
     ResidentFixedCyclePcConfig,
     ResidentFixedCycleSupervisor,
@@ -35,6 +38,8 @@ class CollectionUiRuntime:
 
 def metadata_from_guided_config(
     config: GuidedEpisodeConfig,
+    *,
+    rl_dig_targets: tuple[tuple[str, tuple[float, float, float]], ...] = (),
 ) -> CollectionUiMetadata:
     _user, orin_host = config.orin_ssh_host.split("@", maxsplit=1)
     return CollectionUiMetadata(
@@ -42,7 +47,7 @@ def metadata_from_guided_config(
         task=config.task,
         dig_target_m=config.dig_target_m,
         orin_host=orin_host,
-        rl_dig_targets=load_rl_dig_targets(config),
+        rl_dig_targets=rl_dig_targets,
     )
 
 
@@ -52,9 +57,14 @@ def build_collection_ui_runtime(
     ui_config = load_collection_ui_config(config_path)
     guided_config = GuidedEpisodeConfig.load(ui_config.guided_config)
     metadata = metadata_from_guided_config(guided_config)
-    hybrid_config = None
     evidence_run_factory = None
     evidence_config = None
+    if ui_config.hybrid_mission_config is not None:
+        raise ValueError(
+            "legacy V2 hybrid Mission is no longer supported by the collection UI; "
+            "configure resident_fixed_cycle_config with the authoritative "
+            "dig-point catalog"
+        )
     if (
         ui_config.hybrid_evidence_config is not None
         and ui_config.hybrid_mission_config is None
@@ -67,16 +77,6 @@ def build_collection_ui_runtime(
         evidence_config = HybridExperimentRunConfig.load(
             ui_config.hybrid_evidence_config
         )
-    if ui_config.hybrid_mission_config is not None:
-        hybrid_config = HybridMissionConfig.load(ui_config.hybrid_mission_config)
-        if hybrid_config.guided_config != ui_config.guided_config:
-            raise ValueError(
-                "collection UI and hybrid Mission must reference the same guided config"
-            )
-        if evidence_config is not None:
-            evidence_run_factory = HybridExperimentRunFactory(evidence_config)
-            evidence_run_factory.preflight()
-
     supervisor = GuidedCollectionSupervisor(config_path=ui_config.guided_config)
     hybrid_supervisor = None
     operator_supervisor = None
@@ -105,9 +105,30 @@ def build_collection_ui_runtime(
             guided_config=guided_config,
             output=forward_fixed_cycle_log,
         )
+        if fixed_config.dig_point_catalog is None:
+            raise ValueError(
+                "resident fixed cycle requires dig_point_catalog; "
+                "the legacy three-point fallback has been removed"
+            )
+        catalog = load_dig_point_catalog(
+            Path(guided_config.rl_airy_repo) / fixed_config.dig_point_catalog
+        )
+        fixed_target_ids = tuple(catalog.points)
+        fixed_groups = dict(catalog.groups)
+        fixed_default_group = catalog.default_group_id
+        group_metadata = tuple(
+            HybridDigGroupMetadata(
+                group_id=group_id,
+                label=_dig_group_label(group_id, len(point_ids)),
+                point_ids=point_ids,
+            )
+            for group_id, point_ids in catalog.groups.items()
+        )
         hybrid_supervisor = ResidentFixedCycleSupervisor(
             operations=operations,
-            dig_target_ids=tuple(target_id for target_id, _ in metadata.rl_dig_targets),
+            dig_target_ids=fixed_target_ids,
+            dig_groups=fixed_groups,
+            default_dig_group_id=fixed_default_group,
             poll_interval_s=fixed_config.status_poll_s,
             config_path=ui_config.resident_fixed_cycle_config,
             evidence_run_factory=evidence_run_factory,
@@ -120,23 +141,11 @@ def build_collection_ui_runtime(
         )
         metadata = replace(
             metadata,
+            rl_dig_targets=tuple(catalog.points.items()),
             hybrid_act_max_steps=fixed_config.act_max_steps,
             hybrid_runtime_backend="resident_fixed_cycle",
-        )
-    if hybrid_config is not None:
-        hybrid_supervisor = HybridMissionSupervisor(
-            config_path=ui_config.hybrid_mission_config,
-            dig_target_ids=tuple(target_id for target_id, _ in metadata.rl_dig_targets),
-            evidence_run_factory=evidence_run_factory,
-        )
-        operator_supervisor = AiryOperatorSupervisor(
-            guided_config=guided_config,
-            behavior_port=hybrid_config.rl_behavior_port,
-        )
-        metadata = replace(
-            metadata,
-            hybrid_act_max_steps=hybrid_config.act_max_steps,
-            hybrid_runtime_backend="resident_v2",
+            hybrid_dig_groups=group_metadata,
+            hybrid_default_dig_group_id=fixed_default_group,
         )
     app = create_collection_ui_app(
         config=ui_config,
@@ -146,6 +155,11 @@ def build_collection_ui_runtime(
         operator_supervisor=operator_supervisor,
     )
     return CollectionUiRuntime(config=ui_config, app=app)
+
+
+def _dig_group_label(group_id: str, point_count: int) -> str:
+    names = {"all": "全部", "near": "近端", "far": "远端"}
+    return f"{names.get(group_id, group_id)} {point_count} 点"
 
 
 def run_collection_ui(

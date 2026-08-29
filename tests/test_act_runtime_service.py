@@ -27,7 +27,10 @@ from excavator_il.act_runtime_service import (
     _wait_for_hardware_start_gate,
     run_act_runtime,
 )
-from excavator_il.act_deployment import verify_deployment_manifest
+from excavator_il.act_deployment import (
+    _verify_validation_evaluation,
+    verify_deployment_manifest,
+)
 from excavator_il.collector.camera import RgbCameraFrame
 from excavator_il.collector.preview import LatestJpegFrame, LatestTelemetryFrame
 from excavator_il.stm32_protocol import (
@@ -676,6 +679,28 @@ def test_motion_manifest_rejects_unsafe_evaluation(tmp_path):
         )
 
 
+def test_motion_manifest_evaluation_accepts_explicit_bounded_saturation():
+    evaluation = {
+        "validation_frame_count": 10,
+        "deployment_prior_l1": 0.1,
+        "max_deployment_prior_l1": 0.2,
+        "action_min": -1.024,
+        "action_max": 1.03,
+        "all_finite": True,
+        "out_of_range_sample_count": 2,
+        "gross_out_of_range_sample_count": 0,
+        "saturated_value_count": 3,
+        "max_tolerated_normalized_magnitude": 1.25,
+    }
+
+    _verify_validation_evaluation(evaluation)
+
+    with pytest.raises(ValueError, match="unsafe"):
+        _verify_validation_evaluation(
+            {**evaluation, "gross_out_of_range_sample_count": 1}
+        )
+
+
 @pytest.mark.parametrize(
     ("selection_reason", "selection_method"),
     [
@@ -734,9 +759,11 @@ def test_motion_manifest_accepts_operator_authorized_training_selection(
                     "state_dim": 11,
                     "action_dim": 4,
                     "front_rgb_chw": [3, 480, 640],
+                    "dump_rgb_chw": [3, 480, 640],
                     "chunk_size": 20,
                     "n_action_steps": 10,
                     "input_feature_keys": [
+                        "observation.images.dump",
                         "observation.images.front",
                         "observation.state",
                     ],

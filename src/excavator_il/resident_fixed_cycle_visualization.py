@@ -14,10 +14,12 @@ from typing import Any, Mapping
 _STATUS_FIELDS = frozenset(
     {
         "run_id",
+        "mission_profile",
         "stage",
         "requested_cycles",
         "completed_cycles",
         "current_dig_point_id",
+        "dig_group_id",
         "terminal",
         "outcome",
         "reason_code",
@@ -29,6 +31,7 @@ _STAGES = frozenset(
         "IDLE",
         "FOLLOW_DIG",
         "ACT_DIG",
+        "ACT_FULL_CYCLE",
         "FOLLOW_DUMP",
         "EXECUTE_DUMP",
         "COMPLETED",
@@ -91,10 +94,12 @@ class ResidentTrajectoryVisualization:
 @dataclass(frozen=True)
 class ResidentFixedCycleRemoteStatus:
     run_id: str
+    mission_profile: str
     stage: str
     requested_cycles: int
     completed_cycles: int
     current_dig_point_id: str
+    dig_group_id: str
     terminal: bool
     outcome: str
     reason_code: str
@@ -120,14 +125,24 @@ class ResidentFixedCycleRemoteStatus:
         if terminal != (stage in _TERMINAL_STAGES):
             raise ValueError("V3-A terminal flag and stage disagree")
         raw_trajectory = value["active_trajectory"]
+        mission_profile = _text(
+            value["mission_profile"], "status.mission_profile"
+        )
+        if mission_profile not in {"regime_factorized", "act_full_cycle"}:
+            raise ValueError("V3-A status mission_profile is invalid")
         return cls(
             run_id=_optional_identifier(value["run_id"], "status.run_id"),
+            mission_profile=mission_profile,
             stage=stage,
             requested_cycles=requested,
             completed_cycles=completed,
             current_dig_point_id=_optional_identifier(
                 value["current_dig_point_id"],
                 "status.current_dig_point_id",
+            ),
+            dig_group_id=_optional_identifier(
+                value["dig_group_id"],
+                "status.dig_group_id",
             ),
             terminal=terminal,
             outcome=_text(value["outcome"], "status.outcome", allow_empty=True),

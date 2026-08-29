@@ -62,8 +62,9 @@ def test_icra2027_training_script_ranks_every_numeric_checkpoint_on_held_out_dat
     assert '--split-root="$split_root"' in script
     assert 'evaluate_checkpoints "$DIG_OUTPUT" "$DIG_SPLIT"' in script
     assert '"$FULL_OUTPUT" "$FULL_SPLIT" "$FULL_EVAL_LOG" "$FULL_EVAL_JSON"' in script
-    full_training = 'lerobot-train \\\n  --dataset.repo_id="$FULL_TRAIN_REPO"'
-    assert script.index(full_training) < script.index("开始留出集 checkpoint 评估")
+    full_training = '--dataset.repo_id="$FULL_TRAIN_REPO"'
+    full_evaluation = 'PHASE="挖掘—运转—倾倒 ACT 留出集 checkpoint 评估"'
+    assert script.index(full_training) < script.index(full_evaluation)
     assert "只选择数值目录，避免重复评估 checkpoints/last 符号链接" in script
     assert "checkpoint_evaluation.json" in script
     assert 'print("选中的 checkpoint：", result["selected_checkpoint"])' in script

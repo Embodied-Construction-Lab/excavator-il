@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import re
+import hashlib
 import shlex
 import signal
 import threading
@@ -23,16 +23,33 @@ from .hybrid_experiment_run import (
     HybridMissionRunRequest,
 )
 from .remote_runtime import LineProcess, SshRuntimeHost
+from ._resident_fixed_cycle_support import (
+    COMMISSIONING_AUTHORIZATION,
+    CONTROL_SCHEMA_VERSION,
+    absolute_posix as _absolute_posix,
+    bounded_integer as _bounded_integer,
+    bounded_number as _bounded_number,
+    commissioning_authorization as _commissioning_authorization,
+    parse_control_response as _parse_control_response,
+    relative_script as _relative_script,
+    remote_pid as _remote_pid,
+    text as _text,
+    wait_process as _wait_process,
+)
+from ._resident_fixed_cycle_groups import (
+    normalize_dig_groups,
+    select_cycle_targets,
+)
 from .resident_fixed_cycle_visualization import (
     ResidentFixedCycleRemoteStatus,
     V3aTrajectoryFile,
     v3a_trajectory_path,
 )
 
-CONFIG_SCHEMA_VERSION = "excavator_resident_fixed_cycle_pc.v2"
-COMMISSIONING_AUTHORIZATION = "ALLOW_V3A_FIXED_TRAJECTORY_COMMISSIONING"
-CONTROL_SCHEMA_VERSION = "resident_fixed_cycle_control.v2"
-_CONFIG_FIELDS = frozenset(
+CONFIG_SCHEMA_VERSION = "excavator_resident_fixed_cycle_pc.v3"
+GROUPED_CONFIG_SCHEMA_VERSION = "excavator_resident_fixed_cycle_pc.v4"
+LEGACY_CONFIG_SCHEMA_VERSION = "excavator_resident_fixed_cycle_pc.v2"
+_LEGACY_CONFIG_FIELDS = frozenset(
     {
         "schema_version",
         "guided_config",
@@ -47,11 +64,21 @@ _CONFIG_FIELDS = frozenset(
         "commissioning_authorization",
     }
 )
+_CONFIG_FIELDS = _LEGACY_CONFIG_FIELDS | frozenset(
+    {
+        "mission_profile",
+        "act_runtime_config",
+        "act_checkpoint_host_path",
+        "act_deployment_host_path",
+    }
+)
+_GROUPED_CONFIG_FIELDS = _CONFIG_FIELDS | {"dig_point_catalog"}
 _TERMINAL_UI_STAGES = frozenset({"completed", "failed", "cancelled"})
 _STAGE_TO_UI = {
     "IDLE": "idle",
     "FOLLOW_DIG": "running_rl_to_dig",
     "ACT_DIG": "running_act_dig",
+    "ACT_FULL_CYCLE": "running_act_dig",
     "FOLLOW_DUMP": "running_rl_to_dump_and_dump",
     "EXECUTE_DUMP": "running_rl_to_dump_and_dump",
     "COMPLETED": "completed",
@@ -72,6 +99,11 @@ class ResidentFixedCyclePcConfig:
     status_poll_s: float
     act_max_steps: int
     commissioning_authorization: str
+    mission_profile: str = "regime_factorized"
+    act_runtime_config: PurePosixPath | None = None
+    act_checkpoint_host_path: PurePosixPath | None = None
+    act_deployment_host_path: PurePosixPath | None = None
+    dig_point_catalog: PurePosixPath | None = None
 
     @classmethod
     def load(cls, path: str | Path) -> "ResidentFixedCyclePcConfig":
@@ -80,10 +112,63 @@ class ResidentFixedCyclePcConfig:
             value = json.loads(config_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError(f"cannot load V3-A PC config: {exc}") from exc
-        if not isinstance(value, Mapping) or set(value) != _CONFIG_FIELDS:
+        if not isinstance(value, Mapping):
             raise ValueError("V3-A PC config fields are invalid")
-        if value["schema_version"] != CONFIG_SCHEMA_VERSION:
+        schema_version = value.get("schema_version")
+        if schema_version not in {
+            LEGACY_CONFIG_SCHEMA_VERSION,
+            CONFIG_SCHEMA_VERSION,
+            GROUPED_CONFIG_SCHEMA_VERSION,
+        }:
             raise ValueError("unsupported V3-A PC config schema")
+        expected_fields = {
+            LEGACY_CONFIG_SCHEMA_VERSION: _LEGACY_CONFIG_FIELDS,
+            CONFIG_SCHEMA_VERSION: _CONFIG_FIELDS,
+            GROUPED_CONFIG_SCHEMA_VERSION: _GROUPED_CONFIG_FIELDS,
+        }[schema_version]
+        if set(value) != expected_fields:
+            raise ValueError("V3-A PC config fields are invalid")
+        if schema_version == LEGACY_CONFIG_SCHEMA_VERSION:
+            mission_profile = "regime_factorized"
+            act_runtime_config = None
+            act_checkpoint_host_path = None
+            act_deployment_host_path = None
+            dig_point_catalog = None
+        else:
+            mission_profile = _text(value["mission_profile"], "mission_profile")
+            if (
+                schema_version == CONFIG_SCHEMA_VERSION
+                and mission_profile != "act_full_cycle"
+            ):
+                raise ValueError("V3-B PC config mission_profile is invalid")
+            if mission_profile == "act_full_cycle":
+                act_runtime_config = _absolute_posix(
+                    value["act_runtime_config"], "act_runtime_config"
+                )
+                act_checkpoint_host_path = _absolute_posix(
+                    value["act_checkpoint_host_path"], "act_checkpoint_host_path"
+                )
+                act_deployment_host_path = _absolute_posix(
+                    value["act_deployment_host_path"], "act_deployment_host_path"
+                )
+            elif mission_profile == "regime_factorized" and all(
+                value[field] is None
+                for field in (
+                    "act_runtime_config",
+                    "act_checkpoint_host_path",
+                    "act_deployment_host_path",
+                )
+            ):
+                act_runtime_config = None
+                act_checkpoint_host_path = None
+                act_deployment_host_path = None
+            else:
+                raise ValueError("V3-B PC config mission_profile is invalid")
+            dig_point_catalog = (
+                _relative_catalog(value["dig_point_catalog"])
+                if schema_version == GROUPED_CONFIG_SCHEMA_VERSION
+                else None
+            )
         plan = _absolute_posix(value["fixed_cycle_plan"], "fixed_cycle_plan")
         root = _absolute_posix(value["runtime_root"], "runtime_root")
         socket_path = _absolute_posix(value["control_socket"], "control_socket")
@@ -115,7 +200,19 @@ class ResidentFixedCyclePcConfig:
             commissioning_authorization=_commissioning_authorization(
                 value["commissioning_authorization"]
             ),
+            mission_profile=mission_profile,
+            act_runtime_config=act_runtime_config,
+            act_checkpoint_host_path=act_checkpoint_host_path,
+            act_deployment_host_path=act_deployment_host_path,
+            dig_point_catalog=dig_point_catalog,
         )
+
+
+def _relative_catalog(value: Any) -> PurePosixPath:
+    path = PurePosixPath(_text(value, "dig_point_catalog"))
+    if path.is_absolute() or ".." in path.parts or path.suffix != ".json":
+        raise ValueError("dig_point_catalog must be a normalized relative JSON path")
+    return path
 class ResidentFixedCycleProcesses:
     """Own the V3-A resident owner and ACT worker remote processes."""
 
@@ -177,6 +274,7 @@ class ResidentFixedCycleProcesses:
             raise RuntimeError("; ".join(errors))
 
     def _start_owner(self) -> None:
+        catalog_digest = self._dig_catalog_sha256()
         argv = [
             "env",
             f"RESIDENT_RUNTIME_ROOT={self._config.runtime_root}",
@@ -192,6 +290,8 @@ class ResidentFixedCycleProcesses:
             "--fixed-cycle-plan",
             str(self._config.fixed_cycle_plan),
         ]
+        if catalog_digest is not None:
+            argv.extend(["--expected-dig-catalog-sha256", catalog_digest])
         if self._config.commissioning_authorization:
             argv.extend(
                 [
@@ -224,15 +324,40 @@ class ResidentFixedCycleProcesses:
             lambda item: "RESIDENT_HARDWARE_READY sensor_valid=True" in item,
             self._config.ready_timeout_s,
         )
+
+    def _dig_catalog_sha256(self) -> str | None:
+        relative = self._config.dig_point_catalog
+        if relative is None:
+            return None
+        path = self._guided.rl_airy_repo.joinpath(*relative.parts)
+        try:
+            if path.is_symlink() or not path.is_file():
+                raise RuntimeError("Dig Point Catalog must be a regular file")
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise RuntimeError(f"cannot hash Dig Point Catalog: {exc}") from exc
+
     def _start_act_worker(self) -> None:
         argv = [
             "env",
             f"RESIDENT_RUNTIME_ROOT={self._config.runtime_root}",
-            "bash",
-            self._config.act_worker_script,
-            "--authorization",
-            REQUIRED_HYBRID_MOTION_AUTHORIZATION,
         ]
+        if self._config.act_runtime_config is not None:
+            argv.extend(
+                [
+                    f"ACT_RUNTIME_CONFIG_PATH={self._config.act_runtime_config}",
+                    f"ACT_CHECKPOINT_HOST_PATH={self._config.act_checkpoint_host_path}",
+                    f"ACT_DEPLOYMENT_HOST_PATH={self._config.act_deployment_host_path}",
+                ]
+            )
+        argv.extend(
+            [
+                "bash",
+                self._config.act_worker_script,
+                "--authorization",
+                REQUIRED_HYBRID_MOTION_AUTHORIZATION,
+            ]
+        )
         command = (
             f"cd {shlex.quote(str(self._guided.orin_repo))} && "
             "echo RESIDENT_ACT_PID=$$ && exec " + shlex.join(argv)
@@ -325,8 +450,6 @@ class SshResidentFixedCycleOperations:
         self._trajectory_file = trajectory_file or V3aTrajectoryFile(
             v3a_trajectory_path(guided_config.log_dir)
         )
-        # A previous UI/Mission may have been killed before release().  Clear its
-        # read-only RViz artifact before any new operator display can consume it.
         self._trajectory_file.update(None)
 
     def start(
@@ -335,6 +458,7 @@ class SshResidentFixedCycleOperations:
         run_id: str,
         requested_cycles: int,
         first_dig_point_id: str,
+        dig_group_id: str = "all",
     ) -> ResidentFixedCycleRemoteStatus:
         self._trajectory_file.update(None)
         self._processes.start()
@@ -346,6 +470,8 @@ class SshResidentFixedCycleOperations:
             str(requested_cycles),
             "--first-dig-point-id",
             first_dig_point_id,
+            "--dig-group-id",
+            dig_group_id,
         )
 
     def status(self) -> ResidentFixedCycleRemoteStatus:
@@ -376,6 +502,8 @@ class SshResidentFixedCycleOperations:
         )
         output = self._remote_host.run(remote)
         status = _parse_control_response(output, command)
+        if status.mission_profile != self._config.mission_profile:
+            raise RuntimeError("V3-B owner mission_profile does not match PC config")
         self._trajectory_file.update(status.active_trajectory)
         return status
 
@@ -388,17 +516,24 @@ class ResidentFixedCycleSupervisor:
         *,
         operations: Any,
         dig_target_ids: tuple[str, ...],
+        dig_groups: Mapping[str, tuple[str, ...]] | None = None,
+        default_dig_group_id: str = "all",
         poll_interval_s: float,
         log_capacity: int = 400,
         config_path: str | Path | None = None,
         evidence_run_factory: Callable[[HybridMissionRunRequest], Any] | None = None,
     ) -> None:
-        if not dig_target_ids or len(set(dig_target_ids)) != len(dig_target_ids):
-            raise ValueError("dig_target_ids must be a non-empty unique tuple")
+        groups, default_group = normalize_dig_groups(
+            dig_target_ids,
+            dig_groups,
+            default_dig_group_id,
+        )
         if not 0.02 <= poll_interval_s <= 1.0:
             raise ValueError("poll_interval_s must be within [0.02, 1.0]")
         self._operations = operations
         self._dig_target_ids = dig_target_ids
+        self._dig_groups = groups
+        self._default_dig_group_id = default_group
         self._poll_interval_s = poll_interval_s
         self._lock = threading.RLock()
         self._logs: deque[str] = deque(maxlen=log_capacity)
@@ -436,6 +571,7 @@ class ResidentFixedCycleSupervisor:
         automatic: bool,
         motion_authorization: str | None,
         cycle_count: int = 1,
+        dig_group_id: str | None = None,
     ) -> None:
         if automatic is not True:
             raise ValueError("V3-A supports automatic local cycles only")
@@ -444,6 +580,13 @@ class ResidentFixedCycleSupervisor:
         if dig_target_id not in self._dig_target_ids:
             raise ValueError("unknown V3-A dig target")
         _bounded_integer(cycle_count, "cycle_count", 1, MAX_HYBRID_CYCLE_COUNT)
+        selected_group_id = dig_group_id or self._default_dig_group_id
+        cycle_targets = select_cycle_targets(
+            self._dig_groups,
+            selected_group_id,
+            dig_target_id,
+            cycle_count,
+        )
         with self._lock:
             if self._evidence.finalization_pending:
                 raise RuntimeError(
@@ -466,13 +609,6 @@ class ResidentFixedCycleSupervisor:
                     raise ValueError("V3-A evidence run must expose a run_id")
             else:
                 run_id = "v3a-" + uuid.uuid4().hex
-            first_index = self._dig_target_ids.index(dig_target_id)
-            cycle_targets = tuple(
-                self._dig_target_ids[
-                    (first_index + offset) % len(self._dig_target_ids)
-                ]
-                for offset in range(cycle_count)
-            )
             self._evidence = HybridMissionEvidenceLifecycle(
                 evidence_run,
                 cycle_targets=cycle_targets,
@@ -482,6 +618,7 @@ class ResidentFixedCycleSupervisor:
             self._state = HybridMissionSnapshot(
                 stage="starting",
                 dig_target_id=dig_target_id,
+                dig_group_id=selected_group_id,
                 automatic=True,
                 requested_cycles=cycle_count,
                 run_id=run_id,
@@ -490,6 +627,7 @@ class ResidentFixedCycleSupervisor:
                 automatic=True,
                 requested_cycles=cycle_count,
                 dig_target_id=dig_target_id,
+                dig_group_id=selected_group_id,
             )
             if self._evidence.error:
                 message = (
@@ -505,7 +643,7 @@ class ResidentFixedCycleSupervisor:
                 raise RuntimeError(message)
             thread = threading.Thread(
                 target=self._run,
-                args=(run_id, cycle_count, dig_target_id),
+                args=(run_id, cycle_count, dig_target_id, selected_group_id),
                 name=f"resident-fixed-cycle-{run_id}",
                 daemon=True,
             )
@@ -554,13 +692,20 @@ class ResidentFixedCycleSupervisor:
                 pass
             thread.join(timeout=15.0)
 
-    def _run(self, run_id: str, cycles: int, first_target: str) -> None:
+    def _run(
+        self,
+        run_id: str,
+        cycles: int,
+        first_target: str,
+        dig_group_id: str,
+    ) -> None:
         terminal_disarmed = False
         try:
             status = self._operations.start(
                 run_id=run_id,
                 requested_cycles=cycles,
                 first_dig_point_id=first_target,
+                dig_group_id=dig_group_id,
             )
             while True:
                 self._apply_status(status)
@@ -619,6 +764,7 @@ class ResidentFixedCycleSupervisor:
                 self._state,
                 stage=stage,
                 dig_target_id=status.current_dig_point_id or self._state.dig_target_id,
+                dig_group_id=status.dig_group_id or self._state.dig_group_id,
                 run_completed_cycles=status.completed_cycles,
                 requested_cycles=status.requested_cycles,
                 error=error,
@@ -628,9 +774,11 @@ class ResidentFixedCycleSupervisor:
                 "resident_fixed_cycle_status",
                 {
                     "stage": status.stage,
+                    "mission_profile": status.mission_profile,
                     "requested_cycles": status.requested_cycles,
                     "completed_cycles": status.completed_cycles,
                     "dig_target_id": status.current_dig_point_id,
+                    "dig_group_id": status.dig_group_id,
                     "terminal": status.terminal,
                     "outcome": status.outcome,
                     "reason_code": status.reason_code,
@@ -644,8 +792,10 @@ class ResidentFixedCycleSupervisor:
                 )
         self._append_log(
             "V3-A local status: "
-            f"stage={status.stage} cycles={status.completed_cycles}/"
+            f"profile={status.mission_profile} stage={status.stage} "
+            f"cycles={status.completed_cycles}/"
             f"{status.requested_cycles} target={status.current_dig_point_id}"
+            f" group={status.dig_group_id}"
         )
 
     def _append_log(self, message: str) -> None:
@@ -664,88 +814,3 @@ class ResidentFixedCycleSupervisor:
             self._state,
             evidence_error=self._evidence.error,
         )
-
-
-def _parse_control_response(
-    payload: str, command: str
-) -> ResidentFixedCycleRemoteStatus:
-    try:
-        value = json.loads(payload)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("V3-A control returned invalid JSON") from exc
-    if not isinstance(value, Mapping) or set(value) != {
-        "schema_version",
-        "ok",
-        "command",
-        "status",
-        "error",
-    }:
-        raise RuntimeError("V3-A control response fields are invalid")
-    if (
-        value["schema_version"] != CONTROL_SCHEMA_VERSION
-        or value["command"] != command
-        or value["ok"] is not True
-        or value["error"] is not None
-    ):
-        raise RuntimeError(f"V3-A {command} command was rejected")
-    return ResidentFixedCycleRemoteStatus.from_mapping(value["status"])
-
-
-def _text(value: Any, field: str, *, allow_empty: bool = False) -> str:
-    if not isinstance(value, str) or (not allow_empty and not value.strip()):
-        raise ValueError(f"{field} must be text")
-    return value
-
-
-def _absolute_posix(value: Any, field: str) -> PurePosixPath:
-    path = PurePosixPath(_text(value, field))
-    if not path.is_absolute() or ".." in path.parts:
-        raise ValueError(f"{field} must be an absolute normalized path")
-    return path
-
-
-def _relative_script(value: Any, field: str) -> str:
-    text = _text(value, field)
-    path = PurePosixPath(text)
-    if path.is_absolute() or ".." in path.parts:
-        raise ValueError(f"{field} must be a normalized relative path")
-    return text
-
-
-def _commissioning_authorization(value: Any) -> str:
-    text = _text(value, "commissioning_authorization", allow_empty=True)
-    if text not in {"", COMMISSIONING_AUTHORIZATION}:
-        raise ValueError(
-            "commissioning_authorization must be empty or the exact V3-A token"
-        )
-    return text
-
-
-def _bounded_number(value: Any, field: str, minimum: float, maximum: float) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{field} must be numeric")
-    result = float(value)
-    if not minimum <= result <= maximum:
-        raise ValueError(f"{field} is outside its allowed range")
-    return result
-
-
-def _bounded_integer(value: Any, field: str, minimum: int, maximum: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{field} must be an integer")
-    if not minimum <= value <= maximum:
-        raise ValueError(f"{field} is outside its allowed range")
-    return value
-
-
-def _remote_pid(line: str, name: str) -> int:
-    match = re.fullmatch(re.escape(name) + r"=([1-9][0-9]*)", line)
-    if match is None:
-        raise RuntimeError(f"invalid {name} readiness line")
-    return int(match.group(1))
-
-
-def _wait_process(process: Any, *, allow_nonzero: bool) -> None:
-    process.wait(timeout_s=10.0)
-    if process.returncode not in (0, None) and not allow_nonzero:
-        raise RuntimeError(f"remote process exited with return code {process.returncode}")

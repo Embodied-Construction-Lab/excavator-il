@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from excavator_il.airy_operator import AiryOperatorSnapshot
 from excavator_il.collection_ui_app import (
     CollectionUiMetadata,
+    HybridDigGroupMetadata,
     StartCollectionRequest,
     create_collection_ui_app,
 )
@@ -29,7 +30,7 @@ def test_dual_camera_views_are_stacked_vertically_without_stretching_page():
         ROOT / "src" / "excavator_il" / "collection_ui_static" / "app.css"
     ).read_text(encoding="utf-8")
 
-    assert '/static/app.css?v=20260826-collection-labels' in index
+    assert '/static/app.css?v=20260829-point-catalog' in index
     assert ".camera-grid { display: grid; grid-template-columns: 1fr;" in stylesheet
     assert "align-items: start;" in stylesheet.split(".collection-grid", 1)[1].split(
         "}", 1
@@ -45,18 +46,19 @@ def test_dual_camera_views_are_stacked_vertically_without_stretching_page():
     )
 
 
-def test_collection_ui_collects_one_episode_with_manual_labels_not_campaign_progress():
+def test_collection_ui_omits_manual_episode_labels_and_campaign_progress():
     index = (
         ROOT / "src" / "excavator_il" / "collection_ui_static" / "index.html"
     ).read_text(encoding="utf-8")
 
-    assert "本条 Episode 标记" in index
-    assert 'id="soil-reset-block-id"' in index
-    assert '<input id="soil-reset-block-id"' in index
-    assert 'id="collection-zone-id"' in index
-    assert index.count('value="zone_') == 6
-    assert 'id="dig-repeat-index"' in index
-    assert 'id="operator-note"' in index
+    assert "本条 Episode 标记" not in index
+    assert 'id="task-variant"' not in index
+    assert 'id="soil-reset-block-id"' not in index
+    assert 'id="dig-point-id"' not in index
+    assert 'id="collection-zone-id"' not in index
+    assert 'id="dig-repeat-index"' not in index
+    assert 'id="operator-note"' not in index
+    assert 'id="episode-context"' not in index
     assert "200 条采集进度" not in index
     assert "权威下一条" not in index
     assert "slot_" not in index
@@ -158,9 +160,24 @@ class _HybridSupervisor:
     def snapshot(self):
         return self.state
 
-    def start(self, target_id, *, automatic, motion_authorization, cycle_count=1):
+    def start(
+        self,
+        target_id,
+        *,
+        automatic,
+        motion_authorization,
+        cycle_count=1,
+        dig_group_id="all",
+    ):
         self.calls.append(
-            ("start", target_id, automatic, motion_authorization, cycle_count)
+            (
+                "start",
+                target_id,
+                automatic,
+                motion_authorization,
+                cycle_count,
+                dig_group_id,
+            )
         )
         self.state = HybridMissionSnapshot(
             stage="starting",
@@ -207,7 +224,7 @@ def _route_endpoint(app, path: str):
     return next(route.endpoint for route in app.routes if route.path == path)
 
 
-def test_single_episode_collection_uses_operator_supplied_labels(
+def test_collection_ui_request_contract_rejects_removed_episode_labels(
     tmp_path,
 ):
     supervisor = _Supervisor()
@@ -229,34 +246,12 @@ def test_single_episode_collection_uses_operator_supplied_labels(
         ),
         supervisor=supervisor,
     )
-    start = _route_endpoint(app, "/api/collection/start")
-
-    start(
+    with pytest.raises(ValueError, match="task_variant"):
         StartCollectionRequest(
             positioning_mode="direct",
             task_variant="dig_only",
-            soil_reset_block_id="soil_after_rain",
-            dig_point_id="dig_03",
-            collection_zone_id="zone_06",
-            dig_repeat_index=3,
-            operator_note="远排右侧第三次",
-        ),
-        ui_header="1",
-    )
-
-    assert supervisor.calls == [
-        (
-            "start",
-            "direct",
-            None,
-            "dig_only",
-            "soil_after_rain",
-            "dig_03",
-            "zone_06",
-            3,
-            "远排右侧第三次",
         )
-    ]
+    assert supervisor.calls == []
 
 
 def test_collection_ui_can_start_and_stop_airy_operator(tmp_path):
@@ -378,7 +373,7 @@ def test_hybrid_start_automatically_starts_airy_operator_when_stopped(tmp_path):
 
     assert response.status_code == 200
     assert operator.calls[0] == ("start",)
-    assert hybrid.calls[0] == ("start", "dig_01", False, None, 1)
+    assert hybrid.calls[0] == ("start", "dig_01", False, None, 1, "all")
 
 
 def test_collection_ui_exposes_segmented_and_automatic_hybrid_mission_actions(
@@ -436,7 +431,7 @@ def test_collection_ui_exposes_segmented_and_automatic_hybrid_mission_actions(
     assert advanced.status_code == 200
     assert stopped.status_code == 200
     assert hybrid.calls[:3] == [
-        ("start", "dig_01", False, None, 1),
+        ("start", "dig_01", False, None, 1, "all"),
         ("advance", "ALLOW_HYBRID_MACHINE_MOTION"),
         ("stop",),
     ]
@@ -485,6 +480,83 @@ def test_collection_ui_starts_nine_cycle_truck_loading_mission(tmp_path):
         True,
         "ALLOW_HYBRID_MACHINE_MOTION",
         9,
+        "all",
+    )
+
+
+def test_collection_ui_exposes_and_starts_selected_dig_group(tmp_path):
+    collection = _Supervisor()
+    hybrid = _HybridSupervisor()
+    app = create_collection_ui_app(
+        config=CollectionUiConfig(
+            guided_config=tmp_path / "guided.json",
+            host="127.0.0.1",
+            port=8088,
+            camera_preview_url="http://192.168.50.2:18092/camera/front.mjpg",
+            visualization_url="",
+        ),
+        metadata=CollectionUiMetadata(
+            operator_id="zhaoshuai",
+            task="ExecuteDig",
+            dig_target_m=(1.0, 0.0, 0.0),
+            orin_host="192.168.50.2",
+            rl_dig_targets=(
+                ("near_01", (1.0, 0.4, 0.0)),
+                ("near_02", (1.0, 0.15, 0.0)),
+                ("far_01", (1.3, 0.4, 0.0)),
+            ),
+            hybrid_act_max_steps=130,
+            hybrid_dig_groups=(
+                HybridDigGroupMetadata(
+                    group_id="all",
+                    label="全部 3 点",
+                    point_ids=("near_01", "near_02", "far_01"),
+                ),
+                HybridDigGroupMetadata(
+                    group_id="near",
+                    label="近端 2 点",
+                    point_ids=("near_01", "near_02"),
+                ),
+                HybridDigGroupMetadata(
+                    group_id="far",
+                    label="远端 1 点",
+                    point_ids=("far_01",),
+                ),
+            ),
+            hybrid_default_dig_group_id="all",
+        ),
+        supervisor=collection,
+        hybrid_supervisor=hybrid,
+    )
+
+    with TestClient(app) as client:
+        config = client.get("/api/config").json()
+        response = client.post(
+            "/api/hybrid/start",
+            json={
+                "dig_target_id": "near_02",
+                "dig_group_id": "near",
+                "automatic": True,
+                "cycle_count": 4,
+                "motion_authorization": "ALLOW_HYBRID_MACHINE_MOTION",
+            },
+            headers={"X-Excavator-UI": "1"},
+        )
+
+    assert config["hybrid_default_dig_group_id"] == "all"
+    assert config["hybrid_dig_groups"][1] == {
+        "group_id": "near",
+        "label": "近端 2 点",
+        "point_ids": ["near_01", "near_02"],
+    }
+    assert response.status_code == 200
+    assert hybrid.calls[0] == (
+        "start",
+        "near_02",
+        True,
+        "ALLOW_HYBRID_MACHINE_MOTION",
+        4,
+        "near",
     )
 
 
@@ -557,12 +629,7 @@ def test_collection_ui_exposes_config_status_and_guided_collection_actions(tmp_p
         idle = client.get("/api/status").json()
         started = client.post(
             "/api/collection/start",
-            json={
-                "positioning_mode": "manual",
-                "task_variant": "dig_only",
-                "soil_reset_block_id": "block_04",
-                "dig_point_id": "dig_02",
-            },
+            json={"positioning_mode": "manual"},
             headers={"X-Excavator-UI": "1"},
         )
         completed = client.post(
@@ -583,17 +650,20 @@ def test_collection_ui_exposes_config_status_and_guided_collection_actions(tmp_p
     assert "RViz / Foxglove 扩展位" not in page.text
     assert "连续自动完成 1～9 铲装车循环" in page.text
     assert '<option value="9">9 铲</option>' in page.text
-    assert '/static/app.js?v=20260826-collection-labels' in page.text
+    assert 'id="hybrid-dig-group"' in page.text
+    assert 'id="hybrid-dig-target"' in page.text
+    assert "起始挖掘点" in page.text
+    assert '/static/app.js?v=20260829-point-catalog' in page.text
     assert 'id="copy-log"' in page.text
     assert 'id="copy-hybrid-log"' in page.text
     assert 'id="clear-log"' in page.text
     assert 'id="clear-hybrid-log"' in page.text
     assert 'command("/api/collection/logs/clear")' in script.text
     assert 'commandHybrid("/api/hybrid/logs/clear")' in script.text
+    assert "dig_group_id: selectedHybridGroupId()" in script.text
+    assert '$("hybrid-dig-target").disabled = collectionActive || hybridActive' in script.text
     assert "state.hybridSnapshot?.can_stop === true" in script.text
-    assert "本条 Episode 标记" in page.text
-    assert "仅挖掘" in page.text
-    assert "挖掘 + 运转 + 倾倒" in page.text
+    assert "本条 Episode 标记" not in page.text
     assert stylesheet.status_code == 200
     assert "collection-grid" in stylesheet.text
     assert script.status_code == 200
@@ -610,14 +680,7 @@ def test_collection_ui_exposes_config_status_and_guided_collection_actions(tmp_p
     assert completed.status_code == 200
     assert outcome.status_code == 200
     assert supervisor.calls[:3] == [
-        (
-            "start",
-            "manual",
-            None,
-            "dig_only",
-            "block_04",
-            "dig_02",
-        ),
+        ("start", "manual", None, None, None, None),
         ("complete_manual_positioning",),
         ("submit_outcome", "success"),
     ]
@@ -729,9 +792,6 @@ def test_collection_ui_requires_a_known_target_for_rl_positioning(tmp_path):
             json={
                 "positioning_mode": "rl",
                 "dig_target_id": "dig_01",
-                "task_variant": "dig_transport_dump",
-                "soil_reset_block_id": "block_11",
-                "dig_point_id": "dig_01",
             },
             headers={"X-Excavator-UI": "1"},
         )
@@ -743,13 +803,13 @@ def test_collection_ui_requires_a_known_target_for_rl_positioning(tmp_path):
         "start",
         "rl",
         "dig_01",
-        "dig_transport_dump",
-        "block_11",
-        "dig_01",
+        None,
+        None,
+        None,
     )
 
 
-def test_collection_ui_rejects_missing_partial_or_mismatched_episode_protocol(tmp_path):
+def test_collection_ui_accepts_collection_without_episode_labels(tmp_path):
     supervisor = _Supervisor()
     app = create_collection_ui_app(
         config=CollectionUiConfig(
@@ -775,27 +835,8 @@ def test_collection_ui_rejects_missing_partial_or_mismatched_episode_protocol(tm
             json={"positioning_mode": "direct"},
             headers={"X-Excavator-UI": "1"},
         )
-        partial = client.post(
-            "/api/collection/start",
-            json={"positioning_mode": "direct", "task_variant": "dig_only"},
-            headers={"X-Excavator-UI": "1"},
-        )
-        mismatched = client.post(
-            "/api/collection/start",
-            json={
-                "positioning_mode": "rl",
-                "dig_target_id": "dig_01",
-                "task_variant": "dig_only",
-                "soil_reset_block_id": "block_01",
-                "dig_point_id": "dig_02",
-            },
-            headers={"X-Excavator-UI": "1"},
-        )
-
-    assert missing.status_code == 422
-    assert partial.status_code == 422
-    assert mismatched.status_code == 422
-    assert supervisor.calls == [("close",)]
+    assert missing.status_code == 200
+    assert supervisor.calls[0] == ("start", "direct", None, None, None, None)
 
 
 def test_collection_ui_proxies_collector_telemetry(monkeypatch, tmp_path):

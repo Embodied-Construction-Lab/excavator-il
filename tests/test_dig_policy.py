@@ -103,3 +103,16 @@ def test_checked_policy_saturates_finite_actions_to_normalized_manual_contract()
     assert policy.select_action(_observation()) == pytest.approx(
         (1.0, -1.0, 0.25, -0.5)
     )
+
+
+def test_checked_policy_rejects_gross_finite_action_outliers():
+    factory = DigPolicyFactory(
+        {
+            "lerobot_act": lambda: _ConstantAdapter(
+                "lerobot_act", (1.26, 0.0, 0.0, 0.0)
+            )
+        }
+    )
+
+    with pytest.raises(ValueError, match="normalized manual action"):
+        factory.create("lerobot_act").select_action(_observation())

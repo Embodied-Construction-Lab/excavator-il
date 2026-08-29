@@ -119,7 +119,7 @@ def test_collection_ui_v3_selects_resident_fixed_cycle_exclusively(tmp_path):
     ).resolve()
 
 
-def test_active_ui_config_selects_v3a_resident_fixed_cycle():
+def test_active_ui_config_selects_v3b_resident_fixed_cycle():
     config_dir = Path(__file__).parents[1] / "config"
 
     ui_config = load_collection_ui_config(config_dir / "collection_ui.pc.json")

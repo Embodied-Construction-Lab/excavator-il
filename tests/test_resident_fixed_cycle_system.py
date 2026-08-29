@@ -1,4 +1,5 @@
 import json
+import hashlib
 import threading
 import time
 from pathlib import Path
@@ -39,6 +40,56 @@ def _write_config(tmp_path: Path, **overrides: object) -> Path:
     return path
 
 
+def _write_full_cycle_config(tmp_path: Path, **overrides: object) -> Path:
+    document = json.loads(_write_config(tmp_path).read_text(encoding="utf-8"))
+    document.update(
+        {
+            "schema_version": "excavator_resident_fixed_cycle_pc.v3",
+            "mission_profile": "act_full_cycle",
+            "act_runtime_config": "/home/jetson16/workspace_excavator/"
+            "excavator-il/config/act_runtime.full_cycle.orin.json",
+            "act_checkpoint_host_path": "/home/jetson16/workspace_excavator/"
+            "excavator-il/models/act-full-cycle",
+            "act_deployment_host_path": "/home/jetson16/workspace_excavator/"
+            "excavator-il/models/act-full-cycle/deployment",
+            "act_max_steps": 260,
+        }
+    )
+    document.update(overrides)
+    path = tmp_path / "resident-full-cycle.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
+
+
+def _write_grouped_cycle_config(tmp_path: Path, **overrides: object) -> Path:
+    document = json.loads(_write_config(tmp_path).read_text(encoding="utf-8"))
+    document.update(
+        {
+            "schema_version": "excavator_resident_fixed_cycle_pc.v4",
+            "mission_profile": "regime_factorized",
+            "act_runtime_config": None,
+            "act_checkpoint_host_path": None,
+            "act_deployment_host_path": None,
+            "dig_point_catalog": (
+                "mission/config/excavation_dig_point_catalog.v1.json"
+            ),
+        }
+    )
+    document.update(overrides)
+    path = tmp_path / "resident-grouped-cycle.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
+
+
+def test_grouped_cycle_config_references_one_airy_point_catalog(tmp_path: Path) -> None:
+    config = ResidentFixedCyclePcConfig.load(_write_grouped_cycle_config(tmp_path))
+
+    assert config.mission_profile == "regime_factorized"
+    assert str(config.dig_point_catalog) == (
+        "mission/config/excavation_dig_point_catalog.v1.json"
+    )
+
+
 def test_fixed_cycle_pc_config_is_strict_and_resolves_guided_config(tmp_path):
     config = ResidentFixedCyclePcConfig.load(_write_config(tmp_path))
 
@@ -63,6 +114,23 @@ def test_fixed_cycle_pc_config_is_strict_and_resolves_guided_config(tmp_path):
     with pytest.raises(ValueError, match="commissioning_authorization"):
         ResidentFixedCyclePcConfig.load(
             _write_config(tmp_path, commissioning_authorization="wrong")
+        )
+
+
+def test_full_cycle_pc_config_requires_explicit_parallel_act_assets(tmp_path):
+    config = ResidentFixedCyclePcConfig.load(_write_full_cycle_config(tmp_path))
+
+    assert config.mission_profile == "act_full_cycle"
+    assert config.act_max_steps == 260
+    assert str(config.act_runtime_config).endswith("act_runtime.full_cycle.orin.json")
+    assert str(config.act_checkpoint_host_path).endswith("models/act-full-cycle")
+    assert str(config.act_deployment_host_path).endswith(
+        "models/act-full-cycle/deployment"
+    )
+
+    with pytest.raises(ValueError, match="act_runtime_config"):
+        ResidentFixedCyclePcConfig.load(
+            _write_full_cycle_config(tmp_path, act_runtime_config="relative.json")
         )
 
 
@@ -135,7 +203,7 @@ def test_ssh_operations_start_once_and_use_only_local_cycle_control(tmp_path):
         def run(self, command, *, accepted_returncodes=(0,)):
             calls.append(("ssh", command, accepted_returncodes))
             selected = next(name for name in responses if command.endswith(name))
-            return json.dumps({"schema_version": "resident_fixed_cycle_control.v2",
+            return json.dumps({"schema_version": "resident_fixed_cycle_control.v3",
                                "ok": True, "command": selected,
                                "status": responses[selected], "error": None})
 
@@ -160,11 +228,13 @@ def test_ssh_operations_start_once_and_use_only_local_cycle_control(tmp_path):
     operations.release(terminal_disarmed=True)
 
     assert start.stage == "FOLLOW_DIG"
+    assert start.mission_profile == "regime_factorized"
     assert status.stage == "ACT_DIG"
     assert cancelled.terminal is True
     ssh_commands = [entry[1] for entry in calls if entry[0] == "ssh"]
     assert any("resident_fixed_cycle_control" in command for command in ssh_commands)
-    assert any("--run-id run-001 --cycles 3 --first-dig-point-id dig_02 start" in command
+    assert any("--run-id run-001 --cycles 3 --first-dig-point-id dig_02 "
+               "--dig-group-id all start" in command
                for command in ssh_commands)
     assert not any("18083" in command or "Plan" in command for command in ssh_commands)
     assert any(update is not None for update in trajectory_updates)
@@ -188,7 +258,7 @@ def test_ssh_operations_accept_real_guided_posix_path_fields(tmp_path):
             commands.append(command)
             return json.dumps(
                 {
-                    "schema_version": "resident_fixed_cycle_control.v2",
+                    "schema_version": "resident_fixed_cycle_control.v3",
                     "ok": True,
                     "command": "start",
                     "status": _status("FOLLOW_DIG"),
@@ -215,7 +285,7 @@ def test_ssh_operations_accept_real_guided_posix_path_fields(tmp_path):
 
 def test_commissioning_owner_command_forwards_flat_exact_authorization(tmp_path):
     config = ResidentFixedCyclePcConfig.load(
-        _write_config(
+        _write_grouped_cycle_config(
             tmp_path,
             commissioning_authorization="ALLOW_V3A_FIXED_TRAJECTORY_COMMISSIONING",
         )
@@ -248,6 +318,16 @@ def test_commissioning_owner_command_forwards_flat_exact_authorization(tmp_path)
     )
 
     processes._start_owner()
+
+    expected_catalog = (
+        Path(__file__).resolve().parents[2]
+        / "AiryLidar/mission/config/excavation_dig_point_catalog.v1.json"
+    )
+    expected_digest = hashlib.sha256(
+        expected_catalog.read_bytes()
+    ).hexdigest()
+    assert "--expected-dig-catalog-sha256" in commands[0]
+    assert expected_digest in commands[0]
 
     assert len(commands) == 1
     assert (
@@ -352,6 +432,74 @@ def test_remote_process_lifecycle_starts_once_and_releases_owned_devices(tmp_pat
     assert str(stopped[1]["serial_path"]) == "/dev/video0"
 
 
+def test_full_cycle_act_worker_receives_explicit_parallel_assets(tmp_path):
+    config = ResidentFixedCyclePcConfig.load(_write_full_cycle_config(tmp_path))
+    commands = []
+
+    class Host:
+        def argv(self, command):
+            commands.append(command)
+            return ["ssh", "orin", command]
+
+    class Process:
+        returncode = None
+
+        def wait_for(self, predicate, _timeout):
+            for line in (
+                "RESIDENT_ACT_PID=654",
+                "ACT resident worker ready: connected",
+            ):
+                if predicate(line):
+                    return 0, line
+            raise AssertionError("readiness predicate did not match")
+
+    processes = ResidentFixedCycleProcesses(
+        config,
+        guided_config=_guided(),
+        remote_host=Host(),
+        line_process_factory=lambda *_args, **_kwargs: Process(),
+    )
+
+    processes._start_act_worker()
+
+    command = commands[0]
+    assert "ACT_RUNTIME_CONFIG_PATH=" in command
+    assert "ACT_CHECKPOINT_HOST_PATH=" in command
+    assert "ACT_DEPLOYMENT_HOST_PATH=" in command
+
+
+def test_operations_reject_owner_plan_with_wrong_mission_profile(tmp_path):
+    config = ResidentFixedCyclePcConfig.load(_write_full_cycle_config(tmp_path))
+
+    class Processes:
+        def start(self):
+            return None
+
+    class Host:
+        def run(self, _command, *, accepted_returncodes=(0,)):
+            return json.dumps(
+                {
+                    "schema_version": "resident_fixed_cycle_control.v3",
+                    "ok": True,
+                    "command": "start",
+                    "status": _status("FOLLOW_DIG"),
+                    "error": None,
+                }
+            )
+
+    operations = SshResidentFixedCycleOperations(
+        config,
+        guided_config=_guided(),
+        processes=Processes(),
+        remote_host=Host(),
+    )
+
+    with pytest.raises(RuntimeError, match="mission_profile"):
+        operations.start(
+            run_id="run-profile-mismatch",
+            requested_cycles=1,
+            first_dig_point_id="dig_01",
+        )
 def test_process_start_failure_cleans_owner_and_reports_cleanup_error(tmp_path):
     config = ResidentFixedCyclePcConfig.load(_write_config(tmp_path))
     messages = []
@@ -419,27 +567,38 @@ def test_process_require_running_and_wait_fail_closed(tmp_path):
 def test_supervisor_maps_complete_local_cycle_to_existing_ui_snapshot():
     operations = _ScriptedOperations(
         [
-            _remote_status("FOLLOW_DIG", completed=0),
-            _remote_status("ACT_DIG", completed=0),
-            _remote_status("FOLLOW_DUMP", completed=0),
-            _remote_status("EXECUTE_DUMP", completed=0),
-            _remote_status("FOLLOW_DIG", completed=2),
+            _remote_status("FOLLOW_DIG", completed=0, group="near"),
+            _remote_status("ACT_DIG", completed=0, group="near"),
+            _remote_status("FOLLOW_DUMP", completed=0, group="near"),
+            _remote_status("EXECUTE_DUMP", completed=0, group="near"),
+            _remote_status("FOLLOW_DIG", completed=2, group="near"),
             _remote_status(
-                "COMPLETED", completed=2, terminal=True, outcome="SUCCEEDED"
+                "COMPLETED",
+                completed=2,
+                terminal=True,
+                outcome="SUCCEEDED",
+                group="near",
             ),
         ]
     )
     supervisor = ResidentFixedCycleSupervisor(
         operations=operations,
-        dig_target_ids=("dig_01", "dig_02", "dig_03"),
+        dig_target_ids=("near_01", "near_02", "far_01", "far_02"),
+        dig_groups={
+            "all": ("near_01", "near_02", "far_01", "far_02"),
+            "near": ("near_01", "near_02"),
+            "far": ("far_01", "far_02"),
+        },
+        default_dig_group_id="all",
         poll_interval_s=0.02,
     )
 
     supervisor.start(
-        "dig_02",
+        "near_02",
         automatic=True,
         motion_authorization=REQUIRED_HYBRID_MOTION_AUTHORIZATION,
         cycle_count=2,
+        dig_group_id="near",
     )
     deadline = time.monotonic() + 1.0
     while supervisor.snapshot().stage != "completed" and time.monotonic() < deadline:
@@ -451,7 +610,8 @@ def test_supervisor_maps_complete_local_cycle_to_existing_ui_snapshot():
     assert snapshot.requested_cycles == 2
     assert snapshot.dig_target_id == "dig_02"
     assert snapshot.can_stop is False
-    assert operations.started == [(snapshot.run_id, 2, "dig_02")]
+    assert snapshot.dig_group_id == "near"
+    assert operations.started == [(snapshot.run_id, 2, "near_02", "near")]
     assert operations.released == [True]
 
 
@@ -500,6 +660,15 @@ def test_supervisor_records_v3a_status_and_finalizes_experiment_evidence():
     assert supervisor.snapshot().run_id == "v3a_evidence_001"
     assert requests[0].config_path == Path("/configs/resident-fixed.json")
     assert any(event == "resident_fixed_cycle_status" for event, _ in evidence.events)
+    status_events = [
+        payload
+        for event, payload in evidence.events
+        if event == "resident_fixed_cycle_status"
+    ]
+    assert all(
+        payload["mission_profile"] == "regime_factorized"
+        for payload in status_events
+    )
     assert evidence.finalizations[0][0] == "success"
     assert evidence.finalizations[0][1]["completed_cycles"] == 1
 
@@ -629,7 +798,7 @@ def test_supervisor_maps_local_dump_and_return_phases_to_existing_ui_contract():
         (
             json.dumps(
                 {
-                    "schema_version": "resident_fixed_cycle_control.v2",
+                    "schema_version": "resident_fixed_cycle_control.v3",
                     "ok": False,
                     "command": "status",
                     "status": None,
@@ -660,6 +829,7 @@ def _guided():
         rl_serial_port = Path("/dev/ttyTHS1")
         rl_serial_release_timeout_s = 8.0
         log_dir = Path("/tmp")
+        rl_airy_repo = Path(__file__).resolve().parents[2] / "AiryLidar"
 
     return Guided()
 
@@ -675,10 +845,12 @@ def _owner_ready_line(config):
 def _status(stage, *, terminal=False, outcome="", active_trajectory=None):
     return {
         "run_id": "run-001",
+        "mission_profile": "regime_factorized",
         "stage": stage,
         "requested_cycles": 3,
         "completed_cycles": 0,
         "current_dig_point_id": "dig_02",
+        "dig_group_id": "all",
         "terminal": terminal,
         "outcome": outcome,
         "reason_code": "",
@@ -696,13 +868,15 @@ def _trajectory():
     }
 
 
-def _remote_status(stage, *, completed, terminal=False, outcome=""):
+def _remote_status(stage, *, completed, terminal=False, outcome="", group="all"):
     return ResidentFixedCycleRemoteStatus(
         run_id="run-local",
+        mission_profile="regime_factorized",
         stage=stage,
         requested_cycles=2,
         completed_cycles=completed,
         current_dig_point_id="dig_02",
+        dig_group_id=group,
         terminal=terminal,
         outcome=outcome,
         reason_code="",
@@ -715,8 +889,17 @@ class _ScriptedOperations:
         self.started = []
         self.released = []
 
-    def start(self, *, run_id, requested_cycles, first_dig_point_id):
-        self.started.append((run_id, requested_cycles, first_dig_point_id))
+    def start(
+        self,
+        *,
+        run_id,
+        requested_cycles,
+        first_dig_point_id,
+        dig_group_id="all",
+    ):
+        self.started.append(
+            (run_id, requested_cycles, first_dig_point_id, dig_group_id)
+        )
         return self.statuses.pop(0)
 
     def status(self):

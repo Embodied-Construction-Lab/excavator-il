@@ -62,6 +62,7 @@ class HybridMissionEvidenceLifecycle:
         automatic: bool,
         requested_cycles: int,
         dig_target_id: str,
+        dig_group_id: str = "all",
     ) -> None:
         self.record(
             "mission_started",
@@ -69,6 +70,7 @@ class HybridMissionEvidenceLifecycle:
                 "automatic": automatic,
                 "requested_cycles": requested_cycles,
                 "dig_target_id": dig_target_id,
+                "dig_group_id": dig_group_id,
             },
         )
         self.start_cycle(0)

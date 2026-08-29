@@ -166,15 +166,14 @@ python scripts/run_collection_ui.py
 
 浏览器默认打开 `http://127.0.0.1:8088/`。页面可选择：
 
-- `RL 到目标点`：从 AiryLidar `excavation_demo.json` 中选择 `dig_01/02/03`，再执行该点的
-  Plan → Follow；要求 `live_commissioning` Operator 已在 PC 运行；
+- `RL 到目标点`：从 AiryLidar 权威点位目录中选择当前配置的点，再执行该点的 Plan → Follow；要求
+  `live_commissioning` Operator 已在 PC 运行；
 - `手工预定位`：按住 deadman，用 X/Y 调整工作装置、Z1/Z2 调整左右履带，全部回中并释放后点击“完成手工预定位”；
 - `直接采集`：跳过定位，直接等待 Recorder 与 deadman；
 - `仅遥操作`：只启动 Collector 与 PC teleop，不创建 Episode、不占用编号、不写训练数据；按住
   deadman 可用 X/Y 控制工作装置、Z1/Z2 控制左右履带，释放即六轴回零，点击“安全停止”退出；
-- 每次点击“开始采集流程”只创建一条 Episode。操作者逐条填写
-  `task_variant / soil_reset_block_id / dig_point_id`，结束后点击“成功”“失败”或“重录”；页面不自动
-  连续采集、不显示或强制 200 条批次进度，也不依赖 campaign inspector 才允许启动下一条。
+- 每次点击“开始采集流程”只创建一条 Episode，结束后点击“成功”“失败”或“重录”；页面不要求
+  人工采集标签，不自动连续采集，也不显示或强制批次进度。
 - `scripts/inspect_collection_campaign.py` 保留为离线计划与审计工具；它不会被 WebUI 调用，也不会控制
   Collector、Episode 编号或运动生命周期。单条失败、断连或人工停止后，处理故障即可独立开始下一条。
 - `启动 RL + RViz`：从页面启动既有 AiryLidar `live_commissioning` Operator；不会复制规划、
@@ -194,29 +193,42 @@ python scripts/run_collection_ui.py
 原生 RViz 是 Qt 桌面程序，当前 Web UI 不嵌入 RViz/Foxglove，也不显示三维可视化占位。
 需要录制三维状态时，使用页面“启动 RL + RViz”打开的原生 RViz 窗口。
 
-### V3-A Orin 本地固定点闭环
+### V3-B Orin 本地目录驱动闭环
 
-默认 `config/collection_ui.pc.json` 已选择 V3-A：PC 只负责 WebUI、Experiment Run 证据以及
+默认 `config/collection_ui.pc.json` 已选择 V3-B 目录驱动链路：PC 只负责 WebUI、Experiment Run 证据以及
 start/cancel/400 ms supervisory heartbeat；`FollowDig → ACT Dig → FollowDump → ExecuteDump`
 和下一铲切换全部在 Orin 常驻 owner 内完成，不再发送 PC Behavior RPC 或在线 Plan 请求。PC/网络
 失联超过约 3 秒会触发 terminal-disarm，不能让无人监督的多铲任务继续。
 
-正式入口只接受 `deploy/v3a/field/fixed_cycle.field.json`。首次现场验收使用独立配置：
+当前挖掘点只由 AiryLidar
+`mission/config/excavation_dig_point_catalog.v1.json` 定义。点数和有序点集都不是代码常量；标准 UI
+命令直接使用该目录，不再保留按点数命名的运行配置。修改点位后运行：
+
+```bash
+python scripts/sync_v3b_dig_catalog.py --dry-run
+python scripts/sync_v3b_dig_catalog.py
+```
+
+第一条命令只校验并显示点位，不连接 Orin；第二条命令确认 Orin 运动资源空闲后，重新生成普通
+V3-B 与完整 ACT 两套候选部署，备份本地与 Orin 旧快照，同步并在 Orin 重新验签。之后重启 WebUI：
 
 ```bash
 python scripts/run_collection_ui.py \
-  --config config/collection_ui.v3a-commissioning.pc.json
+  --config config/collection_ui.pc.json
 ```
 
-commissioning 配置明确携带候选轨迹授权，普通配置没有该授权。先发动机关闭启动并安全停止，再在
-急停可用、作业区无人时执行 1 铲和覆盖三个 DIG 点的 3 铲验收；通过后按 Orin Runtime README
-填写 validation record 并显式晋升。未晋升前普通 UI 启动失败是预期的 fail-closed 行为。
-每次 V3-A Mission 会在 `EvaluationReport/experiment_runs` 记录策略、配置、仓库 commit、固定轨迹
-状态和终态结果。V2 已冻结于 `icra2027-v2-freeze-20260824`，仅用于回退。
+该入口引用 `deploy/v3b/catalog/candidate` 并显式携带 commissioning 授权。候选部署只包含一个
+带 SHA-256 的目标目录快照；每次 Follow 以实时铲尖为起点、目录终点为终点，动态生成圆弧中间点。
+修改点数或坐标后必须重新构建候选、同步 Orin，并在发动机关闭状态逐点验收，最后才能生成独立的
+field deployment；不需要修改代码或维护逐点轨迹 JSON。PC 启动 owner 时会把本地源目录 SHA-256
+交给 Orin 对账，若只改了 PC 配置而忘记重新构建/同步，系统会在打开运动链路前拒绝启动。
+每次 V3-B Mission 会在 `EvaluationReport/experiment_runs` 记录策略、配置、仓库 commit、目标目录
+状态和终态结果。V2/V3-A 只存在于 Git 历史和冻结标签中，不再进入当前默认运行路径。
 
-### V2 RL + ACT 混合 Mission（冻结备份）
+### V3-B Resident RL + ACT 混合 Mission
 
-同一个本地 UI 还提供一个与采集状态机互斥的混合 Mission Module。它不是在浏览器里直接拼接
+同一个本地 UI 提供一个与采集状态机互斥的目录驱动混合 Mission Module。旧 V2 三点 UI 入口已删除，
+只能通过 `resident_fixed_cycle_config` 与权威点位目录启动。它不是在浏览器里直接拼接
 shell，而是按固定状态机执行：
 
 ```text
@@ -244,7 +256,7 @@ Web UI 提供：
 - `开始分段验证`：每完成一段后停在明确的等待阶段，由操作者点击下一段；点击执行 ACT 段本身
   作为本地显式运动授权，页面自动发送固定授权值，不再要求手工输入口令；
 - `自动装车 1～9 铲`：选择铲数后点击一次即连续执行；以页面选中的 DIG 点为第一铲，后续按
-  Mission 配置顺序循环 `dig_01 → dig_02 → dig_03 → dig_01`。RL 返回阶段直接去下一铲点位，
+  页面选择的当前点集顺序循环；RL 返回阶段直接去下一铲点位，
   到达后从交接位姿开始 ACT，不额外增加一次策略冷启动；
 - `安全停止`：中断当前精确 owner，执行终态零并检查 `/dev/ttyTHS1` 释放。
 

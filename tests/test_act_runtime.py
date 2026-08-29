@@ -34,13 +34,16 @@ class _Policy:
         )
         self.selected_batches = []
         self.reset_count = 0
+        self.next_action = torch.tensor(
+            [0.1, -0.2, 0.3, -0.4], dtype=torch.float32
+        )
 
     def eval(self):
         return self
 
-    def select_action(self, batch):
+    def predict_action_chunk(self, batch):
         self.selected_batches.append(batch)
-        return torch.tensor([[0.1, -0.2, 0.3, -0.4]], dtype=torch.float32)
+        return self.next_action.reshape(1, 1, 4).repeat(1, 20, 1)
 
     def reset(self):
         self.reset_count += 1
@@ -74,8 +77,8 @@ def test_policy_session_converts_live_observation_and_uses_lerobot_select_action
 
 def test_policy_session_saturates_finite_checkpoint_output_before_control():
     policy = _Policy()
-    policy.select_action = lambda _batch: torch.tensor(
-        [[1.2, -1.024, 0.3, -0.4]], dtype=torch.float32
+    policy.next_action = torch.tensor(
+        [1.2, -1.024, 0.3, -0.4], dtype=torch.float32
     )
     session = ActPolicySession(
         policy=policy,
@@ -186,6 +189,7 @@ def test_lerobot_act_adapter_uses_both_named_rgb_roles_for_a_dual_camera_checkpo
     adapter.select_action(observation)
 
     batch = policy.selected_batches[-1]
+    assert adapter.camera_roles == ("front", "dump")
     assert set(batch) == {
         "observation.state",
         "observation.images.front",
@@ -506,12 +510,64 @@ def test_runtime_engine_selects_motion_without_pc_operator_callback():
     assert decision.reason == "motion_allowed"
 
 
+def test_runtime_engine_rejects_stale_dump_camera_for_dual_rgb_motion():
+    class _Session:
+        def __init__(self):
+            self.reset_count = 0
+
+        def select_action(self, _observation):
+            return (0.1, -0.2, 0.3, -0.4)
+
+        def reset(self):
+            self.reset_count += 1
+
+    session = _Session()
+    engine = ActRuntimeEngine(
+        session=session,
+        controller=ActRuntimeController(
+            mode=RuntimeMode.MOTION,
+            motion_authorization="ALLOW_ACT_MACHINE_MOTION",
+        ),
+        monotonic_ns=iter((1_005_000_000, 1_010_000_000)).__next__,
+    )
+
+    decision = engine.step(
+        observation=ActObservation(
+            state=(0.0,) * 11,
+            front_rgb=np.zeros((2, 3, 3), dtype=np.uint8),
+            state_monotonic_ns=1_000_000_000,
+            camera_monotonic_ns=990_000_000,
+            extra_rgb_by_role={
+                "dump": np.zeros((2, 3, 3), dtype=np.uint8),
+            },
+            extra_camera_monotonic_ns_by_role={"dump": 800_000_000},
+        ),
+        telemetry={
+            "control_enabled": 1,
+            "estop": 0,
+            "fault_flags": 0,
+            "rs485_ok": 1,
+            "dwj_ok": 1,
+            "imu_ok": 1,
+        },
+    )
+
+    assert decision.commanded_action == (0.0, 0.0, 0.0, 0.0)
+    assert decision.serial_axes == (0.0,) * 6
+    assert decision.reason == "camera_stale"
+    assert session.reset_count == 1
+
+
 @pytest.mark.parametrize(
     ("overrides", "reason"),
     [
         ({"motion_authorization": "wrong"}, "motion_unauthorized"),
         ({"state_monotonic_ns": 800_000_000}, "state_stale"),
         ({"camera_monotonic_ns": 800_000_000}, "camera_stale"),
+        (
+            {"extra_camera_monotonic_ns_by_role": {"dump": 1_020_000_000}},
+            "future_timestamp",
+        ),
         ({"telemetry": {"control_enabled": 0}}, "safety_state_invalid"),
         ({"telemetry": {"estop": 1}}, "safety_state_invalid"),
         ({"telemetry": {"fault_flags": 1}}, "safety_state_invalid"),

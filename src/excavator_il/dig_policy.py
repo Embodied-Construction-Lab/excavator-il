@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 ACTION_ORDER = ("boom", "stick", "bucket", "swing")
 OUTPUT_SEMANTICS = "manual_action_normalized"
+MAX_TOLERATED_NORMALIZED_MAGNITUDE = 1.25
 
 
 @dataclass(frozen=True)
@@ -151,6 +152,20 @@ class _CheckedDigPolicy:
     def reset(self) -> None:
         self._adapter.reset()
 
+    def consume_new_action_chunk(
+        self,
+    ) -> tuple[tuple[float, float, float, float], ...] | None:
+        consume = getattr(self._adapter, "consume_new_action_chunk", None)
+        if not callable(consume):
+            return None
+        raw = consume()
+        if raw is None:
+            return None
+        chunk = tuple(saturate_normalized_action(action) for action in raw)
+        if len(chunk) != 10:
+            raise ValueError("dig policy execution chunk must contain ten actions")
+        return chunk
+
 
 class DigPolicyFactory:
     """Strict backend selection without policy conditionals in Mission code."""
@@ -184,7 +199,7 @@ class DigPolicyFactory:
 
 
 def saturate_normalized_action(values: Any) -> tuple[float, float, float, float]:
-    """Validate one manual action and saturate every finite axis to [-1, 1]."""
+    """Clamp small numeric overshoot while rejecting gross policy outliers."""
 
     try:
         raw = tuple(values)
@@ -194,5 +209,7 @@ def saturate_normalized_action(values: Any) -> tuple[float, float, float, float]
         raise ValueError("dig policy must return a normalized manual action")
     converted = tuple(float(value) for value in raw)
     if not all(math.isfinite(value) for value in converted):
+        raise ValueError("dig policy must return a normalized manual action")
+    if any(abs(value) > MAX_TOLERATED_NORMALIZED_MAGNITUDE for value in converted):
         raise ValueError("dig policy must return a normalized manual action")
     return tuple(max(-1.0, min(1.0, value)) for value in converted)  # type: ignore[return-value]

@@ -77,6 +77,7 @@ def _arm_parent_death_interrupt() -> threading.Thread | None:
 class HybridMissionSnapshot:
     stage: str = "idle"
     dig_target_id: str = ""
+    dig_group_id: str = "all"
     automatic: bool = False
     next_segment: str = ""
     error: str = ""
@@ -353,7 +354,10 @@ class HybridMissionSupervisor:
         automatic: bool,
         motion_authorization: str | None,
         cycle_count: int = 1,
+        dig_group_id: str = "all",
     ) -> None:
+        if dig_group_id != "all":
+            raise ValueError("legacy hybrid Mission only supports dig group all")
         if not isinstance(dig_target_id, str) or not dig_target_id.strip():
             raise ValueError("dig_target_id must be non-empty")
         if not isinstance(automatic, bool):

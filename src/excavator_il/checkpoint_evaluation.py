@@ -19,6 +19,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies import get_policy_class, make_pre_post_processors
 
 from .act_smoke import _validate_excavator_act_contract
+from .dig_policy import MAX_TOLERATED_NORMALIZED_MAGNITUDE
 from .lerobot_conversion import STATE_FIELDS
 from .raw_episode import ACTION_FIELDS
 from .training_split import MATERIALIZED_SPLIT_SCHEMA_VERSION, _dataset_fingerprint
@@ -34,6 +35,8 @@ class CheckpointValidationMetric:
     action_max: float
     all_finite: bool
     out_of_range_sample_count: int
+    gross_out_of_range_sample_count: int = 0
+    saturated_value_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -104,6 +107,8 @@ def _score_runtime_selected_actions(
     action_min = float("inf")
     action_max = float("-inf")
     out_of_range_sample_count = 0
+    gross_out_of_range_sample_count = 0
+    saturated_value_count = 0
     all_finite = True
     with torch.no_grad():
         for frame_index in range(dataset.num_frames):
@@ -129,12 +134,24 @@ def _score_runtime_selected_actions(
             in_range = bool(
                 ((predicted >= -1.000001) & (predicted <= 1.000001)).all().item()
             )
+            within_tolerance = bool(
+                (
+                    torch.abs(predicted)
+                    <= MAX_TOLERATED_NORMALIZED_MAGNITUDE
+                ).all().item()
+            )
             if finite:
                 action_min = min(action_min, float(predicted.min().item()))
                 action_max = max(action_max, float(predicted.max().item()))
             all_finite = all_finite and finite
             if not finite or not in_range:
                 out_of_range_sample_count += 1
+            if finite:
+                saturated_value_count += int(
+                    (torch.abs(predicted) > 1.000001).sum().item()
+                )
+                if not within_tolerance:
+                    gross_out_of_range_sample_count += 1
     if valid_value_count == 0:
         raise ValueError("validation dataset contains no valid ACT action labels")
     return {
@@ -144,6 +161,8 @@ def _score_runtime_selected_actions(
         "action_max": action_max,
         "all_finite": all_finite,
         "out_of_range_sample_count": out_of_range_sample_count,
+        "gross_out_of_range_sample_count": gross_out_of_range_sample_count,
+        "saturated_value_count": saturated_value_count,
         "reset_count": reset_count,
     }
 
@@ -195,7 +214,7 @@ def write_act_deployment_manifest(
     if (
         metric is None
         or not metric.all_finite
-        or metric.out_of_range_sample_count != 0
+        or not _metric_is_deployable(metric)
         or not math.isfinite(metric.deployment_prior_l1)
     ):
         raise ValueError("selected checkpoint does not have a safe evaluation metric")
@@ -253,6 +272,21 @@ def write_act_deployment_manifest(
     current_hashes = _checkpoint_file_hashes(checkpoint)
     if current_hashes != dict(metric.checkpoint_files_sha256):
         raise ValueError("checkpoint changed since checkpoint evaluation")
+    input_features = policy_config.get("input_features", {})
+    contract = {
+        "action_order": list(ACT_ACTION_ORDER),
+        "action_fields": list(ACTION_FIELDS),
+        "state_fields": list(STATE_FIELDS),
+        "state_dim": len(STATE_FIELDS),
+        "action_dim": len(ACTION_FIELDS),
+        "front_rgb_chw": input_features["observation.images.front"]["shape"],
+        "chunk_size": policy_config.get("chunk_size"),
+        "n_action_steps": policy_config.get("n_action_steps"),
+        "input_feature_keys": sorted(input_features),
+        "temporal_ensemble_coeff": policy_config.get("temporal_ensemble_coeff"),
+    }
+    if "observation.images.dump" in input_features:
+        contract["dump_rgb_chw"] = input_features["observation.images.dump"]["shape"]
     manifest = {
         "schema_version": DEPLOYMENT_MANIFEST_SCHEMA_VERSION,
         "checkpoint": {
@@ -268,6 +302,13 @@ def write_act_deployment_manifest(
             "action_max": metric.action_max,
             "all_finite": metric.all_finite,
             "out_of_range_sample_count": metric.out_of_range_sample_count,
+            "gross_out_of_range_sample_count": (
+                metric.gross_out_of_range_sample_count
+            ),
+            "saturated_value_count": metric.saturated_value_count,
+            "max_tolerated_normalized_magnitude": (
+                MAX_TOLERATED_NORMALIZED_MAGNITUDE
+            ),
             "max_deployment_prior_l1": max_deployment_prior_l1,
         },
         "data": {
@@ -278,22 +319,7 @@ def write_act_deployment_manifest(
             "validation_dataset_sha256": provenance.get("validation_dataset_sha256"),
             "source_dataset_sha256": provenance.get("source_dataset_sha256"),
         },
-        "contract": {
-            "action_order": list(ACT_ACTION_ORDER),
-            "action_fields": list(ACTION_FIELDS),
-            "state_fields": list(STATE_FIELDS),
-            "state_dim": len(STATE_FIELDS),
-            "action_dim": len(ACTION_FIELDS),
-            "front_rgb_chw": policy_config["input_features"][
-                "observation.images.front"
-            ]["shape"],
-            "chunk_size": policy_config.get("chunk_size"),
-            "n_action_steps": policy_config.get("n_action_steps"),
-            "input_feature_keys": sorted(policy_config.get("input_features", {})),
-            "temporal_ensemble_coeff": policy_config.get(
-                "temporal_ensemble_coeff"
-            ),
-        },
+        "contract": contract,
         "machine_profile_sha256": _sha256_file(profile_path),
     }
     destination = Path(output_path).resolve()
@@ -361,6 +387,22 @@ def _evaluate_checkpoint(
         action_max=float(replay_metrics["action_max"]),
         all_finite=bool(replay_metrics["all_finite"]),
         out_of_range_sample_count=int(replay_metrics["out_of_range_sample_count"]),
+        gross_out_of_range_sample_count=int(
+            replay_metrics["gross_out_of_range_sample_count"]
+        ),
+        saturated_value_count=int(replay_metrics["saturated_value_count"]),
+    )
+
+
+def _metric_is_deployable(metric: CheckpointValidationMetric) -> bool:
+    return (
+        metric.all_finite
+        and metric.gross_out_of_range_sample_count == 0
+        and math.isfinite(metric.deployment_prior_l1)
+        and math.isfinite(metric.action_min)
+        and math.isfinite(metric.action_max)
+        and metric.action_min >= -MAX_TOLERATED_NORMALIZED_MAGNITUDE
+        and metric.action_max <= MAX_TOLERATED_NORMALIZED_MAGNITUDE
     )
 
 
@@ -438,11 +480,7 @@ def evaluate_act_checkpoints(
     safe = [
         metric
         for metric in metrics
-        if metric.all_finite
-        and metric.out_of_range_sample_count == 0
-        and math.isfinite(metric.deployment_prior_l1)
-        and math.isfinite(metric.action_min)
-        and math.isfinite(metric.action_max)
+        if _metric_is_deployable(metric)
     ]
     selected = min(safe, key=lambda metric: metric.deployment_prior_l1) if safe else None
     return CheckpointEvaluationResult(
@@ -450,7 +488,7 @@ def evaluate_act_checkpoints(
         selection_reason=(
             "lowest safe validation deployment-prior L1"
             if selected is not None
-            else "no checkpoint passed finite-action and normalized-range gates"
+            else "no checkpoint passed finite-action and bounded-saturation gates"
         ),
         checkpoints=metrics,
         split_root=root,

@@ -19,6 +19,26 @@ from excavator_il.training_split import (
 )
 
 
+def test_checkpoint_gate_accepts_only_small_finite_overshoot():
+    metric = checkpoint_evaluation.CheckpointValidationMetric(
+        checkpoint_path=checkpoint_evaluation.Path("checkpoint"),
+        checkpoint_files_sha256=(("model.safetensors", "a" * 64),),
+        validation_frame_count=10,
+        deployment_prior_l1=0.1,
+        action_min=-1.024,
+        action_max=1.03,
+        all_finite=True,
+        out_of_range_sample_count=2,
+        gross_out_of_range_sample_count=0,
+        saturated_value_count=3,
+    )
+
+    assert checkpoint_evaluation._metric_is_deployable(metric)
+    assert not checkpoint_evaluation._metric_is_deployable(
+        replace(metric, gross_out_of_range_sample_count=1)
+    )
+
+
 def _write_checkpoint(
     checkpoint,
     dataset,

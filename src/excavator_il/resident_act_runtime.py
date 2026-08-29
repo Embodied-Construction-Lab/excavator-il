@@ -7,16 +7,14 @@ Unix stream and keeps the policy and camera alive across policy handoffs.
 
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass
 import logging
 import math
 import os
 import signal
-import sys
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from lerobot.policies import get_policy_class, make_pre_post_processors
 
@@ -52,6 +50,7 @@ from ._resident_act_observation import (
     safety_telemetry as _safety_telemetry,
     state_permits_act_motion as _state_permits_act_motion,
 )
+from ._resident_act_cli import run_cli as _run_cli
 
 
 _ZERO_ACTION = (0.0, 0.0, 0.0, 0.0)
@@ -146,6 +145,7 @@ class ResidentActRuntime:
         transport: Any,
         engine: Any,
         candidate_ttl_ms: float = _DEFAULT_CANDIDATE_TTL_MS,
+        camera_roles: tuple[str, ...] = ("front",),
         camera_buffer_capacity: int = 8,
         status_callback: Callable[[ResidentActStatus], None] | None = None,
         telemetry_preview: LatestTelemetryFrame | None = None,
@@ -170,6 +170,7 @@ class ResidentActRuntime:
         self._candidate_ttl_ns = int(float(candidate_ttl_ms) * 1_000_000)
         self._clock = monotonic_ns
         self._observations = ResidentCausalObservationBuffer(
+            camera_roles=camera_roles,
             capacity=camera_buffer_capacity
         )
         self._last_control_generation: int | None = None
@@ -193,8 +194,13 @@ class ResidentActRuntime:
     def transport(self) -> Any:
         return self._transport
 
-    def add_camera_frame(self, frame: RgbCameraFrame) -> None:
-        self._observations.add_camera(frame)
+    def add_camera_frame(
+        self,
+        frame: RgbCameraFrame,
+        *,
+        role: str = "front",
+    ) -> None:
+        self._observations.add_camera(frame, role=role)
 
     def wait_camera_ready(self, timeout_s: float) -> bool:
         if timeout_s <= 0:
@@ -281,6 +287,7 @@ class ResidentActRuntime:
             action,
             str(decision.reason),
             inference_performed=True,
+            action_chunk=decision.predicted_action_chunk,
         )
         self._record_completed_step(str(decision.reason))
         return step
@@ -295,6 +302,7 @@ class ResidentActRuntime:
         reason: str,
         *,
         inference_performed: bool = False,
+        action_chunk: tuple[tuple[float, float, float, float], ...] | None = None,
     ) -> ResidentActStep:
         completed_ns = self._clock()
         candidate = ResidentPolicyCandidate(
@@ -304,6 +312,7 @@ class ResidentActRuntime:
             action=action,
             created_monotonic_ns=completed_ns,
             valid_until_monotonic_ns=completed_ns + self._candidate_ttl_ns,
+            action_chunk=action_chunk,
         )
         self._transport.send_candidate(candidate)
         step = ResidentActStep(
@@ -430,8 +439,9 @@ class ResidentActWorker:
         self,
         *,
         runtime: ResidentActRuntime,
-        camera: Any,
         warmup: Callable[[], Any],
+        camera: Any | None = None,
+        cameras: Mapping[str, Any] | None = None,
         camera_preview: LatestJpegFrame | None = None,
         preview_server: MjpegPreviewServer | None = None,
         connect_timeout_s: float = 5.0,
@@ -441,9 +451,17 @@ class ResidentActWorker:
             raise ValueError("resident ACT warmup must be callable")
         if connect_timeout_s <= 0 or camera_ready_timeout_s <= 0:
             raise ValueError("resident ACT startup timeouts must be positive")
+        if (camera is None) == (cameras is None):
+            raise ValueError("provide exactly one of camera or cameras")
+        resolved_cameras = {"front": camera} if cameras is None else dict(cameras)
+        roles = tuple(resolved_cameras)
+        if roles not in (("front",), ("front", "dump")):
+            raise ValueError("resident ACT cameras must be ordered front or front,dump")
+        if any(item is None for item in resolved_cameras.values()):
+            raise ValueError("resident ACT cameras must not contain null devices")
         self._runtime = runtime
         self._transport = runtime.transport
-        self._camera = camera
+        self._cameras = resolved_cameras
         self._warmup = warmup
         self._camera_preview = camera_preview
         self._preview_server = preview_server
@@ -479,7 +497,7 @@ class ResidentActWorker:
         self._transport.close()
 
     def run(self) -> None:
-        camera_thread: threading.Thread | None = None
+        camera_threads: list[threading.Thread] = []
         reader_thread: threading.Thread | None = None
         preview_thread: threading.Thread | None = None
         raised: BaseException | None = None
@@ -497,13 +515,15 @@ class ResidentActWorker:
             _emit_lifecycle("ACT resident warmup passed")
             if self.error is not None:
                 raise RuntimeError("resident ACT preview failed") from self.error
-            camera_thread = threading.Thread(
-                target=self._guarded_worker,
-                args=(self._camera_loop,),
-                name="resident-act-camera",
-                daemon=True,
-            )
-            camera_thread.start()
+            for role, camera in self._cameras.items():
+                camera_thread = threading.Thread(
+                    target=self._guarded_worker,
+                    args=(lambda role=role, camera=camera: self._camera_loop(role, camera),),
+                    name=f"resident-act-camera-{role}",
+                    daemon=True,
+                )
+                camera_thread.start()
+                camera_threads.append(camera_thread)
             if not self._runtime.wait_camera_ready(self._camera_ready_timeout_s):
                 raise RuntimeError("resident ACT camera did not become ready")
 
@@ -542,8 +562,9 @@ class ResidentActWorker:
             self._transport.close()
             if self._preview_server is not None:
                 self._preview_server.close()
-            self._camera.close()
-            for thread in (reader_thread, camera_thread, preview_thread):
+            for camera in self._cameras.values():
+                camera.close()
+            for thread in (reader_thread, *camera_threads, preview_thread):
                 if thread is not None and thread is not threading.current_thread():
                     thread.join(timeout=1.0)
             self._runtime.handle_disconnect()
@@ -551,11 +572,15 @@ class ResidentActWorker:
         if raised is not None:
             raise raised
 
-    def _camera_loop(self) -> None:
+    def _camera_loop(self, role: str, camera: Any) -> None:
         while not self._stop.is_set():
-            frame = self._camera.read_rgb()
-            self._runtime.add_camera_frame(frame)
-            if self._camera_preview is not None and frame.encoded_image is not None:
+            frame = camera.read_rgb()
+            self._runtime.add_camera_frame(frame, role=role)
+            if (
+                role == "front"
+                and self._camera_preview is not None
+                and frame.encoded_image is not None
+            ):
                 self._camera_preview.publish(
                     frame.encoded_image,
                     capture_monotonic_ns=frame.capture_monotonic_ns,
@@ -603,9 +628,12 @@ def build_resident_act_worker(
     dig_policy_provider: Callable[[Any], DigPolicyFactory] | None = None,
     commissioned_lerobot_act_loader: Callable[[Any], Any] | None = None,
 ) -> ResidentActWorker:
-    """Load one verified ACT model and open one camera for resident operation."""
+    """Load one verified policy and open its configured resident RGB views."""
 
     config = load_act_runtime_config(config_path)
+    configured_cameras = (
+        config.cameras if hasattr(config, "cameras") else {"front": config.camera}
+    )
     observation_config = (
         None
         if operator_observation_config is None
@@ -617,18 +645,33 @@ def build_resident_act_worker(
         # into the ACT container under config.camera.device (normally
         # /dev/video0).  Device strings therefore belong to different device
         # namespaces and are not part of the observation contract.
-        camera_format = (
-            observation_config.camera.width,
-            observation_config.camera.height,
-            observation_config.camera.nominal_fps,
+        observation_cameras = (
+            observation_config.cameras
+            if hasattr(observation_config, "cameras")
+            else {"front": observation_config.camera}
         )
-        expected_format = (
-            config.camera.width,
-            config.camera.height,
-            config.camera.nominal_fps,
-        )
-        if camera_format != expected_format:
-            raise ValueError("ACT and operator observation camera formats must match")
+        missing_roles = set(configured_cameras) - set(observation_cameras)
+        if missing_roles:
+            raise ValueError(
+                "operator observation config is missing ACT camera roles: "
+                f"{sorted(missing_roles)}"
+            )
+        for role, expected_camera in configured_cameras.items():
+            operator_camera = observation_cameras[role]
+            camera_format = (
+                operator_camera.width,
+                operator_camera.height,
+                operator_camera.nominal_fps,
+            )
+            expected_format = (
+                expected_camera.width,
+                expected_camera.height,
+                expected_camera.nominal_fps,
+            )
+            if camera_format != expected_format:
+                raise ValueError(
+                    "ACT and operator observation camera formats must match"
+                )
         if observation_config.camera_preview is None:
             raise ValueError("operator observation config must enable camera preview")
         if any(item is not None for item in (camera_preview, telemetry_preview, preview_server)):
@@ -653,6 +696,13 @@ def build_resident_act_worker(
     if not isinstance(policy_factory, DigPolicyFactory):
         raise ValueError("dig policy provider must return DigPolicyFactory")
     session = policy_factory.create(backend_id)
+    policy_camera_roles = getattr(session, "camera_roles", None)
+    if policy_camera_roles is not None and tuple(policy_camera_roles) != tuple(
+        configured_cameras
+    ):
+        raise ValueError(
+            "ACT runtime camera roles must exactly match the checkpoint inputs"
+        )
     controller = ActRuntimeController(
         mode=RuntimeMode.MOTION,
         motion_authorization=REQUIRED_MOTION_AUTHORIZATION,
@@ -665,19 +715,33 @@ def build_resident_act_worker(
         max_inference_ms=config.max_inference_ms,
     )
     transport = ResidentActDataClient(socket_path)
-    camera = UvcCamera(
-        CameraConfig(
-            device=config.camera.device,
-            width=config.camera.width,
-            height=config.camera.height,
-            nominal_fps=config.camera.nominal_fps,
-            jpeg_quality=(
-                95
+    cameras: dict[str, UvcCamera] = {}
+    try:
+        for role, camera_config in configured_cameras.items():
+            operator_camera = (
+                None
                 if observation_config is None
-                else observation_config.camera.jpeg_quality
-            ),
-        )
-    )
+                else (
+                    observation_config.cameras
+                    if hasattr(observation_config, "cameras")
+                    else {"front": observation_config.camera}
+                )[role]
+            )
+            cameras[role] = UvcCamera(
+                CameraConfig(
+                    device=camera_config.device,
+                    width=camera_config.width,
+                    height=camera_config.height,
+                    nominal_fps=camera_config.nominal_fps,
+                    jpeg_quality=(
+                        95 if operator_camera is None else operator_camera.jpeg_quality
+                    ),
+                )
+            )
+    except BaseException:
+        for opened_camera in cameras.values():
+            opened_camera.close()
+        raise
     if observation_config is not None:
         try:
             camera_preview = LatestJpegFrame()
@@ -690,17 +754,19 @@ def build_resident_act_worker(
                 allowed_client_host=observation_config.joystick.allowed_pc_host,
             )
         except BaseException:
-            camera.close()
+            for opened_camera in cameras.values():
+                opened_camera.close()
             raise
     runtime = ResidentActRuntime(
         transport=transport,
         engine=engine,
         status_callback=status_callback,
         telemetry_preview=telemetry_preview,
+        camera_roles=tuple(configured_cameras),
     )
     return ResidentActWorker(
         runtime=runtime,
-        camera=camera,
+        cameras=cameras,
         warmup=lambda: warmup_act_policy_session(session),
         camera_preview=camera_preview,
         preview_server=preview_server,
@@ -726,36 +792,11 @@ def run_resident_act_worker(
 def main(argv: list[str] | None = None) -> int:
     """Minimal module CLI; the existing project CLI can delegate here later."""
 
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(line_buffering=True, write_through=True)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stdout,
+    return _run_cli(
+        argv,
+        build_worker=build_resident_act_worker,
+        signal_module=signal,
     )
-    parser = argparse.ArgumentParser(description="Run the resident ACT policy worker")
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--socket-path", required=True)
-    parser.add_argument("--operator-observation-config")
-    args = parser.parse_args(argv)
-    worker = build_resident_act_worker(
-        args.config,
-        socket_path=args.socket_path,
-        operator_observation_config=args.operator_observation_config,
-    )
-    previous: dict[int, Any] = {}
-
-    def stop(_signum: int, _frame: Any) -> None:
-        worker.request_stop()
-
-    try:
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            previous[signum] = signal.signal(signum, stop)
-        worker.run()
-    finally:
-        for signum, handler in previous.items():
-            signal.signal(signum, handler)
-    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised through the module CLI

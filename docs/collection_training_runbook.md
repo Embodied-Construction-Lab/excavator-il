@@ -382,8 +382,9 @@ python scripts/run_collection_ui.py --no-browser
 ```
 
 访问 `http://127.0.0.1:8088/`，选择 `RL 到目标点`、`手工预定位`、`直接采集` 或`仅遥操作`后点击开始。RL
-模式还必须选择 `dig_01/02/03` 中的一个点；点位来自
-`AiryLidar/mission/config/excavation_demo.json`，所选坐标会写入本条 Episode 的 `dig_target_m`。
+模式必须选择权威点位目录中的一个点。目录来自
+`AiryLidar/mission/config/excavation_dig_point_catalog.v1.json`，所选坐标只用于本次预定位，不要求
+操作者再填写采集标签。
 RL 模式仍要求先按 3.1 启动 AiryLidar Operator。手工模式完成预定位后必须六轴全部回中、释放 deadman，
 再点击页面中的完成按钮。正式记录仍由 deadman 按下开始、释放结束；页面只替代终端中的结果输入。
 每条校验完成后可直接开始下一条，页面计数用于跟踪本次 UI 会话内完成数量；正式批次仍以 Orin
@@ -450,8 +451,8 @@ PC 每 0.4 秒续约一次 1.5 秒 Mission lease。Web UI/PC 退出或控制网�
 disarm、等待最终零命令 ACK 并释放串口；点击“安全停止”时先禁止新的续约，再执行相同终态路径。
 分段全部通过
 后才能使用“自动装车”。自动模式可选择 1～9 铲；页面选中的 DIG 点是第一铲，后续按 Mission
-配置中的 DIG 顺序循环。例如从 `dig_02` 开始的 5 铲依次为
-`dig_02 → dig_03 → dig_01 → dig_02 → dig_03`。RL 返回阶段直接去下一铲的交接位姿，并在途中
+所选点集中的顺序循环。例如近端组从 `dig_near_03` 开始的 5 铲依次为
+`dig_near_03 → dig_near_04 → dig_near_01 → dig_near_02 → dig_near_03`。RL 返回阶段直接去下一铲的交接位姿，并在途中
 保持常驻 ACT Worker ready；最后一铲仍返回该铲使用的挖点。任一阶段失败即停止，不会跳过故障
 继续下一铲。ACT step 上限集中在
 `config/hybrid_mission.pc.json`，不得通过页面临时随意扩大。该有界 step 规则只是当前实验的

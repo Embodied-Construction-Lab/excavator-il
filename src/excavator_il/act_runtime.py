@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from collections import deque
 from enum import Enum
 import math
@@ -67,6 +67,9 @@ class ActRuntimeDecision:
     commanded_action: tuple[float, ...]
     serial_axes: tuple[float, ...] | None
     reason: str
+    predicted_action_chunk: tuple[
+        tuple[float, float, float, float], ...
+    ] | None = None
 
 
 class CausalObservationBuffer:
@@ -145,6 +148,7 @@ class ActRuntimeController:
         camera_monotonic_ns: int,
         now_monotonic_ns: int,
         telemetry: Mapping[str, int | float | str],
+        extra_camera_monotonic_ns_by_role: Mapping[str, int] | None = None,
     ) -> ActRuntimeDecision:
         predicted = tuple(float(value) for value in predicted_action)
         if len(predicted) != len(ACTION_FIELDS) or not all(
@@ -161,11 +165,18 @@ class ActRuntimeController:
             )
         if not self._motion_authorized:
             return ActRuntimeDecision(predicted, _ZERO_ACTION, (0.0,) * 6, "motion_unauthorized")
-        if now_monotonic_ns < max(state_monotonic_ns, camera_monotonic_ns):
+        camera_timestamps = (
+            camera_monotonic_ns,
+            *(extra_camera_monotonic_ns_by_role or {}).values(),
+        )
+        if now_monotonic_ns < max(state_monotonic_ns, *camera_timestamps):
             return ActRuntimeDecision(predicted, _ZERO_ACTION, (0.0,) * 6, "future_timestamp")
         if now_monotonic_ns - state_monotonic_ns > self._max_state_age_ns:
             return ActRuntimeDecision(predicted, _ZERO_ACTION, (0.0,) * 6, "state_stale")
-        if now_monotonic_ns - camera_monotonic_ns > self._max_camera_age_ns:
+        if any(
+            now_monotonic_ns - timestamp > self._max_camera_age_ns
+            for timestamp in camera_timestamps
+        ):
             return ActRuntimeDecision(predicted, _ZERO_ACTION, (0.0,) * 6, "camera_stale")
         required_one = ("control_enabled", "rs485_ok", "dwj_ok", "imu_ok")
         if not all(int(telemetry.get(field, 0)) == 1 for field in required_one):
@@ -232,6 +243,8 @@ class ActRuntimeEngine:
                 reason="policy_error",
             )
         completed_ns = self._clock()
+        consume_chunk = getattr(self._session, "consume_new_action_chunk", None)
+        predicted_chunk = consume_chunk() if callable(consume_chunk) else None
         if completed_ns - started_ns > self._max_inference_ns:
             self._session.reset()
             return ActRuntimeDecision(
@@ -248,10 +261,14 @@ class ActRuntimeEngine:
             camera_monotonic_ns=observation.camera_monotonic_ns,
             now_monotonic_ns=completed_ns,
             telemetry=telemetry,
+            extra_camera_monotonic_ns_by_role=(
+                observation.extra_camera_monotonic_ns_by_role
+            ),
         )
         if decision.reason not in ("motion_allowed", "shadow_mode"):
             self._session.reset()
-        return decision
+            return decision
+        return replace(decision, predicted_action_chunk=predicted_chunk)
 
 
 def state_from_stm32_telemetry(
@@ -327,11 +344,14 @@ class LeRobotActDigPolicyAdapter:
         self._preprocessor = preprocessor
         self._postprocessor = postprocessor
         self._device = device
+        ordered_image_roles = tuple(
+            role for role in ("front", "dump") if role in image_roles
+        )
         self._image_shapes = {
             role: tuple(
                 policy.config.input_features[f"observation.images.{role}"].shape
             )
-            for role in sorted(image_roles)
+            for role in ordered_image_roles
         }
         self._descriptor = DigPolicyDescriptor(
             backend_id="lerobot_act",
@@ -339,13 +359,30 @@ class LeRobotActDigPolicyAdapter:
         )
         policy.eval()
         policy.reset()
+        self._action_queue: deque[tuple[float, float, float, float]] = deque()
+        self._new_action_chunk: tuple[
+            tuple[float, float, float, float], ...
+        ] | None = None
 
     @property
     def descriptor(self) -> DigPolicyDescriptor:
         return self._descriptor
 
+    @property
+    def camera_roles(self) -> tuple[str, ...]:
+        return tuple(self._image_shapes)
+
     def reset(self) -> None:
         self._policy.reset()
+        self._action_queue.clear()
+        self._new_action_chunk = None
+
+    def consume_new_action_chunk(
+        self,
+    ) -> tuple[tuple[float, float, float, float], ...] | None:
+        chunk = self._new_action_chunk
+        self._new_action_chunk = None
+        return chunk
 
     def select_action(
         self, observation: DigPolicyObservation | ActObservation
@@ -381,14 +418,27 @@ class LeRobotActDigPolicyAdapter:
                 .div_(255.0)
                 .unsqueeze(0)
             )
-        processed = self._preprocessor(batch)
-        with torch.no_grad():
-            action = self._postprocessor(self._policy.select_action(processed))
-        values = tuple(float(value) for value in action.detach().cpu().reshape(-1))
-        try:
-            return saturate_normalized_action(values)
-        except ValueError as exc:
-            raise ValueError("ACT runtime produced an invalid normalized action") from exc
+        if not self._action_queue:
+            processed = self._preprocessor(batch)
+            with torch.no_grad():
+                raw_chunk = self._policy.predict_action_chunk(processed)[
+                    :, : self._policy.config.n_action_steps
+                ]
+                processed_chunk = self._postprocessor(raw_chunk)
+            if tuple(processed_chunk.shape) != (1, 10, len(ACTION_FIELDS)):
+                raise ValueError("ACT runtime produced an invalid execution chunk")
+            try:
+                chunk = tuple(
+                    saturate_normalized_action(
+                        tuple(float(value) for value in action.detach().cpu().reshape(-1))
+                    )
+                    for action in processed_chunk[0]
+                )
+            except ValueError as exc:
+                raise ValueError("ACT runtime produced an invalid normalized action") from exc
+            self._action_queue.extend(chunk)
+            self._new_action_chunk = chunk
+        return self._action_queue.popleft()
 
     def warmup(self) -> tuple[float, ...]:
         observation = DigPolicyObservation(
