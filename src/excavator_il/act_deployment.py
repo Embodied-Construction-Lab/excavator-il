@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .checkpoint_evaluation import ACT_ACTION_ORDER, DEPLOYMENT_MANIFEST_SCHEMA_VERSION
+from .dig_policy import MAX_TOLERATED_NORMALIZED_MAGNITUDE
 from .lerobot_conversion import STATE_FIELDS
 from .raw_episode import ACTION_FIELDS
 
@@ -16,6 +17,7 @@ from .raw_episode import ACTION_FIELDS
 TRAINING_LOSS_DEPLOYMENT_MANIFEST_SCHEMA_VERSION = "excavator_act_deployment.v3"
 VALIDATION_SELECTION_REASON = "lowest safe validation deployment-prior L1"
 TRAINING_LOSS_SELECTION_REASON = "operator-authorized lowest saved training loss"
+FINAL_CHECKPOINT_SELECTION_REASON = "operator-authorized final training checkpoint"
 
 
 def verify_deployment_manifest(
@@ -50,10 +52,18 @@ def verify_deployment_manifest(
         if schema_version != DEPLOYMENT_MANIFEST_SCHEMA_VERSION:
             raise ValueError("ACT deployment manifest schema is invalid")
         _verify_validation_evaluation(evaluation)
-    elif selection_reason == TRAINING_LOSS_SELECTION_REASON:
+    elif selection_reason in {
+        TRAINING_LOSS_SELECTION_REASON,
+        FINAL_CHECKPOINT_SELECTION_REASON,
+    }:
         if schema_version != TRAINING_LOSS_DEPLOYMENT_MANIFEST_SCHEMA_VERSION:
             raise ValueError("ACT deployment manifest schema is invalid")
-        _verify_training_loss_selection(selection)
+        expected_method = (
+            "training_loss"
+            if selection_reason == TRAINING_LOSS_SELECTION_REASON
+            else "final_checkpoint"
+        )
+        _verify_training_selection(selection, expected_method=expected_method)
     else:
         raise ValueError("ACT deployment manifest selection reason is invalid")
 
@@ -73,18 +83,29 @@ def verify_deployment_manifest(
         raise ValueError("ACT deployment manifest action fields are invalid")
     if tuple(contract.get("state_fields", ())) != STATE_FIELDS:
         raise ValueError("ACT deployment manifest state fields are invalid")
+    input_feature_keys = contract.get("input_feature_keys")
+    allowed_input_feature_keys = (
+        ["observation.images.front", "observation.state"],
+        [
+            "observation.images.dump",
+            "observation.images.front",
+            "observation.state",
+        ],
+    )
+    if input_feature_keys not in allowed_input_feature_keys:
+        raise ValueError("ACT deployment manifest input_feature_keys is invalid")
     expected_contract = {
         "state_dim": len(STATE_FIELDS),
         "action_dim": len(ACTION_FIELDS),
         "front_rgb_chw": [3, 480, 640],
         "chunk_size": 20,
         "n_action_steps": 10,
-        "input_feature_keys": [
-            "observation.images.front",
-            "observation.state",
-        ],
         "temporal_ensemble_coeff": None,
     }
+    if "observation.images.dump" in input_feature_keys:
+        expected_contract["dump_rgb_chw"] = [3, 480, 640]
+    elif "dump_rgb_chw" in contract:
+        raise ValueError("ACT deployment manifest dump_rgb_chw is invalid")
     for field, expected in expected_contract.items():
         if contract.get(field) != expected:
             raise ValueError(f"ACT deployment manifest {field} is invalid")
@@ -110,7 +131,6 @@ def _verify_validation_evaluation(evaluation: Any) -> None:
         or not isinstance(evaluation.get("validation_frame_count"), int)
         or evaluation["validation_frame_count"] <= 0
         or evaluation.get("all_finite") is not True
-        or evaluation.get("out_of_range_sample_count") != 0
     ):
         raise ValueError("ACT deployment manifest evaluation is unsafe")
     try:
@@ -120,19 +140,51 @@ def _verify_validation_evaluation(evaluation: Any) -> None:
         max_l1 = float(evaluation["max_deployment_prior_l1"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("ACT deployment manifest evaluation is invalid") from exc
+    bounded_fields = {
+        "gross_out_of_range_sample_count",
+        "saturated_value_count",
+        "max_tolerated_normalized_magnitude",
+    }
+    has_bounded_contract = any(field in evaluation for field in bounded_fields)
+    if has_bounded_contract:
+        if not bounded_fields.issubset(evaluation):
+            raise ValueError("ACT deployment manifest evaluation is invalid")
+        gross_count = evaluation["gross_out_of_range_sample_count"]
+        saturated_count = evaluation["saturated_value_count"]
+        try:
+            tolerated_magnitude = float(
+                evaluation["max_tolerated_normalized_magnitude"]
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("ACT deployment manifest evaluation is invalid") from exc
+        if (
+            isinstance(gross_count, bool)
+            or not isinstance(gross_count, int)
+            or gross_count != 0
+            or isinstance(saturated_count, bool)
+            or not isinstance(saturated_count, int)
+            or saturated_count < 0
+            or tolerated_magnitude != MAX_TOLERATED_NORMALIZED_MAGNITUDE
+        ):
+            raise ValueError("ACT deployment manifest evaluation is unsafe")
+        action_limit = MAX_TOLERATED_NORMALIZED_MAGNITUDE
+    else:
+        if evaluation.get("out_of_range_sample_count") != 0:
+            raise ValueError("ACT deployment manifest evaluation is unsafe")
+        action_limit = 1.000001
     if (
         not all(math.isfinite(value) for value in (l1, action_min, action_max, max_l1))
         or l1 < 0
         or max_l1 < 0
         or l1 > max_l1
-        or action_min < -1.000001
-        or action_max > 1.000001
+        or action_min < -action_limit
+        or action_max > action_limit
         or action_min > action_max
     ):
         raise ValueError("ACT deployment manifest evaluation is unsafe")
 
 
-def _verify_training_loss_selection(selection: Any) -> None:
+def _verify_training_selection(selection: Any, *, expected_method: str) -> None:
     expected_fields = {
         "method",
         "checkpoint_step",
@@ -145,7 +197,7 @@ def _verify_training_loss_selection(selection: Any) -> None:
     step = selection.get("checkpoint_step")
     loss = selection.get("training_loss")
     if (
-        selection.get("method") != "training_loss"
+        selection.get("method") != expected_method
         or isinstance(step, bool)
         or not isinstance(step, int)
         or step <= 0

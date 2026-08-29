@@ -27,17 +27,33 @@ class AiryOperatorSupervisor:
         self,
         *,
         guided_config: GuidedEpisodeConfig,
-        behavior_port: int,
+        behavior_port: int | None,
+        profile: str = "live_commissioning",
+        trajectory_path: str | Path | None = None,
         line_process_factory: Callable[..., Any] = LineProcess,
         output: Callable[[str], None] = print,
         ready_timeout_s: int = 60,
     ) -> None:
-        if not 1 <= behavior_port <= 65535:
+        if profile not in {"live_commissioning", "live_shadow"}:
+            raise ValueError("unsupported AiryLidar Operator profile")
+        if profile == "live_commissioning" and (
+            behavior_port is None or not 1 <= behavior_port <= 65535
+        ):
             raise ValueError("behavior_port must be within [1, 65535]")
+        if profile == "live_shadow" and behavior_port is not None:
+            raise ValueError("live_shadow does not use a behavior port")
+        if trajectory_path is not None and profile != "live_shadow":
+            raise ValueError("trajectory_path is only valid for live_shadow")
         if ready_timeout_s <= 0:
             raise ValueError("ready_timeout_s must be positive")
         self._config = guided_config
         self._behavior_port = behavior_port
+        self._profile = profile
+        self._trajectory_path = (
+            None
+            if trajectory_path is None
+            else Path(trajectory_path).expanduser().resolve()
+        )
         self._factory = line_process_factory
         self._output = output
         self._ready_timeout_s = ready_timeout_s
@@ -71,19 +87,28 @@ class AiryOperatorSupervisor:
             stale_process.stop(signal.SIGINT, timeout_s=10.0)
             self._process = None
         _user, orin_host = self._config.orin_ssh_host.split("@", maxsplit=1)
-        launch = shlex.join(
-            [
-                "exec",
-                "ros2",
-                "launch",
-                "airy_excavator_bringup",
-                "operator.launch.py",
-                "profile:=live_commissioning",
-                "motion_authorization:=ALLOW_LIVE_MACHINE_MOTION",
-                f"orin_host:={orin_host}",
-                f"orin_port:={self._behavior_port}",
-            ]
-        )
+        launch_arguments = [
+            "exec",
+            "ros2",
+            "launch",
+            "airy_excavator_bringup",
+            "operator.launch.py",
+            f"profile:={self._profile}",
+            "motion_authorization:="
+            + (
+                "ALLOW_LIVE_MACHINE_MOTION"
+                if self._profile == "live_commissioning"
+                else "LOCKED"
+            ),
+            f"orin_host:={orin_host}",
+        ]
+        if self._behavior_port is not None:
+            launch_arguments.append(f"orin_port:={self._behavior_port}")
+        if self._trajectory_path is not None:
+            launch_arguments.append(
+                f"v3a_trajectory_path:={self._trajectory_path}"
+            )
+        launch = shlex.join(launch_arguments)
         shell_command = " && ".join(
             [
                 f"source {shlex.quote(str(self._config.rl_ros_setup))}",
@@ -104,7 +129,12 @@ class AiryOperatorSupervisor:
         self._process = process
         try:
             process.wait_for(
-                lambda line: "live Plan ready:" in line,
+                lambda line: (
+                    "live Plan ready:" in line
+                    if self._profile == "live_commissioning"
+                    else "live_shadow: live state/FK/perception with NoMotionBackend"
+                    in line
+                ),
                 self._ready_timeout_s,
             )
         except BaseException as exc:

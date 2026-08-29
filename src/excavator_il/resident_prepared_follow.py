@@ -77,12 +77,17 @@ class SystemPreparedDumpAdapter:
             self._log_dir
             / f"hybrid_mission_{timestamp}.prepared-dump.plan"
         )
+        self._refresh_gate_path = (
+            self._log_dir
+            / f"hybrid_mission_{timestamp}.prepared-dump.refresh"
+        )
         self._log_path = (
             self._log_dir
             / f"hybrid_mission_{timestamp}.prepared-dump.log"
         )
         self._process: Any | None = None
         self._plan_requested = False
+        self._refresh_requested = False
 
     def start_prepare(self) -> None:
         """Spawn planning and return without waiting for the ready marker."""
@@ -106,6 +111,7 @@ class SystemPreparedDumpAdapter:
         self._log_dir.mkdir(parents=True, exist_ok=True)
         self._unlink_gates()
         self._plan_requested = False
+        self._refresh_requested = False
         command = self._shell_command()
         self._process = self._line_process_factory(
             ["/bin/zsh", "-lc", command],
@@ -126,6 +132,21 @@ class SystemPreparedDumpAdapter:
             raise RuntimeError("prepared dump planning was already requested")
         self._plan_gate_path.touch(exist_ok=False)
         self._plan_requested = True
+
+    def trigger_refresh(self) -> None:
+        """Request one late Plan refresh using the already-warm child."""
+
+        process = self._process
+        if process is None:
+            raise RuntimeError("prepared dump process has not been started")
+        if process.returncode is not None:
+            raise RuntimeError("prepared dump process exited before refresh")
+        if not self._plan_requested:
+            raise RuntimeError("prepared dump planning has not been requested")
+        if self._refresh_requested:
+            raise RuntimeError("prepared dump refresh was already requested")
+        self._refresh_gate_path.touch(exist_ok=False)
+        self._refresh_requested = True
 
     def activate_prepared(self) -> PreparedDumpActivation:
         process = self._process
@@ -193,10 +214,12 @@ class SystemPreparedDumpAdapter:
                 process.stop(signal.SIGINT, timeout_s=3.0)
         finally:
             self._plan_requested = False
+            self._refresh_requested = False
             self._unlink_gates()
 
     def _unlink_gates(self) -> None:
         self._plan_gate_path.unlink(missing_ok=True)
+        self._refresh_gate_path.unlink(missing_ok=True)
         self._gate_path.unlink(missing_ok=True)
 
     def _shell_command(self) -> str:
@@ -215,6 +238,8 @@ class SystemPreparedDumpAdapter:
                 str(self._gate_path),
                 "--plan-gate",
                 str(self._plan_gate_path),
+                "--refresh-gate",
+                str(self._refresh_gate_path),
                 "--first-waypoint-distance-m",
                 f"{self._start_tolerance_m:g}",
             ]

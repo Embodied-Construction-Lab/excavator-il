@@ -45,6 +45,16 @@ def test_resident_act_launcher_maps_camera_and_shared_runtime_dir_but_not_serial
     assert "--privileged" not in script
 
 
+def test_resident_act_launcher_supports_an_explicit_parallel_runtime_and_dump_camera():
+    script = (ROOT / "scripts" / "run_act_resident.sh").read_text(encoding="utf-8")
+
+    assert "ACT_RUNTIME_CONFIG_PATH" in script
+    assert "ACT_CHECKPOINT_HOST_PATH" in script
+    assert "ACT_DEPLOYMENT_HOST_PATH" in script
+    assert 'dump_camera_device_resolved' in script
+    assert '--device "${dump_camera_device_resolved}:/dev/video2"' in script
+
+
 def test_resident_act_launcher_invokes_resident_module_with_socket_and_configs():
     script = (ROOT / "scripts" / "run_act_resident.sh").read_text(encoding="utf-8")
 

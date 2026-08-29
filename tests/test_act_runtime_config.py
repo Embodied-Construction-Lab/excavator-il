@@ -56,6 +56,28 @@ def test_runtime_config_loads_checkpoint_hardware_and_timing_contract(tmp_path):
     assert config.max_inference_ms == 100
 
 
+def test_runtime_config_v3_loads_explicit_dual_camera_roles(tmp_path):
+    raw = _config()
+    raw["schema_version"] = "excavator_act_runtime_config.v3"
+    raw["cameras"] = {
+        "front": raw.pop("camera_front"),
+        "dump": {
+            "device": "/dev/video2",
+            "width": 640,
+            "height": 480,
+            "fps": 30,
+        },
+    }
+    path = tmp_path / "runtime.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    config = load_act_runtime_config(path)
+
+    assert config.camera_roles == ("front", "dump")
+    assert config.camera.device == "/dev/video1"
+    assert config.cameras["dump"].device == "/dev/video2"
+
+
 def test_runtime_config_keeps_legacy_configs_on_the_act_backend(tmp_path):
     path = tmp_path / "runtime.json"
     path.write_text(json.dumps(_config()), encoding="utf-8")

@@ -85,6 +85,9 @@ class EpisodeController:
                 task_variant=optional_protocol["task_variant"],
                 soil_reset_block_id=optional_protocol["soil_reset_block_id"],
                 dig_point_id=optional_protocol["dig_point_id"],
+                collection_zone_id=request.get("collection_zone_id"),
+                dig_repeat_index=request.get("dig_repeat_index"),
+                operator_note=request.get("operator_note"),
                 recording_purpose=request.get(
                     "recording_purpose", "demonstration"
                 ),

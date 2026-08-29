@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>挖掘机实验与演示台</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260824-camera-compact">
+    <link rel="stylesheet" href="/static/app.css?v=20260829-point-catalog">
   </head>
   <body data-app="excavator-collection-ui">
     <header class="topbar">
@@ -15,9 +15,6 @@
       <div class="runtime-chip">
         <span id="status-dot" class="status-dot"></span>
         <div><small>当前阶段</small><strong id="stage-label">连接中</strong></div>
-      </div>
-      <div class="runtime-chip episode-counter">
-        <div><small>本次 UI 已完成</small><strong><span id="completed-count">0</span> 条 Episode</strong></div>
       </div>
     </header>
 
@@ -54,58 +51,6 @@
           <div id="target-grid" class="target-grid"></div>
         </div>
 
-        <fieldset id="collection-protocol-panel" class="protocol-panel">
-          <legend>采集协议 · 每条 Episode 必填</legend>
-          <div class="campaign-status" aria-live="polite">
-            <div>
-              <span>200 条采集进度</span>
-              <strong id="campaign-progress">读取 Orin…</strong>
-            </div>
-            <div>
-              <span>权威下一条</span>
-              <strong id="campaign-next-slot">等待远端检查</strong>
-            </div>
-          </div>
-          <label>
-            <span>动作任务</span>
-            <select id="task-variant">
-              <option value="dig_only">仅挖掘</option>
-              <option value="dig_transport_dump">挖掘 + 运转 + 倾倒</option>
-            </select>
-          </label>
-          <label>
-            <span>土壤重置批次</span>
-            <select id="soil-reset-block-id">
-              <option value="block_01">block_01</option>
-              <option value="block_02">block_02</option>
-              <option value="block_03">block_03</option>
-              <option value="block_04">block_04</option>
-              <option value="block_05">block_05</option>
-              <option value="block_06">block_06</option>
-              <option value="block_07">block_07</option>
-              <option value="block_08">block_08</option>
-              <option value="block_09">block_09</option>
-              <option value="block_10">block_10</option>
-              <option value="block_11">block_11</option>
-              <option value="block_12">block_12</option>
-              <option value="block_13">block_13</option>
-              <option value="block_14">block_14</option>
-              <option value="block_15">block_15</option>
-              <option value="block_16">block_16</option>
-              <option value="block_17">block_17</option>
-              <option value="block_18">block_18</option>
-              <option value="block_19">block_19</option>
-              <option value="block_20">block_20</option>
-            </select>
-          </label>
-          <label>
-            <span>挖掘点编号</span>
-            <select id="dig-point-id">
-              <option value="dig_01">dig_01</option>
-            </select>
-          </label>
-        </fieldset>
-
         <div class="machine-strip">
           <div><small>操作者</small><strong id="operator-id">—</strong></div>
           <div><small>任务</small><strong id="task-name">—</strong></div>
@@ -117,7 +62,7 @@
           <button id="start-button" class="button primary" type="button" disabled>开始采集流程</button>
           <button id="stop-button" class="button danger" type="button" disabled>安全停止</button>
         </div>
-        <p id="batch-hint" class="batch-hint">每条完成后可直接选择下一点并再次开始；计数只统计本次 UI 运行期间成功完成校验的 Episode。</p>
+        <p id="batch-hint" class="batch-hint">每次点击只采集一条 Episode；完成、失败或断连后都可独立重新开始下一条。</p>
 
         <div id="stage-actions" class="stage-actions hidden">
           <div id="manual-actions" class="hidden">
@@ -146,7 +91,7 @@
       <section class="panel camera-panel">
         <div class="section-heading compact">
           <div><span class="step-number">02</span><h2>双路 RGB 相机</h2></div>
-          <p>两路画面均由同一个 Orin Collector 独占采集，UI 只读取预览。</p>
+            <p>两路画面均由同一个 Orin Collector 独占采集，UI 只读取预览。</p>
         </div>
         <div class="camera-grid">
           <article class="camera-view-card">
@@ -210,10 +155,10 @@
           <div><span class="step-number">04</span><h2>采集运行记录</h2></div>
           <div class="log-heading-tools">
             <div class="episode-metadata">
-              <span id="episode-context"></span>
               <span id="episode-path" class="episode-path"></span>
             </div>
             <button id="copy-log" class="button ghost log-copy-button" type="button">复制</button>
+            <button id="clear-log" class="button ghost log-copy-button" type="button">清空</button>
           </div>
         </div>
         <pre id="log-output">等待采集任务…</pre>
@@ -224,17 +169,18 @@
         <div class="section-heading">
           <div><span class="step-number">03</span><h2>RL + ACT 混合 Mission</h2></div>
           <div class="log-heading-tools">
-            <p>分段拍摄单个动作，或连续自动完成 1～9 铲装车循环。</p>
+            <p id="hybrid-runtime-description">分段拍摄单个动作，或连续自动完成 1～9 铲装车循环。</p>
             <button id="copy-hybrid-log" class="button ghost log-copy-button" type="button">复制日志</button>
+            <button id="clear-hybrid-log" class="button ghost log-copy-button" type="button">清空日志</button>
           </div>
         </div>
         <div id="operator-control" class="operator-control hidden">
           <div>
-            <small>RL / RViz 基础服务</small>
+            <small>PC / RViz 只读可视化</small>
             <strong id="operator-stage">未启动</strong>
-            <span>可提前启动用于纯 RL 演示；分段或自动 Mission 也会在未就绪时自动启动 Operator 与 RViz。</span>
+            <span>显示实时挖机状态、八个候选挖掘点与 Orin 正在跟踪的轨迹；不在 PC 生成或发送运动命令。</span>
           </div>
-          <button id="operator-start" class="button primary" type="button">启动 RL + RViz</button>
+          <button id="operator-start" class="button primary" type="button">启动 RViz 显示</button>
           <button id="operator-stop" class="button ghost" type="button" disabled>停止</button>
         </div>
         <div class="hybrid-summary">
@@ -251,6 +197,18 @@
         </div>
         <div class="hybrid-actions">
           <button id="hybrid-segmented-start" class="button primary" type="button">开始分段验证</button>
+          <label class="cycle-picker" for="hybrid-dig-group">
+            <span>挖掘区域</span>
+            <select id="hybrid-dig-group">
+              <option value="all">全部点位</option>
+            </select>
+          </label>
+          <label class="cycle-picker" for="hybrid-dig-target">
+            <span>起始挖掘点</span>
+            <select id="hybrid-dig-target">
+              <option value="">等待点集</option>
+            </select>
+          </label>
           <label class="cycle-picker" for="hybrid-cycle-count">
             <span>自动装车铲数</span>
             <select id="hybrid-cycle-count">
@@ -269,12 +227,12 @@
           <button id="hybrid-advance" class="button success" type="button" disabled>执行下一段</button>
           <button id="hybrid-stop" class="button danger" type="button" disabled>安全停止</button>
         </div>
-        <p class="batch-hint">自动装车从当前选中点开始，随后按 dig_01 → dig_02 → dig_03 循环；RL 返回会直接前往下一铲点位。任何阶段失败都会停止，不会跳过故障继续。</p>
+        <p id="hybrid-group-hint" class="batch-hint">自动装车按所选点集的配置顺序循环；任务启动后点集会锁定。任何阶段失败都会停止，不会跳过故障继续。</p>
         <pre id="hybrid-log">等待混合 Mission…</pre>
         <div id="hybrid-error" class="error-banner hidden"></div>
       </section>
     </main>
     <div id="toast" class="toast" role="status"></div>
-    <script src="/static/app.js?v=20260824-log-tools" defer></script>
+    <script src="/static/app.js?v=20260829-point-catalog" defer></script>
   </body>
 </html>

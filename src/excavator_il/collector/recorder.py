@@ -13,6 +13,7 @@ from typing import Any, Mapping, TextIO
 
 from ..stm32_protocol import STM32_TELEMETRY_FIELDS
 from .config import (
+    validate_collection_labels,
     validate_collection_protocol,
     validate_recording_purpose,
     validate_target_source_provenance,
@@ -46,6 +47,9 @@ class EpisodeStart:
     dig_point_id: str | None = None
     recording_purpose: str = "demonstration"
     target_source_provenance: Mapping[str, Any] | None = None
+    collection_zone_id: str | None = None
+    dig_repeat_index: int | None = None
+    operator_note: str | None = None
 
 
 class EpisodeRecorder:
@@ -143,6 +147,11 @@ class EpisodeRecorder:
             soil_reset_block_id=request.soil_reset_block_id,
             dig_point_id=request.dig_point_id,
         )
+        collection_labels = validate_collection_labels(
+            collection_zone_id=request.collection_zone_id,
+            dig_repeat_index=request.dig_repeat_index,
+            operator_note=request.operator_note,
+        )
         target_source_provenance = (
             None
             if request.target_source_provenance is None
@@ -170,7 +179,11 @@ class EpisodeRecorder:
                 "dual-camera Episode requires task_variant, "
                 "soil_reset_block_id and dig_point_id"
             )
-        use_v2 = len(camera_metadata) > 1 or bool(collection_protocol)
+        use_v2 = (
+            len(camera_metadata) > 1
+            or bool(collection_protocol)
+            or bool(collection_labels)
+        )
         episode_id = self._next_episode_id()
         episode_path = self._root / episode_id
         episode_path.mkdir(parents=True, exist_ok=False)
@@ -234,6 +247,8 @@ class EpisodeRecorder:
                     metadata["target_source_provenance"] = dict(
                         target_source_provenance
                     )
+            if collection_labels:
+                metadata["collection_labels"] = dict(collection_labels)
         else:
             metadata["camera_front"] = camera_metadata["front"]
         self._episode_path = episode_path

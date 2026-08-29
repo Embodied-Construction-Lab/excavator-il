@@ -15,8 +15,8 @@ from typing import Any, Mapping
 COLLECTION_CONFIG_SCHEMA_VERSION = "excavator_collection_config.v2"
 LEGACY_COLLECTION_CONFIG_SCHEMA_VERSION = "excavator_collection_config.v1"
 COLLECTION_TASK_VARIANTS = frozenset({"dig_only", "dig_transport_dump"})
+COLLECTION_ZONE_IDS = frozenset(f"zone_{index:02d}" for index in range(1, 7))
 RECORDING_PURPOSES = frozenset({"demonstration", "diagnostic"})
-_SOIL_RESET_BLOCK_ID = re.compile(r"block_(?:0[1-9]|1[0-9]|20)")
 _PROTOCOL_ID = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*")
 _GIT_COMMIT = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -142,8 +142,14 @@ def validate_collection_protocol(
     assert dig_point_id is not None
     if task_variant not in COLLECTION_TASK_VARIANTS:
         raise ValueError("task_variant must be dig_only or dig_transport_dump")
-    if _SOIL_RESET_BLOCK_ID.fullmatch(soil_reset_block_id) is None:
-        raise ValueError("soil_reset_block_id must be block_01 through block_20")
+    if (
+        len(soil_reset_block_id) > 48
+        or _PROTOCOL_ID.fullmatch(soil_reset_block_id) is None
+    ):
+        raise ValueError(
+            "soil_reset_block_id must be a normalized lowercase underscore "
+            "identifier of at most 48 characters"
+        )
     if _PROTOCOL_ID.fullmatch(dig_point_id) is None:
         raise ValueError(
             "dig_point_id must be a normalized lowercase underscore identifier"
@@ -153,6 +159,46 @@ def validate_collection_protocol(
             "task_variant": task_variant,
             "soil_reset_block_id": soil_reset_block_id,
             "dig_point_id": dig_point_id,
+        }
+    )
+
+
+def validate_collection_labels(
+    *,
+    collection_zone_id: str | None,
+    dig_repeat_index: int | None,
+    operator_note: str | None = None,
+) -> Mapping[str, str | int]:
+    """Validate optional operator labels without changing the trial protocol."""
+    if collection_zone_id is None and dig_repeat_index is None and operator_note is None:
+        return MappingProxyType({})
+    if collection_zone_id is None or dig_repeat_index is None:
+        raise ValueError(
+            "collection_zone_id and dig_repeat_index must be provided together"
+        )
+    if collection_zone_id not in COLLECTION_ZONE_IDS:
+        raise ValueError("collection_zone_id must be zone_01 through zone_06")
+    repeat_index = _integer(
+        dig_repeat_index,
+        "dig_repeat_index",
+        minimum=1,
+        maximum=3,
+    )
+    if operator_note is None:
+        note = ""
+    elif not isinstance(operator_note, str):
+        raise ValueError("operator_note must be text")
+    else:
+        note = operator_note.strip()
+    if len(note) > 200 or any(character in note for character in "\r\n"):
+        raise ValueError(
+            "operator_note must be a single line of at most 200 characters"
+        )
+    return MappingProxyType(
+        {
+            "collection_zone_id": collection_zone_id,
+            "dig_repeat_index": repeat_index,
+            "operator_note": note,
         }
     )
 

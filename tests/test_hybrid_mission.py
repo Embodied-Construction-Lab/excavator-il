@@ -155,6 +155,7 @@ def test_hybrid_v2_config_selects_one_resident_runtime_for_the_whole_mission(
                     "handoff_timeout_s": 3,
                     "poll_interval_ms": 50,
                     "prepared_dump_lead_steps": 20,
+                    "prepared_dump_refresh_lead_steps": 5,
                     "prepared_ready_grace_ms": 300,
                     "prepared_start_tolerance_m": 0.15,
                 },
@@ -176,6 +177,7 @@ def test_hybrid_v2_config_selects_one_resident_runtime_for_the_whole_mission(
         handoff_timeout_s=3,
         poll_interval_ms=50,
         prepared_dump_lead_steps=20,
+        prepared_dump_refresh_lead_steps=5,
         prepared_ready_grace_ms=300,
         prepared_start_tolerance_m=0.15,
     )
@@ -204,6 +206,7 @@ def test_hybrid_v2_config_rejects_prepared_dump_lead_at_the_act_budget(tmp_path)
                     "handoff_timeout_s": 3,
                     "poll_interval_ms": 50,
                     "prepared_dump_lead_steps": 20,
+                    "prepared_dump_refresh_lead_steps": 5,
                     "prepared_ready_grace_ms": 300,
                     "prepared_start_tolerance_m": 0.15,
                 },

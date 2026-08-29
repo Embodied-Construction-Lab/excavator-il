@@ -37,6 +37,11 @@ def _parser() -> argparse.ArgumentParser:
             "matches; front is an explicit single-camera ablation"
         ),
     )
+    convert.add_argument(
+        "--task-variant-override",
+        choices=("dig_only", "dig_transport_dump"),
+        help="override incorrect raw task metadata in the derived dataset",
+    )
 
     split = commands.add_parser(
         "prepare-training-split",
@@ -47,6 +52,12 @@ def _parser() -> argparse.ArgumentParser:
     split.add_argument("--output", required=True)
     split.add_argument("--train-ratio", type=float, default=0.8)
     split.add_argument("--seed", type=int, default=0)
+    split.add_argument(
+        "--grouping",
+        choices=("auto", "episode"),
+        default="auto",
+        help="use episode when soil reset block labels are not authoritative",
+    )
 
     materialize = commands.add_parser(
         "materialize-training-split",
@@ -193,6 +204,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     start.add_argument("--soil-reset-block-id")
     start.add_argument("--dig-point-id")
+    start.add_argument("--collection-zone-id")
+    start.add_argument("--dig-repeat-index", type=int)
+    start.add_argument("--operator-note")
     start.add_argument(
         "--recording-purpose",
         choices=("demonstration", "diagnostic"),
@@ -251,6 +265,7 @@ def main(argv: list[str] | None = None) -> int:
                 fps=args.fps,
                 allow_synthetic=args.allow_synthetic,
                 camera_roles=camera_roles,
+                task_variant_override=args.task_variant_override,
             )
             _print_json(asdict(summary))
         elif args.command == "prepare-training-split":
@@ -262,6 +277,7 @@ def main(argv: list[str] | None = None) -> int:
                 output_path=args.output,
                 train_ratio=args.train_ratio,
                 seed=args.seed,
+                grouping=args.grouping,
             )
             _print_json(asdict(split))
         elif args.command == "materialize-training-split":
@@ -481,6 +497,12 @@ def main(argv: list[str] | None = None) -> int:
                     request["soil_reset_block_id"] = args.soil_reset_block_id
                 if args.dig_point_id is not None:
                     request["dig_point_id"] = args.dig_point_id
+                if args.collection_zone_id is not None:
+                    request["collection_zone_id"] = args.collection_zone_id
+                if args.dig_repeat_index is not None:
+                    request["dig_repeat_index"] = args.dig_repeat_index
+                if args.operator_note is not None:
+                    request["operator_note"] = args.operator_note
                 request["recording_purpose"] = args.recording_purpose
                 if args.target_source_provenance_json is not None:
                     request["target_source_provenance"] = json.loads(

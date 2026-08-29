@@ -224,6 +224,21 @@ def _dataset_grouping(dataset: LeRobotDataset) -> _DatasetGrouping:
     )
 
 
+def _episode_grouping(grouping: _DatasetGrouping) -> _DatasetGrouping:
+    source_ids = sorted(grouping.source_episode_to_group)
+    return _DatasetGrouping(
+        lerobot_episode_to_source=dict(grouping.lerobot_episode_to_source),
+        grouping_key=_SOURCE_EPISODE_GROUPING_KEY,
+        source_episode_to_group={source_id: source_id for source_id in source_ids},
+        group_to_task_variant={
+            source_id: grouping.group_to_task_variant[
+                grouping.source_episode_to_group[source_id]
+            ]
+            for source_id in source_ids
+        },
+    )
+
+
 def _bounded_train_count(count: int, ratio: float) -> int:
     return min(max(round(ratio * count), 1), count - 1)
 
@@ -285,19 +300,24 @@ def prepare_training_split(
     output_path: str | Path,
     train_ratio: float = 0.8,
     seed: int = 0,
+    grouping: str = "auto",
 ) -> TrainingSplit:
     """Create a deterministic split, preferring whole soil reset blocks."""
     ratio = float(train_ratio)
     if not np.isfinite(ratio) or not 0.0 < ratio < 1.0:
         raise ValueError("train_ratio must be finite and between 0 and 1")
+    if grouping not in {"auto", "episode"}:
+        raise ValueError("grouping must be auto or episode")
 
     root = Path(dataset_root).resolve()
     pipeline_marker = root / "pipeline_validation.json"
     if pipeline_marker.exists():
         raise ValueError("pipeline-validation dataset is not eligible for training")
     dataset = LeRobotDataset(repo_id=repo_id, root=root)
-    grouping = _dataset_grouping(dataset)
-    mapping = grouping.lerobot_episode_to_source
+    dataset_grouping = _dataset_grouping(dataset)
+    if grouping == "episode":
+        dataset_grouping = _episode_grouping(dataset_grouping)
+    mapping = dataset_grouping.lerobot_episode_to_source
     source_ids = sorted(set(mapping.values()))
     if len(source_ids) < 2:
         raise ValueError(
@@ -305,7 +325,7 @@ def prepare_training_split(
         )
 
     train_groups, validation_groups = _partition_group_ids(
-        grouping,
+        dataset_grouping,
         train_ratio=ratio,
         seed=seed,
     )
@@ -313,7 +333,9 @@ def prepare_training_split(
     train_sources = tuple(
         sorted(
             source_id
-            for source_id, group_id in grouping.source_episode_to_group.items()
+            for source_id, group_id in (
+                dataset_grouping.source_episode_to_group.items()
+            )
             if group_id in train_group_set
         )
     )
@@ -344,11 +366,15 @@ def prepare_training_split(
         validation_lerobot_episode_indices=validation_indices,
         lerobot_episode_to_source=dict(sorted(mapping.items())),
         source_dataset_sha256=_dataset_fingerprint(root),
-        grouping_key=grouping.grouping_key,
+        grouping_key=dataset_grouping.grouping_key,
         train_group_ids=train_groups,
         validation_group_ids=validation_groups,
-        source_episode_to_group=dict(sorted(grouping.source_episode_to_group.items())),
-        group_to_task_variant=dict(sorted(grouping.group_to_task_variant.items())),
+        source_episode_to_group=dict(
+            sorted(dataset_grouping.source_episode_to_group.items())
+        ),
+        group_to_task_variant=dict(
+            sorted(dataset_grouping.group_to_task_variant.items())
+        ),
     )
     destination = Path(output_path)
     serialized = asdict(result)
@@ -600,6 +626,8 @@ def materialize_training_split(
 
     if manifest.schema_version == SPLIT_SCHEMA_VERSION:
         current_grouping = _dataset_grouping(dataset)
+        if manifest.grouping_key == _SOURCE_EPISODE_GROUPING_KEY:
+            current_grouping = _episode_grouping(current_grouping)
         if (
             current_grouping.grouping_key != manifest.grouping_key
             or current_grouping.source_episode_to_group

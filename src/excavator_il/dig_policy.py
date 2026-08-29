@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 ACTION_ORDER = ("boom", "stick", "bucket", "swing")
 OUTPUT_SEMANTICS = "manual_action_normalized"
+MAX_TOLERATED_NORMALIZED_MAGNITUDE = 1.25
 
 
 @dataclass(frozen=True)
@@ -143,13 +144,27 @@ class _CheckedDigPolicy:
     def select_action(
         self, observation: DigPolicyObservation
     ) -> tuple[float, float, float, float]:
-        return _normalized_action(self._adapter.select_action(observation))
+        return saturate_normalized_action(self._adapter.select_action(observation))
 
     def warmup(self) -> tuple[float, float, float, float]:
-        return _normalized_action(self._adapter.warmup())
+        return saturate_normalized_action(self._adapter.warmup())
 
     def reset(self) -> None:
         self._adapter.reset()
+
+    def consume_new_action_chunk(
+        self,
+    ) -> tuple[tuple[float, float, float, float], ...] | None:
+        consume = getattr(self._adapter, "consume_new_action_chunk", None)
+        if not callable(consume):
+            return None
+        raw = consume()
+        if raw is None:
+            return None
+        chunk = tuple(saturate_normalized_action(action) for action in raw)
+        if len(chunk) != 10:
+            raise ValueError("dig policy execution chunk must contain ten actions")
+        return chunk
 
 
 class DigPolicyFactory:
@@ -183,7 +198,9 @@ class DigPolicyFactory:
         return _CheckedDigPolicy(adapter)
 
 
-def _normalized_action(values: Any) -> tuple[float, float, float, float]:
+def saturate_normalized_action(values: Any) -> tuple[float, float, float, float]:
+    """Clamp small numeric overshoot while rejecting gross policy outliers."""
+
     try:
         raw = tuple(values)
     except TypeError as exc:
@@ -191,6 +208,8 @@ def _normalized_action(values: Any) -> tuple[float, float, float, float]:
     if len(raw) != len(ACTION_ORDER) or any(isinstance(value, bool) for value in raw):
         raise ValueError("dig policy must return a normalized manual action")
     converted = tuple(float(value) for value in raw)
-    if not all(math.isfinite(value) and -1.000001 <= value <= 1.000001 for value in converted):
+    if not all(math.isfinite(value) for value in converted):
         raise ValueError("dig policy must return a normalized manual action")
-    return converted  # type: ignore[return-value]
+    if any(abs(value) > MAX_TOLERATED_NORMALIZED_MAGNITUDE for value in converted):
+        raise ValueError("dig policy must return a normalized manual action")
+    return tuple(max(-1.0, min(1.0, value)) for value in converted)  # type: ignore[return-value]

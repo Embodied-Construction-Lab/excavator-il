@@ -1,4 +1,5 @@
 import hashlib
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -69,6 +70,50 @@ def test_commissioned_shadow_factory_validates_checkpoint_without_motion_manifes
         provider_module,
         "_load_motion_deployment_verifier",
         lambda: pytest.fail("shadow mode must not require a motion manifest"),
+    )
+
+    factory = build_commissioned_lerobot_act_factory(
+        _config(checkpoint, {model.name: digest}),
+        mode=RuntimeMode.SHADOW,
+    )
+
+    assert factory.create("lerobot_act").descriptor.backend_id == "lerobot_act"
+
+
+def test_commissioned_factory_preloads_packaging_version_for_lerobot(
+    monkeypatch,
+    tmp_path,
+):
+    import packaging
+
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    model = checkpoint / "model.safetensors"
+    model.write_bytes(b"commissioned-model")
+    digest = hashlib.sha256(model.read_bytes()).hexdigest()
+    policy = SimpleNamespace(
+        config=SimpleNamespace(device="cpu"),
+        to=lambda _device: None,
+    )
+    monkeypatch.delattr(packaging, "version", raising=False)
+    monkeypatch.delitem(sys.modules, "packaging.version", raising=False)
+
+    def load_policy(_path):
+        assert hasattr(packaging, "version")
+        return policy
+
+    monkeypatch.setattr(
+        provider_module,
+        "_load_lerobot_policy_api",
+        lambda: (
+            lambda _name: SimpleNamespace(from_pretrained=load_policy),
+            lambda *_args, **_kwargs: (object(), object()),
+        ),
+    )
+    monkeypatch.setattr(
+        provider_module,
+        "ActPolicySession",
+        lambda **_kwargs: _Adapter(),
     )
 
     factory = build_commissioned_lerobot_act_factory(

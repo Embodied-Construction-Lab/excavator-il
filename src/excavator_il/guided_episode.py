@@ -18,6 +18,7 @@ from ._guided_episode_config import (
 from ._guided_episode_system import SystemGuidedEpisodeOperations
 from ._guided_episode_targets import load_rl_dig_targets, resolve_rl_dig_target
 from .collector.config import (
+    validate_collection_labels,
     validate_collection_protocol,
     validate_recording_purpose,
 )
@@ -64,14 +65,6 @@ class GuidedEpisodeOperations(Protocol):
         expected_target_m: tuple[float, float, float],
     ) -> Mapping[str, str | bool]: ...
 
-    def require_expected_campaign_slot(
-        self,
-        *,
-        task_variant: str,
-        soil_reset_block_id: str,
-        dig_point_id: str,
-    ) -> None: ...
-
     def start_collector(self) -> None: ...
 
     def start_teleop(self) -> None: ...
@@ -89,6 +82,9 @@ class GuidedEpisodeOperations(Protocol):
         task_variant: str | None = None,
         soil_reset_block_id: str | None = None,
         dig_point_id: str | None = None,
+        collection_zone_id: str | None = None,
+        dig_repeat_index: int | None = None,
+        operator_note: str | None = None,
         recording_purpose: str = "demonstration",
         target_source_provenance: Mapping[str, Any] | None = None,
     ) -> str: ...
@@ -176,6 +172,9 @@ def run_guided_episode(
     task_variant: str | None = None,
     soil_reset_block_id: str | None = None,
     dig_point_id: str | None = None,
+    collection_zone_id: str | None = None,
+    dig_repeat_index: int | None = None,
+    operator_note: str | None = None,
     recording_purpose: str = "demonstration",
 ) -> str:
     """Collect deadman-bounded attempts and validate them after motion I/O stops."""
@@ -203,6 +202,11 @@ def run_guided_episode(
         task_variant=task_variant,
         soil_reset_block_id=soil_reset_block_id,
         dig_point_id=dig_point_id,
+    )
+    collection_labels = validate_collection_labels(
+        collection_zone_id=collection_zone_id,
+        dig_repeat_index=dig_repeat_index,
+        operator_note=operator_note,
     )
     recording_purpose = validate_recording_purpose(recording_purpose)
     if protocol and recording_purpose != "demonstration":
@@ -251,18 +255,16 @@ def run_guided_episode(
             raise ValueError(
                 "AiryLidar target source changed before Episode creation"
             )
-        operations.require_expected_campaign_slot(**protocol)
         return operations.start_episode(
             episode_target_m,
             **protocol,
+            **collection_labels,
             target_source_provenance=refreshed_target_source,
         )
 
     try:
         emit_stage(GuidedEpisodeStage.PREFLIGHT)
         operations.preflight()
-        if protocol and mode in {PositioningMode.RL, PositioningMode.MANUAL}:
-            operations.require_expected_campaign_slot(**protocol)
         if mode is PositioningMode.RL:
             emit_stage(GuidedEpisodeStage.RL_POSITIONING)
             output(

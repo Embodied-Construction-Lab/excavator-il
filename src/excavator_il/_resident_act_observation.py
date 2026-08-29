@@ -19,46 +19,81 @@ from .resident_protocol import ResidentActState
 class ResidentCausalObservationBuffer:
     """Join the named resident state to the latest non-future camera frame."""
 
-    def __init__(self, *, capacity: int = 8) -> None:
+    def __init__(
+        self,
+        *,
+        camera_roles: tuple[str, ...] = ("front",),
+        capacity: int = 8,
+    ) -> None:
         if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
             raise ValueError("camera buffer capacity must be a positive integer")
-        self._frames: deque[RgbCameraFrame] = deque(maxlen=capacity)
+        if (
+            not isinstance(camera_roles, tuple)
+            or not camera_roles
+            or camera_roles[0] != "front"
+            or len(set(camera_roles)) != len(camera_roles)
+            or not set(camera_roles) <= {"front", "dump"}
+        ):
+            raise ValueError("resident camera roles must be front and optional dump")
+        self._roles = camera_roles
+        self._frames = {
+            role: deque(maxlen=capacity) for role in camera_roles
+        }
         self._lock = threading.Lock()
         self._ready = threading.Event()
 
-    def add_camera(self, frame: RgbCameraFrame) -> None:
+    def add_camera(self, frame: RgbCameraFrame, *, role: str = "front") -> None:
         if not isinstance(frame, RgbCameraFrame):
             raise ValueError("resident camera frame has the wrong type")
+        if role not in self._frames:
+            raise ValueError("resident camera role is not configured")
         with self._lock:
-            if self._frames and (
+            frames = self._frames[role]
+            if frames and (
                 frame.capture_monotonic_ns
-                <= self._frames[-1].capture_monotonic_ns
+                <= frames[-1].capture_monotonic_ns
             ):
-                raise ValueError("camera timestamps must be strictly increasing")
-            self._frames.append(frame)
-            self._ready.set()
+                raise ValueError(
+                    f"{role} camera timestamps must be strictly increasing"
+                )
+            frames.append(frame)
+            if all(self._frames[item] for item in self._roles):
+                self._ready.set()
 
     def wait_ready(self, timeout_s: float) -> bool:
         return self._ready.wait(timeout_s)
 
     def build(self, state: ResidentActState) -> ActObservation:
         with self._lock:
-            frames = tuple(self._frames)
-        camera = next(
-            (
-                frame
-                for frame in reversed(frames)
-                if frame.capture_monotonic_ns <= state.state_monotonic_ns
-            ),
-            None,
-        )
-        if camera is None:
-            raise ValueError("no causal camera frame is available for resident state")
+            frames_by_role = {
+                role: tuple(frames) for role, frames in self._frames.items()
+            }
+        selected: dict[str, RgbCameraFrame] = {}
+        for role in self._roles:
+            camera = next(
+                (
+                    frame
+                    for frame in reversed(frames_by_role[role])
+                    if frame.capture_monotonic_ns <= state.state_monotonic_ns
+                ),
+                None,
+            )
+            if camera is None:
+                raise ValueError(
+                    f"no causal {role} camera frame is available for resident state"
+                )
+            selected[role] = camera
+        front = selected["front"]
+        extra = {role: selected[role] for role in self._roles if role != "front"}
         return ActObservation(
             state=state.state,
-            front_rgb=camera.rgb,
+            front_rgb=front.rgb,
             state_monotonic_ns=state.state_monotonic_ns,
-            camera_monotonic_ns=camera.capture_monotonic_ns,
+            camera_monotonic_ns=front.capture_monotonic_ns,
+            extra_rgb_by_role={role: frame.rgb for role, frame in extra.items()},
+            extra_camera_monotonic_ns_by_role={
+                role: frame.capture_monotonic_ns for role, frame in extra.items()
+            },
         )
 
 

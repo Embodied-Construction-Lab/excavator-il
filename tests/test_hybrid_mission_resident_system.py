@@ -50,6 +50,7 @@ def _config(tmp_path):
             handoff_timeout_s=3,
             poll_interval_ms=50,
             prepared_dump_lead_steps=20,
+            prepared_dump_refresh_lead_steps=5,
             prepared_ready_grace_ms=300,
             prepared_start_tolerance_m=0.15,
         ),
@@ -625,6 +626,7 @@ def test_production_composition_wires_lease_and_prepared_dump_into_resident_ops(
         SystemPreparedDumpAdapter,
     )
     assert system._operations._prepared_dump_lead_steps == 20
+    assert system._operations._prepared_dump_refresh_lead_steps == 5
 
 
 def test_act_worker_loss_fails_fast_and_terminally_disarms_without_waiting_timeout():

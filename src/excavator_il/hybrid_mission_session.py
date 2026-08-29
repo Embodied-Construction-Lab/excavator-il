@@ -77,6 +77,7 @@ def _arm_parent_death_interrupt() -> threading.Thread | None:
 class HybridMissionSnapshot:
     stage: str = "idle"
     dig_target_id: str = ""
+    dig_group_id: str = "all"
     automatic: bool = False
     next_segment: str = ""
     error: str = ""
@@ -88,6 +89,7 @@ class HybridMissionSnapshot:
     requested_cycles: int = 1
     run_id: str = ""
     evidence_error: str = ""
+    can_stop: bool = False
 
 
 def run_hybrid_mission_worker(
@@ -319,7 +321,18 @@ class HybridMissionSupervisor:
 
     def snapshot(self) -> HybridMissionSnapshot:
         with self._lock:
-            return replace(self._state, logs=tuple(self._logs))
+            process = self._process
+            return replace(
+                self._state,
+                logs=tuple(self._logs),
+                can_stop=bool(process is not None and process.is_alive()),
+            )
+
+    def clear_logs(self) -> None:
+        """Clear the operator-visible log without changing Mission state."""
+
+        with self._lock:
+            self._logs.clear()
 
     def retry_evidence_finalization(self) -> None:
         """Retry a failed evidence publication without replaying Mission events."""
@@ -341,7 +354,10 @@ class HybridMissionSupervisor:
         automatic: bool,
         motion_authorization: str | None,
         cycle_count: int = 1,
+        dig_group_id: str = "all",
     ) -> None:
+        if dig_group_id != "all":
+            raise ValueError("legacy hybrid Mission only supports dig group all")
         if not isinstance(dig_target_id, str) or not dig_target_id.strip():
             raise ValueError("dig_target_id must be non-empty")
         if not isinstance(automatic, bool):

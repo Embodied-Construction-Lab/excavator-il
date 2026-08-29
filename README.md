@@ -123,10 +123,11 @@ teleop 在创建 UDP socket 前先要求六个 X/Y/Z 轴回中且 deadman 释放
 从 `mission_config` 读取 Dig 目标并执行一次 execution-strict `Plan DIG → Follow`。只有 Follow
 返回 `SUCCEEDED` 且 `quiescence_confirmed=true` 后，脚本才用 `SIGTERM` 触发 RL Runtime 的终态
 归零清理，确认 `/dev/ttyTHS1` 已释放，再启动 Collector。任何一步失败都不会创建 Episode。
-正式 campaign 中，无论选择 RL 定位、人工预定位还是直接采集，Episode 的 `dig_target_m` 都按
-本槽位 `dig_point_id` 从 `rl_preposition.demo_config` 解析；RL 定位结果还必须与该权威坐标一致。
-脚本在预检和每次 Episode 创建前都会重新核对 PC 上该文件的 clean Git HEAD、仓库相对路径、SHA-256
-与目标坐标，并把结果写入 `episode.json.target_source_provenance`；任何漂移都会在录制前拒绝。
+WebUI 中无论选择 RL 定位、人工预定位还是直接采集，Episode 的 `dig_target_m` 都按本条手工填写的
+`dig_point_id` 从 `rl_preposition.demo_config` 解析；RL 定位结果还必须与该权威坐标一致。
+脚本在预检和每次 Episode 创建前都会重新核对 PC 上该目标配置文件相对 HEAD 未修改、仓库相对路径、
+SHA-256 与目标坐标，并把结果写入 `episode.json.target_source_provenance`；目标文件漂移会在录制前
+拒绝，与目标无关的 AiryLidar 工作树修改不会阻止单条采集。
 只有未携带 collection protocol 的旧式诊断入口才兼容使用 `episode.dig_target_m`。该字段只作
 溯源元数据，不是 ACT 输入。
 
@@ -165,16 +166,16 @@ python scripts/run_collection_ui.py
 
 浏览器默认打开 `http://127.0.0.1:8088/`。页面可选择：
 
-- `RL 到目标点`：从 AiryLidar `excavation_demo.json` 中选择 `dig_01/02/03`，再执行该点的
-  Plan → Follow；要求 `live_commissioning` Operator 已在 PC 运行；
+- `RL 到目标点`：从 AiryLidar 权威点位目录中选择当前配置的点，再执行该点的 Plan → Follow；要求
+  `live_commissioning` Operator 已在 PC 运行；
 - `手工预定位`：按住 deadman，用 X/Y 调整工作装置、Z1/Z2 调整左右履带，全部回中并释放后点击“完成手工预定位”；
 - `直接采集`：跳过定位，直接等待 Recorder 与 deadman；
 - `仅遥操作`：只启动 Collector 与 PC teleop，不创建 Episode、不占用编号、不写训练数据；按住
   deadman 可用 X/Y 控制工作装置、Z1/Z2 控制左右履带，释放即六轴回零，点击“安全停止”退出；
-- Episode 结束后点击“成功”“失败”或“重录”。页面从 Orin 原始数据根目录只读计算 200 条 campaign
-  的权威下一槽位，自动填写 `task_variant / soil_reset_block_id / dig_point_id` 并显示总进度；每条完成
-  后重新读取，浏览器 `localStorage` 不参与计数。SSH 或 campaign 校验不可用时正式采集会被禁止，
-  但不创建 Episode 的`仅遥操作`仍可使用。
+- 每次点击“开始采集流程”只创建一条 Episode，结束后点击“成功”“失败”或“重录”；页面不要求
+  人工采集标签，不自动连续采集，也不显示或强制批次进度。
+- `scripts/inspect_collection_campaign.py` 保留为离线计划与审计工具；它不会被 WebUI 调用，也不会控制
+  Collector、Episode 编号或运动生命周期。单条失败、断连或人工停止后，处理故障即可独立开始下一条。
 - `启动 RL + RViz`：从页面启动既有 AiryLidar `live_commissioning` Operator；不会复制规划、
   策略或可视化实现。录制演示视频时保留弹出的原生 RViz 窗口即可。
 
@@ -192,9 +193,42 @@ python scripts/run_collection_ui.py
 原生 RViz 是 Qt 桌面程序，当前 Web UI 不嵌入 RViz/Foxglove，也不显示三维可视化占位。
 需要录制三维状态时，使用页面“启动 RL + RViz”打开的原生 RViz 窗口。
 
-### RL + ACT 混合 Mission（分段验收）
+### V3-B Orin 本地目录驱动闭环
 
-同一个本地 UI 还提供一个与采集状态机互斥的混合 Mission Module。它不是在浏览器里直接拼接
+默认 `config/collection_ui.pc.json` 已选择 V3-B 目录驱动链路：PC 只负责 WebUI、Experiment Run 证据以及
+start/cancel/400 ms supervisory heartbeat；`FollowDig → ACT Dig → FollowDump → ExecuteDump`
+和下一铲切换全部在 Orin 常驻 owner 内完成，不再发送 PC Behavior RPC 或在线 Plan 请求。PC/网络
+失联超过约 3 秒会触发 terminal-disarm，不能让无人监督的多铲任务继续。
+
+当前挖掘点只由 AiryLidar
+`mission/config/excavation_dig_point_catalog.v1.json` 定义。点数和有序点集都不是代码常量；标准 UI
+命令直接使用该目录，不再保留按点数命名的运行配置。修改点位后运行：
+
+```bash
+python scripts/sync_v3b_dig_catalog.py --dry-run
+python scripts/sync_v3b_dig_catalog.py
+```
+
+第一条命令只校验并显示点位，不连接 Orin；第二条命令确认 Orin 运动资源空闲后，重新生成普通
+V3-B 与完整 ACT 两套候选部署，备份本地与 Orin 旧快照，同步并在 Orin 重新验签。之后重启 WebUI：
+
+```bash
+python scripts/run_collection_ui.py \
+  --config config/collection_ui.pc.json
+```
+
+该入口引用 `deploy/v3b/catalog/candidate` 并显式携带 commissioning 授权。候选部署只包含一个
+带 SHA-256 的目标目录快照；每次 Follow 以实时铲尖为起点、目录终点为终点，动态生成圆弧中间点。
+修改点数或坐标后必须重新构建候选、同步 Orin，并在发动机关闭状态逐点验收，最后才能生成独立的
+field deployment；不需要修改代码或维护逐点轨迹 JSON。PC 启动 owner 时会把本地源目录 SHA-256
+交给 Orin 对账，若只改了 PC 配置而忘记重新构建/同步，系统会在打开运动链路前拒绝启动。
+每次 V3-B Mission 会在 `EvaluationReport/experiment_runs` 记录策略、配置、仓库 commit、目标目录
+状态和终态结果。V2/V3-A 只存在于 Git 历史和冻结标签中，不再进入当前默认运行路径。
+
+### V3-B Resident RL + ACT 混合 Mission
+
+同一个本地 UI 提供一个与采集状态机互斥的目录驱动混合 Mission Module。旧 V2 三点 UI 入口已删除，
+只能通过 `resident_fixed_cycle_config` 与权威点位目录启动。它不是在浏览器里直接拼接
 shell，而是按固定状态机执行：
 
 ```text
@@ -222,7 +256,7 @@ Web UI 提供：
 - `开始分段验证`：每完成一段后停在明确的等待阶段，由操作者点击下一段；点击执行 ACT 段本身
   作为本地显式运动授权，页面自动发送固定授权值，不再要求手工输入口令；
 - `自动装车 1～9 铲`：选择铲数后点击一次即连续执行；以页面选中的 DIG 点为第一铲，后续按
-  Mission 配置顺序循环 `dig_01 → dig_02 → dig_03 → dig_01`。RL 返回阶段直接去下一铲点位，
+  页面选择的当前点集顺序循环；RL 返回阶段直接去下一铲点位，
   到达后从交接位姿开始 ACT，不额外增加一次策略冷启动；
 - `安全停止`：中断当前精确 owner，执行终态零并检查 `/dev/ttyTHS1` 释放。
 
@@ -367,7 +401,8 @@ excavator-il validate \
 放宽；能定位并确认连续恢复的孤立事件会生成 `training_segments.json`，只隔离故障窗口，无法
 恢复的事件仍校验失败。未通过校验的 Episode 不应转换。
 
-正式 ICRA 2027 campaign 的进度与证据状态应从 Orin 原始目录只读检查，而不是依赖浏览器计数：
+若需要核对 ICRA 2027 的离线采集计划与证据状态，可从 Orin 原始目录只读检查；这些命令不参与
+WebUI 的单条采集启动：
 
 ```bash
 python scripts/inspect_collection_campaign.py \
@@ -382,7 +417,8 @@ python scripts/manage_experiment_run.py verify \
   --run-id collection_episode_0001
 ```
 
-未采满时 `inspect_collection_campaign.py --next` 以退出码 2 返回属于预期；只在
+未采满时 `inspect_collection_campaign.py --next` 以退出码 2 返回属于预期；该结果只供离线安排，
+不会自动填写标签或阻止下一条 Episode。只在
 `complete_and_valid=true` 时表示整批 200 条 campaign 无 duplicate、unplanned 或 malformed
 Episode。`record-collection-run` 与 `manage_experiment_run.py verify` 是幂等的，只追加或核验证据，
 不会改写原始 Episode。正式证据还会读取并快照

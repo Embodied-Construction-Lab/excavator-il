@@ -115,6 +115,9 @@ def test_episode_controller_dual_camera_requires_and_persists_trial_labels(tmp_p
             "task_variant": "dig_only",
             "soil_reset_block_id": "block_01",
             "dig_point_id": "dig_02",
+            "collection_zone_id": "zone_06",
+            "dig_repeat_index": 3,
+            "operator_note": "远排右侧第三次",
             "target_source_provenance": {
                 "repository": "airylidar",
                 "path": "mission/config/excavation_demo.json",
@@ -135,6 +138,11 @@ def test_episode_controller_dual_camera_requires_and_persists_trial_labels(tmp_p
         "task_variant": "dig_only",
         "soil_reset_block_id": "block_01",
         "dig_point_id": "dig_02",
+    }
+    assert metadata["collection_labels"] == {
+        "collection_zone_id": "zone_06",
+        "dig_repeat_index": 3,
+        "operator_note": "远排右侧第三次",
     }
     assert metadata["target_source_provenance"]["commit"] == "b" * 40
 
@@ -229,7 +237,7 @@ def test_episode_controller_rejects_unknown_recording_purpose(tmp_path):
     ("field", "value", "message"),
     [
         ("task_variant", "other", "task_variant"),
-        ("soil_reset_block_id", "block_21", "block_01 through block_20"),
+        ("soil_reset_block_id", "Soil Block", "normalized lowercase"),
         ("dig_point_id", "DIG 01", "normalized lowercase"),
     ],
 )

@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -24,8 +25,12 @@ from excavator_il.act_runtime_service import (
     _route_telemetry_frame,
     _startup_stm32,
     _wait_for_hardware_start_gate,
+    run_act_runtime,
 )
-from excavator_il.act_deployment import verify_deployment_manifest
+from excavator_il.act_deployment import (
+    _verify_validation_evaluation,
+    verify_deployment_manifest,
+)
 from excavator_il.collector.camera import RgbCameraFrame
 from excavator_il.collector.preview import LatestJpegFrame, LatestTelemetryFrame
 from excavator_il.stm32_protocol import (
@@ -69,6 +74,44 @@ class _StartupSerial(_Serial):
 
     def readline(self):
         return next(self._post_reset_lines, b"")
+
+
+def test_standard_runtime_accepts_host_and_container_camera_namespaces(monkeypatch):
+    runtime_config = SimpleNamespace(
+        serial=SimpleNamespace(port="/dev/ttyTHS1", baudrate=460800),
+        camera=SimpleNamespace(
+            device="/dev/video0", width=640, height=480, nominal_fps=30
+        ),
+    )
+    observation_config = SimpleNamespace(
+        serial=SimpleNamespace(port="/dev/ttyTHS1", baudrate=460800),
+        camera=SimpleNamespace(
+            device="/dev/v4l/by-path/front-camera",
+            width=640,
+            height=480,
+            nominal_fps=30,
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_service_module,
+        "load_act_runtime_config",
+        lambda _path: runtime_config,
+    )
+    monkeypatch.setattr(
+        runtime_service_module,
+        "load_collection_config",
+        lambda _path: observation_config,
+    )
+
+    def provider_was_reached(_config, _mode):
+        raise RuntimeError("provider reached")
+
+    with pytest.raises(RuntimeError, match="provider reached"):
+        run_act_runtime(
+            "/act.json",
+            operator_observation_config="/collection.json",
+            dig_policy_provider=provider_was_reached,
+        )
 
 
 def _telemetry(stamp=1_000_000_000):
@@ -636,7 +679,38 @@ def test_motion_manifest_rejects_unsafe_evaluation(tmp_path):
         )
 
 
-def test_motion_manifest_accepts_operator_authorized_training_loss_selection(tmp_path):
+def test_motion_manifest_evaluation_accepts_explicit_bounded_saturation():
+    evaluation = {
+        "validation_frame_count": 10,
+        "deployment_prior_l1": 0.1,
+        "max_deployment_prior_l1": 0.2,
+        "action_min": -1.024,
+        "action_max": 1.03,
+        "all_finite": True,
+        "out_of_range_sample_count": 2,
+        "gross_out_of_range_sample_count": 0,
+        "saturated_value_count": 3,
+        "max_tolerated_normalized_magnitude": 1.25,
+    }
+
+    _verify_validation_evaluation(evaluation)
+
+    with pytest.raises(ValueError, match="unsafe"):
+        _verify_validation_evaluation(
+            {**evaluation, "gross_out_of_range_sample_count": 1}
+        )
+
+
+@pytest.mark.parametrize(
+    ("selection_reason", "selection_method"),
+    [
+        ("operator-authorized lowest saved training loss", "training_loss"),
+        ("operator-authorized final training checkpoint", "final_checkpoint"),
+    ],
+)
+def test_motion_manifest_accepts_operator_authorized_training_selection(
+    tmp_path, selection_reason, selection_method
+):
     from hashlib import sha256
     from excavator_il.lerobot_conversion import STATE_FIELDS
 
@@ -655,13 +729,13 @@ def test_motion_manifest_accepts_operator_authorized_training_loss_selection(tmp
                 "schema_version": "excavator_act_deployment.v3",
                 "checkpoint": {
                     "selected": True,
-                    "selection_reason": "operator-authorized lowest saved training loss",
+                    "selection_reason": selection_reason,
                     "files_sha256": {
                         "model.safetensors": sha256(b"model").hexdigest()
                     },
                 },
                 "selection": {
-                    "method": "training_loss",
+                    "method": selection_method,
                     "checkpoint_step": 200000,
                     "training_loss": 0.038,
                     "training_log_sha256": "d" * 64,
@@ -685,9 +759,11 @@ def test_motion_manifest_accepts_operator_authorized_training_loss_selection(tmp
                     "state_dim": 11,
                     "action_dim": 4,
                     "front_rgb_chw": [3, 480, 640],
+                    "dump_rgb_chw": [3, 480, 640],
                     "chunk_size": 20,
                     "n_action_steps": 10,
                     "input_feature_keys": [
+                        "observation.images.dump",
                         "observation.images.front",
                         "observation.state",
                     ],

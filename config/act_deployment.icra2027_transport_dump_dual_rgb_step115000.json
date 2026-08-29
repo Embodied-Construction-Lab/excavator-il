@@ -1,0 +1,85 @@
+{
+  "schema_version": "excavator_act_deployment.v2",
+  "checkpoint": {
+    "path_at_evaluation": "/home/zhaoshuai/workspace_uinty/RL_prj/excavator-il/outputs/icra2027_transport_dump_dual_rgb_video_b4_seed2027/checkpoints/115000/pretrained_model",
+    "selected": true,
+    "selection_reason": "lowest safe validation deployment-prior L1",
+    "files_sha256": {
+      "config.json": "ef569f26fa189050adebf82b7d9b06847faf7dcc038eae037bb1e0f91dcee385",
+      "model.safetensors": "54a3ba90e6c2186787b8b7eb1b9e5211e2bcf81e41551e866283ace41ed04f4a",
+      "policy_postprocessor.json": "0e1790afcabc4ab149c95f833f8068f8470f6fa923e87734284e63d4d5eb0ee5",
+      "policy_postprocessor_step_0_unnormalizer_processor.safetensors": "4ef653fb686b15053ad91d76ebe9ffddadbdd0b8f966c02d82140141362a6376",
+      "policy_preprocessor.json": "d99a7a09655919237a444fd59a344896c9ca3ab9f88239d60ccf150b449d2597",
+      "policy_preprocessor_step_3_normalizer_processor.safetensors": "4ef653fb686b15053ad91d76ebe9ffddadbdd0b8f966c02d82140141362a6376",
+      "train_config.json": "15af2bdb108e3a685720dfbe8b79e3d5265b232ac517caf0ecc34879034dacf7"
+    }
+  },
+  "evaluation": {
+    "validation_frame_count": 1424,
+    "deployment_prior_l1": 0.11383621063341094,
+    "action_min": -1.0365071296691895,
+    "action_max": 1.0452401638031006,
+    "all_finite": true,
+    "out_of_range_sample_count": 277,
+    "gross_out_of_range_sample_count": 0,
+    "saturated_value_count": 277,
+    "max_tolerated_normalized_magnitude": 1.25,
+    "max_deployment_prior_l1": 0.2
+  },
+  "data": {
+    "pipeline_validation_present": false,
+    "train_repo_id": "local/icra2027_transport_dump_dual_rgb_full_train_video",
+    "validation_repo_id": "local/icra2027_transport_dump_dual_rgb_full_validation_video",
+    "train_dataset_sha256": "ab43a7e6c8ce16acb5d814d264886a3e94e37c76c6dddf7e93452d3a456155aa",
+    "validation_dataset_sha256": "21b21bd623b97ecd4044b30f058102a80cd22858cb8bb1e2bb8424e20cedf1fc",
+    "source_dataset_sha256": "67179f229bc3d0227ded60202551d4be7aa6ee2f194a4eeb11b16e45cab6c95a"
+  },
+  "contract": {
+    "action_order": [
+      "boom",
+      "stick",
+      "bucket",
+      "swing"
+    ],
+    "action_fields": [
+      "action_boom",
+      "action_stick",
+      "action_bucket",
+      "action_swing"
+    ],
+    "state_fields": [
+      "boom_pos_m",
+      "stick_pos_m",
+      "bucket_pos_m",
+      "boom_vel_mps",
+      "stick_vel_mps",
+      "bucket_vel_mps",
+      "boom_angle_rad",
+      "arm_angle_rad",
+      "bucket_angle_rad",
+      "swing_angle_rad",
+      "swing_vel_radps"
+    ],
+    "state_dim": 11,
+    "action_dim": 4,
+    "front_rgb_chw": [
+      3,
+      480,
+      640
+    ],
+    "chunk_size": 20,
+    "n_action_steps": 10,
+    "input_feature_keys": [
+      "observation.images.dump",
+      "observation.images.front",
+      "observation.state"
+    ],
+    "temporal_ensemble_coeff": null,
+    "dump_rgb_chw": [
+      3,
+      480,
+      640
+    ]
+  },
+  "machine_profile_sha256": "4b8c94484389429c2c3871857d928e46ec93fa1b62c66df459336868b00d2f89"
+}

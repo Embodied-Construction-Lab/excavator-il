@@ -48,6 +48,30 @@ def test_renewal_failure_is_reported_without_retrying_forever():
     assert len(calls) == 2
 
 
+def test_one_transient_renewal_failure_is_retried_without_losing_the_heartbeat():
+    calls = []
+    recovered = threading.Event()
+
+    def renew():
+        calls.append(len(calls))
+        if len(calls) == 2:
+            raise OSError("one delayed SSH renewal")
+        if len(calls) >= 3:
+            recovered.set()
+
+    heartbeat = ResidentMissionLeaseHeartbeat(
+        renew,
+        interval_s=0.1,
+        failure_grace_s=0.4,
+    )
+    heartbeat.start()
+    try:
+        assert recovered.wait(0.8)
+        heartbeat.require_healthy()
+    finally:
+        heartbeat.stop()
+
+
 def test_start_failure_never_claims_a_running_heartbeat():
     heartbeat = ResidentMissionLeaseHeartbeat(
         lambda: (_ for _ in ()).throw(OSError("cannot arm")),

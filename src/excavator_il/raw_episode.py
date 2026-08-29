@@ -10,6 +10,7 @@ from typing import Mapping
 from PIL import Image
 
 from .collector.config import (
+    validate_collection_labels,
     validate_collection_protocol,
     validate_recording_purpose,
 )
@@ -185,6 +186,27 @@ def _load_metadata(path: Path) -> dict:
             except ValueError as exc:
                 raise EpisodeValidationError(
                     f"invalid collection_protocol: {exc}"
+                ) from exc
+        collection_labels = metadata.get("collection_labels")
+        if collection_labels is not None:
+            if not isinstance(collection_labels, dict) or set(collection_labels) != {
+                "collection_zone_id",
+                "dig_repeat_index",
+                "operator_note",
+            }:
+                raise EpisodeValidationError(
+                    "episode.json collection_labels must contain exactly "
+                    "collection_zone_id, dig_repeat_index and operator_note"
+                )
+            try:
+                validate_collection_labels(
+                    collection_zone_id=collection_labels.get("collection_zone_id"),
+                    dig_repeat_index=collection_labels.get("dig_repeat_index"),
+                    operator_note=collection_labels.get("operator_note"),
+                )
+            except ValueError as exc:
+                raise EpisodeValidationError(
+                    f"invalid collection_labels: {exc}"
                 ) from exc
     required_camera_fields = (
         "device_id",

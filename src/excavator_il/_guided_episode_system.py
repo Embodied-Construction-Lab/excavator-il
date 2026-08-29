@@ -18,8 +18,8 @@ from ._guided_episode_rl import _GuidedEpisodeRlOperations
 from ._guided_episode_targets import (
     capture_target_source_provenance as _capture_target_source_provenance,
 )
-from .collection_campaign import COLLECTION_CAMPAIGN_SCHEMA_VERSION
 from .collector.config import (
+    validate_collection_labels,
     validate_collection_protocol,
     validate_recording_purpose,
     validate_target_source_provenance,
@@ -28,84 +28,6 @@ from .remote_runtime import LineProcess, LineWaitTimeout, SshRuntimeHost
 
 
 _EPISODE_NAME = re.compile(r"episode_\d{4,}")
-
-
-def _parse_campaign_gate_report(
-    report_output: str,
-) -> tuple[bool, Mapping[str, Any] | None]:
-    try:
-        report = json.loads(report_output)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"remote campaign inspector returned invalid JSON: {exc}"
-        ) from exc
-    if not isinstance(report, Mapping):
-        raise RuntimeError("remote campaign inspector must return an object")
-    if report.get("schema_version") != COLLECTION_CAMPAIGN_SCHEMA_VERSION:
-        raise RuntimeError(
-            "remote campaign inspector returned an unsupported schema_version"
-        )
-    summary = report.get("summary")
-    if not isinstance(summary, Mapping):
-        raise RuntimeError("remote campaign inspector summary must be an object")
-    complete_and_valid = summary.get("complete_and_valid")
-    if not isinstance(complete_and_valid, bool):
-        raise RuntimeError(
-            "remote campaign inspector completion state must be boolean"
-        )
-    next_slot = report.get("next_expected_slot")
-    if next_slot is not None and not isinstance(next_slot, Mapping):
-        raise RuntimeError(
-            "remote campaign inspector returned an invalid next_expected_slot"
-        )
-    if isinstance(next_slot, Mapping):
-        fields = (
-            "slot_id",
-            "task_variant",
-            "soil_reset_block_id",
-            "dig_point_id",
-        )
-        if any(
-            not isinstance(next_slot.get(field), str) or not next_slot[field]
-            for field in fields
-        ):
-            raise RuntimeError(
-                "remote campaign inspector returned an invalid next_expected_slot"
-            )
-    return complete_and_valid, next_slot
-
-
-def _require_protocol_matches_campaign_slot(
-    report_output: str,
-    protocol: Mapping[str, str],
-) -> None:
-    complete_and_valid, next_slot = _parse_campaign_gate_report(report_output)
-    if next_slot is None:
-        if complete_and_valid:
-            raise RuntimeError("collection campaign is already complete")
-        raise RuntimeError(
-            "collection campaign has no remaining slot but is not complete and valid"
-        )
-    if complete_and_valid:
-        raise RuntimeError(
-            "remote campaign inspector returned an inconsistent next_expected_slot"
-        )
-    expected = (
-        next_slot["task_variant"],
-        next_slot["soil_reset_block_id"],
-        next_slot["dig_point_id"],
-    )
-    actual = (
-        protocol["task_variant"],
-        protocol["soil_reset_block_id"],
-        protocol["dig_point_id"],
-    )
-    if actual != expected:
-        raise RuntimeError(
-            f"formal collection must match next expected slot "
-            f"{next_slot['slot_id']}: task_variant={expected[0]} "
-            f"soil_reset_block_id={expected[1]} dig_point_id={expected[2]}"
-        )
 
 
 class SystemGuidedEpisodeOperations(_GuidedEpisodeRlOperations):
@@ -293,38 +215,6 @@ class SystemGuidedEpisodeOperations(_GuidedEpisodeRlOperations):
             self._config, point_id, expected_target_m
         )
 
-    def require_expected_campaign_slot(
-        self,
-        *,
-        task_variant: str,
-        soil_reset_block_id: str,
-        dig_point_id: str,
-    ) -> None:
-        protocol = validate_collection_protocol(
-            task_variant=task_variant,
-            soil_reset_block_id=soil_reset_block_id,
-            dig_point_id=dig_point_id,
-        )
-        if not protocol:
-            raise ValueError("campaign gate requires a complete collection protocol")
-
-        executable = PurePosixPath(self._config.orin_executable)
-        report_output = self._run_ssh(
-            self._in_repo(
-                [
-                    "env",
-                    "PYTHONPATH=src",
-                    str(executable.parent / "python"),
-                    "scripts/inspect_collection_campaign.py",
-                    "--collection-config",
-                    str(self._config.orin_collection_config),
-                    "--next",
-                ]
-            ),
-            accepted_returncodes=(0, 2),
-        )
-        _require_protocol_matches_campaign_slot(report_output, protocol)
-
     def start_collector(self) -> None:
         collector_log, _, _ = self.log_paths
         executable = str(self._config.orin_executable)
@@ -461,6 +351,9 @@ class SystemGuidedEpisodeOperations(_GuidedEpisodeRlOperations):
         task_variant: str | None = None,
         soil_reset_block_id: str | None = None,
         dig_point_id: str | None = None,
+        collection_zone_id: str | None = None,
+        dig_repeat_index: int | None = None,
+        operator_note: str | None = None,
         recording_purpose: str = "demonstration",
         target_source_provenance: Mapping[str, Any] | None = None,
     ) -> str:
@@ -469,6 +362,11 @@ class SystemGuidedEpisodeOperations(_GuidedEpisodeRlOperations):
             task_variant=task_variant,
             soil_reset_block_id=soil_reset_block_id,
             dig_point_id=dig_point_id,
+        )
+        collection_labels = validate_collection_labels(
+            collection_zone_id=collection_zone_id,
+            dig_repeat_index=dig_repeat_index,
+            operator_note=operator_note,
         )
         recording_purpose = validate_recording_purpose(recording_purpose)
         normalized_target_source = (
@@ -524,6 +422,19 @@ class SystemGuidedEpisodeOperations(_GuidedEpisodeRlOperations):
                             separators=(",", ":"),
                         ),
                     ]
+                )
+        if collection_labels:
+            command.extend(
+                [
+                    "--collection-zone-id",
+                    str(collection_labels["collection_zone_id"]),
+                    "--dig-repeat-index",
+                    str(collection_labels["dig_repeat_index"]),
+                ]
+            )
+            if collection_labels["operator_note"]:
+                command.extend(
+                    ["--operator-note", str(collection_labels["operator_note"])]
                 )
         response = self._remote_cli(command)
         path = self._episode_path(response)

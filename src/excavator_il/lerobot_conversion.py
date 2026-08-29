@@ -132,6 +132,7 @@ def convert_episodes(
     fps: int = 10,
     allow_synthetic: bool = False,
     camera_roles: tuple[str, ...] | None = None,
+    task_variant_override: str | None = None,
 ) -> ConversionSummary:
     """Convert validated raw RGB episodes into a local LeRobotDataset v3."""
     if not episode_paths:
@@ -142,6 +143,14 @@ def convert_episodes(
     }:
         raise ValueError(
             "camera_roles must be None, ('front',) or ('front', 'dump')"
+        )
+    if task_variant_override not in {
+        None,
+        "dig_only",
+        "dig_transport_dump",
+    }:
+        raise ValueError(
+            "task_variant_override must be dig_only or dig_transport_dump"
         )
     validated_paths = [Path(path) for path in episode_paths]
     resolved_paths = [path.resolve() for path in validated_paths]
@@ -265,6 +274,16 @@ def convert_episodes(
             "shape": (1,),
             "names": None,
         },
+        "source.collection_zone_id": {
+            "dtype": "string",
+            "shape": (1,),
+            "names": None,
+        },
+        "source.dig_repeat_index": {
+            "dtype": "string",
+            "shape": (1,),
+            "names": None,
+        },
     }
     dataset = _load_lerobot_dataset_class().create(
         repo_id=repo_id,
@@ -298,11 +317,22 @@ def convert_episodes(
             protocol = metadata.get("collection_protocol", {})
             if not isinstance(protocol, dict):
                 raise ValueError("episode.json collection_protocol must be an object")
-            task_variant = str(protocol.get("task_variant", "unknown"))
+            task_variant = task_variant_override or str(
+                protocol.get("task_variant", "unknown")
+            )
             soil_reset_block_id = str(
                 protocol.get("soil_reset_block_id", "unknown")
             )
             dig_point_id = str(protocol.get("dig_point_id", "unknown"))
+            collection_labels = metadata.get("collection_labels", {})
+            if not isinstance(collection_labels, dict):
+                raise ValueError("episode.json collection_labels must be an object")
+            collection_zone_id = str(
+                collection_labels.get("collection_zone_id", "unknown")
+            )
+            dig_repeat_index = str(
+                collection_labels.get("dig_repeat_index", "unknown")
+            )
             task = f"excavate {metadata['material_id']} at configured dig target"
 
             for segment in report.training_segments:
@@ -332,6 +362,8 @@ def convert_episodes(
                         "source.task_variant": task_variant,
                         "source.soil_reset_block_id": soil_reset_block_id,
                         "source.dig_point_id": dig_point_id,
+                        "source.collection_zone_id": collection_zone_id,
+                        "source.dig_repeat_index": dig_repeat_index,
                         "task": task,
                         **{
                             f"observation.images.{camera_role}": rgb

@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from excavator_il.collection_ui_config import load_collection_ui_config
+from excavator_il.collection_ui_process import collection_ui_process_lease
 from excavator_il.collection_ui_runtime import run_collection_ui
 
 
@@ -22,7 +24,14 @@ def main() -> int:
     )
     args = parser.parse_args()
     try:
-        run_collection_ui(args.config, open_browser=not args.no_browser)
+        config_path = args.config.expanduser().resolve()
+        config = load_collection_ui_config(config_path)
+        with collection_ui_process_lease(
+            config_path=config_path,
+            host=config.host,
+            port=config.port,
+        ):
+            run_collection_ui(config_path, open_browser=not args.no_browser)
     except (OSError, RuntimeError, ValueError) as exc:
         parser.error(str(exc))
     return 0

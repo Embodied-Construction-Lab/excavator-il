@@ -523,8 +523,10 @@ def run_act_runtime(
             raise ValueError("ACT and operator observation serial devices must match")
         if observation_config.serial.baudrate != config.serial.baudrate:
             raise ValueError("ACT and operator observation serial baudrates must match")
-        if observation_config.camera.device != config.camera.device:
-            raise ValueError("ACT and operator observation cameras must match")
+        # The collection config identifies the physical host camera with a
+        # stable /dev/v4l/by-path name.  Launchers map that device into the
+        # container under the ACT config name (normally /dev/video0), so the
+        # two strings intentionally belong to different device namespaces.
         if (
             observation_config.camera.width,
             observation_config.camera.height,

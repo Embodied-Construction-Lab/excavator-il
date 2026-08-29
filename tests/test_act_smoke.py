@@ -142,13 +142,28 @@ def test_summarize_inference_uses_all_runs_for_range():
     assert maximum == pytest.approx(0.7)
 
 
-def test_summarize_inference_rejects_action_outside_normalized_range():
+def test_summarize_inference_reports_the_saturated_runtime_range():
     import torch
 
     from excavator_il.act_smoke import _summarize_action_chunks
 
-    with pytest.raises(ValueError, match=r"exceeds \[-1, 1\]"):
-        _summarize_action_chunks([torch.tensor([[[1.01, 0.0, 0.0, 0.0]]])])
+    minimum, maximum = _summarize_action_chunks(
+        [torch.tensor([[[1.01, -1.024, 0.0, 0.0]]])]
+    )
+
+    assert minimum == -1.0
+    assert maximum == 1.0
+
+
+def test_summarize_inference_rejects_gross_raw_action_outlier():
+    import torch
+
+    from excavator_il.act_smoke import _summarize_action_chunks
+
+    with pytest.raises(ValueError, match="raw action magnitude"):
+        _summarize_action_chunks(
+            [torch.tensor([[[100.0, -0.25, 0.0, 0.0]]])]
+        )
 
 
 def test_enforce_inference_budget_fails_closed():
@@ -266,3 +281,43 @@ def test_act_contract_rejects_temporal_ensemble_or_extra_camera():
 
     with pytest.raises(ValueError, match="temporal ensemble"):
         _validate_excavator_act_contract(config, dataset)
+
+
+def test_act_contract_accepts_front_and_dump_rgb_cameras():
+    from types import SimpleNamespace
+
+    from lerobot.configs.types import FeatureType, PolicyFeature
+
+    from excavator_il.act_smoke import _validate_excavator_act_contract
+    from excavator_il.lerobot_conversion import STATE_FIELDS
+    from excavator_il.raw_episode import ACTION_FIELDS
+
+    config = SimpleNamespace(
+        chunk_size=20,
+        n_action_steps=10,
+        temporal_ensemble_coeff=None,
+        input_features={
+            "observation.state": PolicyFeature(
+                type=FeatureType.STATE, shape=(11,)
+            ),
+            "observation.images.front": PolicyFeature(
+                type=FeatureType.VISUAL, shape=(3, 480, 640)
+            ),
+            "observation.images.dump": PolicyFeature(
+                type=FeatureType.VISUAL, shape=(3, 480, 640)
+            ),
+        },
+        output_features={
+            "action": PolicyFeature(type=FeatureType.ACTION, shape=(4,))
+        },
+    )
+    dataset = SimpleNamespace(
+        features={
+            "observation.state": {"shape": (11,), "names": STATE_FIELDS},
+            "observation.images.front": {"shape": (480, 640, 3)},
+            "observation.images.dump": {"shape": (480, 640, 3)},
+            "action": {"shape": (4,), "names": ACTION_FIELDS},
+        }
+    )
+
+    _validate_excavator_act_contract(config, dataset)

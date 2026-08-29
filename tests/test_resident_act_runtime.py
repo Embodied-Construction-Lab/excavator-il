@@ -281,6 +281,77 @@ def test_safe_state_uses_a_causal_camera_and_emits_canonical_four_axis_action():
     assert transport.sent[-1].created_monotonic_ns == 2_100
 
 
+def test_new_policy_chunk_is_attached_only_to_its_first_candidate():
+    chunk = tuple((0.01 * index, 0.0, 0.0, 0.0) for index in range(10))
+    first_decision = ActRuntimeDecision(
+        predicted_action=chunk[0],
+        commanded_action=chunk[0],
+        serial_axes=(0.0,) * 6,
+        reason="motion_allowed",
+        predicted_action_chunk=chunk,
+    )
+    second_decision = ActRuntimeDecision(
+        predicted_action=chunk[1],
+        commanded_action=chunk[1],
+        serial_axes=(0.0,) * 6,
+        reason="motion_allowed",
+    )
+    transport = _CandidateTransport()
+    engine = _Engine(first_decision)
+    runtime = ResidentActRuntime(
+        transport=transport,
+        engine=engine,
+        monotonic_ns=iter((2_100, 2_200)).__next__,
+    )
+    runtime.add_camera_frame(
+        RgbCameraFrame(1_800, np.zeros((2, 3, 3), dtype=np.uint8))
+    )
+
+    runtime.process_state(_state(sensor_seq=11))
+    engine.decision = second_decision
+    runtime.process_state(_state(sensor_seq=12, state_monotonic_ns=1_950))
+
+    assert transport.sent[0].action_chunk == chunk
+    assert transport.sent[1].action_chunk is None
+
+
+def test_dual_camera_policy_waits_for_both_causal_roles_before_inference():
+    decision = ActRuntimeDecision(
+        predicted_action=(0.1, -0.2, 0.3, -0.4),
+        commanded_action=(0.1, -0.2, 0.3, -0.4),
+        serial_axes=(-0.4, -0.2, 0.0, 0.3, 0.1, 0.0),
+        reason="motion_allowed",
+    )
+    engine = _Engine(decision)
+    transport = _CandidateTransport()
+    runtime = ResidentActRuntime(
+        transport=transport,
+        engine=engine,
+        camera_roles=("front", "dump"),
+        monotonic_ns=iter((2_100, 2_200)).__next__,
+    )
+    front = np.full((2, 3, 3), 7, dtype=np.uint8)
+    dump = np.full((2, 3, 3), 9, dtype=np.uint8)
+    runtime.add_camera_frame(RgbCameraFrame(1_800, front), role="front")
+
+    unavailable = runtime.process_state(_state(sensor_seq=11))
+
+    assert unavailable.reason == "observation_unavailable"
+    assert engine.observations == []
+    assert transport.sent[-1].action == (0.0, 0.0, 0.0, 0.0)
+
+    runtime.add_camera_frame(RgbCameraFrame(1_850, dump), role="dump")
+    available = runtime.process_state(
+        _state(sensor_seq=12, state_monotonic_ns=1_950)
+    )
+
+    assert available.reason == "motion_allowed"
+    observation, _ = engine.observations[-1]
+    assert np.array_equal(observation.front_rgb, front)
+    assert np.array_equal(observation.extra_rgb_by_role["dump"], dump)
+    assert observation.extra_camera_monotonic_ns_by_role == {"dump": 1_850}
+
+
 def test_generation_change_resets_the_chunk_and_sequence_gap_forces_one_zero_step():
     decision = ActRuntimeDecision(
         predicted_action=(0.1, -0.2, 0.3, 0.0),
@@ -679,6 +750,79 @@ def test_owner_disconnect_resets_policy_and_exits_the_worker_cleanly():
     assert runtime.status.active_generation is None
 
 
+def test_dual_camera_worker_connects_only_after_both_roles_are_ready():
+    dump_release = threading.Event()
+    connected = threading.Event()
+
+    class _Transport(_CandidateTransport):
+        def connect(self, *, timeout_s):
+            connected.set()
+
+        def receive_state(self, *, timeout_s):
+            if connected.is_set():
+                raise ResidentActOwnerClosed("owner disconnected")
+            return None
+
+        def close(self):
+            return None
+
+    class _Camera:
+        def __init__(self, *, release=None):
+            self.release = release
+            self.closed = threading.Event()
+            self.close_count = 0
+            self.read_count = 0
+
+        def read_rgb(self):
+            if self.release is not None:
+                assert self.release.wait(0.5)
+            self.read_count += 1
+            if self.read_count == 1:
+                return RgbCameraFrame(
+                    1_000,
+                    np.zeros((2, 3, 3), dtype=np.uint8),
+                )
+            self.closed.wait()
+            raise RuntimeError("camera closed")
+
+        def close(self):
+            self.close_count += 1
+            self.closed.set()
+
+    cameras = {
+        "front": _Camera(),
+        "dump": _Camera(release=dump_release),
+    }
+    runtime = ResidentActRuntime(
+        transport=_Transport(),
+        engine=_Engine(),
+        camera_roles=("front", "dump"),
+    )
+    worker = ResidentActWorker(
+        runtime=runtime,
+        cameras=cameras,
+        warmup=lambda: None,
+        connect_timeout_s=0.5,
+    )
+    thread = threading.Thread(target=worker.run)
+    thread.start()
+    try:
+        time.sleep(0.05)
+        assert not connected.is_set()
+        dump_release.set()
+        assert connected.wait(0.5)
+    finally:
+        worker.request_stop()
+        thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert worker.error is None
+    assert {role: camera.close_count for role, camera in cameras.items()} == {
+        "front": 1,
+        "dump": 1,
+    }
+
+
 def test_worker_factory_loads_the_model_and_opens_the_camera_exactly_once(
     monkeypatch, capsys
 ):
@@ -927,6 +1071,66 @@ def test_worker_factory_uses_injected_provider_without_commissioned_act_loader(
 
     assert isinstance(worker, ResidentActWorker)
     assert worker.runtime.status.completed_steps == 0
+
+
+def test_worker_factory_opens_every_configured_camera_role(monkeypatch):
+    class _AlternatePolicy:
+        descriptor = DigPolicyDescriptor(
+            backend_id="diffusion_policy",
+            implementation="tests.DualViewPolicy",
+        )
+
+        def select_action(self, observation):
+            return (0.0, 0.0, 0.0, 0.0)
+
+        def warmup(self):
+            return (0.0, 0.0, 0.0, 0.0)
+
+        def reset(self):
+            return None
+
+    camera_configs = {
+        "front": SimpleNamespace(
+            device="/dev/video0", width=640, height=480, nominal_fps=30
+        ),
+        "dump": SimpleNamespace(
+            device="/dev/video2", width=640, height=480, nominal_fps=30
+        ),
+    }
+    config = SimpleNamespace(
+        dig_policy_backend="diffusion_policy",
+        cameras=camera_configs,
+        camera_roles=("front", "dump"),
+        max_inference_state_age_ms=100.0,
+        max_camera_age_ms=120.0,
+        max_inference_ms=100.0,
+    )
+    opened = []
+    monkeypatch.setattr(
+        resident_runtime_module, "load_act_runtime_config", lambda _: config
+    )
+    monkeypatch.setattr(
+        resident_runtime_module,
+        "ResidentActDataClient",
+        lambda socket_path: SimpleNamespace(socket_path=socket_path, close=lambda: None),
+    )
+
+    def open_camera(camera_config):
+        opened.append(camera_config.device)
+        return SimpleNamespace(close=lambda: None)
+
+    monkeypatch.setattr(resident_runtime_module, "UvcCamera", open_camera)
+
+    worker = build_resident_act_worker(
+        "/config.json",
+        socket_path="/tmp/resident-act-test.sock",
+        dig_policy_provider=lambda _config: DigPolicyFactory(
+            {"diffusion_policy": lambda: _AlternatePolicy()}
+        ),
+    )
+
+    assert opened == ["/dev/video0", "/dev/video2"]
+    assert tuple(worker._cameras) == ("front", "dump")
 
 
 def test_worker_factory_rejects_injected_provider_descriptor_mismatch(

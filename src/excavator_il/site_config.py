@@ -14,6 +14,7 @@ _CONFIG_FILES = {
     "collection": "collection.orin.json",
     "ui": "collection_ui.pc.json",
     "hybrid": "hybrid_mission.pc.json",
+    "fixed_cycle": "resident_fixed_cycle.pc.json",
 }
 
 
@@ -54,6 +55,7 @@ def check_site_config(config_dir: str | Path) -> dict[str, object]:
     collection = configs["collection"]
     ui = configs["ui"]
     hybrid = configs["hybrid"]
+    fixed_cycle = configs["fixed_cycle"]
 
     ssh_host = guided["orin"]["ssh_host"]
     if not isinstance(ssh_host, str) or ssh_host.count("@") != 1:
@@ -94,16 +96,28 @@ def check_site_config(config_dir: str | Path) -> dict[str, object]:
         Path(ui["guided_config"]).name,
         _CONFIG_FILES["guided"],
     )
-    _require_equal(
-        "ui.hybrid_mission_config",
-        Path(ui["hybrid_mission_config"]).name,
-        _CONFIG_FILES["hybrid"],
-    )
-    _require_equal(
-        "hybrid.guided_config",
-        Path(hybrid["guided_config"]).name,
-        _CONFIG_FILES["guided"],
-    )
+    if "resident_fixed_cycle_config" in ui:
+        _require_equal(
+            "ui.resident_fixed_cycle_config",
+            Path(ui["resident_fixed_cycle_config"]).name,
+            _CONFIG_FILES["fixed_cycle"],
+        )
+        _require_equal(
+            "fixed_cycle.guided_config",
+            Path(fixed_cycle["guided_config"]).name,
+            _CONFIG_FILES["guided"],
+        )
+    else:
+        _require_equal(
+            "ui.hybrid_mission_config",
+            Path(ui["hybrid_mission_config"]).name,
+            _CONFIG_FILES["hybrid"],
+        )
+        _require_equal(
+            "hybrid.guided_config",
+            Path(hybrid["guided_config"]).name,
+            _CONFIG_FILES["guided"],
+        )
     return {
         "orin_host": orin_host,
         "pc_host": pc_host,

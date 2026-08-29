@@ -211,15 +211,46 @@ def test_policy_candidate_round_trip_matches_the_orin_manual_action_contract():
     assert decode_policy_candidate(encoded) == candidate
     wire = json.loads(encoded)
     assert wire == {
-        "schema_version": "resident_policy_candidate.v1",
+        "schema_version": "resident_policy_candidate.v2",
         "source": "act_dig",
         "control_generation": 4,
         "mode": "manual_action",
         "action_order": list(ACTION_ORDER),
         "action": [0.1, -0.2, 0.3, 0.0],
+        "action_chunk": None,
         "created_monotonic_ns": 2_100,
         "valid_until_monotonic_ns": 2_200,
     }
+
+
+def test_new_action_chunk_round_trip_is_exactly_ten_normalized_actions():
+    chunk = tuple((0.01 * index, 0.0, -0.01 * index, 0.0) for index in range(10))
+    candidate = ResidentPolicyCandidate(
+        source="act_dig",
+        control_generation=4,
+        mode="manual_action",
+        action=chunk[0],
+        action_chunk=chunk,
+        created_monotonic_ns=2_100,
+        valid_until_monotonic_ns=2_200,
+    )
+
+    assert decode_policy_candidate(encode_policy_candidate(candidate)) == candidate
+    assert json.loads(encode_policy_candidate(candidate))["action_chunk"] == [
+        list(action) for action in chunk
+    ]
+
+    for invalid in (chunk[:9], chunk + (chunk[0],), ((0.0, 0.0, 0.0, 1.01),) * 10):
+        with pytest.raises(ValueError):
+            ResidentPolicyCandidate(
+                source="act_dig",
+                control_generation=4,
+                mode="manual_action",
+                action=(0.0, 0.0, 0.0, 0.0),
+                action_chunk=invalid,
+                created_monotonic_ns=2_100,
+                valid_until_monotonic_ns=2_200,
+            )
 
 
 @pytest.mark.parametrize(

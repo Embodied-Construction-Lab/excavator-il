@@ -57,6 +57,47 @@ def test_airy_operator_supervisor_starts_existing_launch_and_stops_it():
     assert stopped.stage == "stopped"
 
 
+def test_v3a_operator_starts_display_only_shadow_with_trajectory_file(tmp_path):
+    processes = []
+    trajectory = tmp_path / "v3a_active_trajectory.json"
+
+    class _Process:
+        running = True
+
+        def __init__(self, argv, **_kwargs):
+            self.argv = argv
+            processes.append(self)
+
+        def wait_for(self, predicate, timeout_s, *, after_index=-1):
+            assert timeout_s == 60
+            assert after_index == -1
+            line = "live_shadow: live state/FK/perception with NoMotionBackend"
+            assert predicate(line)
+            return 0, line
+
+        def stop(self, _signum, *, timeout_s=5.0):
+            self.running = False
+
+        @property
+        def lines(self):
+            return ()
+
+    supervisor = AiryOperatorSupervisor(
+        guided_config=_GuidedConfig(),
+        behavior_port=None,
+        profile="live_shadow",
+        trajectory_path=trajectory,
+        line_process_factory=_Process,
+    )
+
+    assert supervisor.start().stage == "ready"
+    command = processes[0].argv[-1]
+    assert "profile:=live_shadow" in command
+    assert "motion_authorization:=LOCKED" in command
+    assert f"v3a_trajectory_path:={trajectory.resolve()}" in command
+    assert "ALLOW_LIVE_MACHINE_MOTION" not in command
+
+
 def test_airy_operator_supervisor_cleans_process_tree_after_rviz_closes():
     processes = []
 

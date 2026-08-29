@@ -239,6 +239,52 @@ def test_experiment_run_factory_uses_explicit_evidence_paths_and_config_metadata
     }
 
 
+def test_experiment_run_factory_supports_v3a_runtime_config_label():
+    recorder = _RecordingExperimentRun(run_id="v3a_run_001")
+    created = []
+    runtime_config = type(
+        "FixedConfig",
+        (),
+        {"guided_config": Path("/configs/guided.json")},
+    )()
+    factory = HybridExperimentRunFactory(
+        HybridExperimentRunConfig(
+            evidence_root=Path("/evidence"),
+            machine_profile_path=Path("/profiles/machine_profile.json"),
+            repository_paths={"excavator_il": Path("/repos/excavator-il")},
+            config_paths={"act_runtime": Path("/configs/act.json")},
+            policy_ids={
+                "dig_policy": "lerobot_act:checkpoint-200k",
+                "trajectory_controller": "onnx_rl:7496592",
+            },
+            host_topology={"pc": "display", "orin": "resident_runtime"},
+            artifacts=_policy_artifacts(),
+        ),
+        run_creator=lambda root, **kwargs: created.append((root, kwargs)) or recorder,
+        hybrid_config_loader=lambda _path: runtime_config,
+        guided_config_loader=lambda _path: _GuidedConfig(),
+        path_is_available=lambda _path: True,
+        runtime_config_label="resident_fixed_cycle",
+        runtime_backend="resident_fixed_cycle",
+    )
+
+    run = factory(
+        HybridMissionRunRequest(
+            config_path=Path("/configs/resident-fixed.json"),
+            dig_target_id="dig_01",
+            automatic=True,
+            requested_cycles=3,
+        )
+    )
+    run.append_event("mission_started", {"run_id": run.run_id})
+
+    assert created[0][1]["config_paths"]["resident_fixed_cycle"] == Path(
+        "/configs/resident-fixed.json"
+    )
+    assert "hybrid_mission" not in created[0][1]["config_paths"]
+    assert recorder.events[0][1]["runtime_backend"] == "resident_fixed_cycle"
+
+
 def test_experiment_run_factory_registers_only_available_configured_logs():
     recorder = _RecordingExperimentRun()
 

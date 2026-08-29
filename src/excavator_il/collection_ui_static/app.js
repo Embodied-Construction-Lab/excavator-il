@@ -33,18 +33,17 @@ const hybridSegments = ["rl_to_dig", "act_dig", "rl_to_dump_and_dump", "rl_retur
 const state = {
   selectedMode: "rl",
   selectedTargetId: null,
+  selectedHybridGroupId: "all",
+  selectedHybridTargetId: null,
   config: null,
   snapshot: null,
   hybridSnapshot: null,
   operatorSnapshot: null,
-  campaignStatus: null,
-  campaignError: null,
   cameraStreams: {}
 };
 const $ = (id) => document.getElementById(id);
 const CAMERA_RETRY_MS = 1000;
 const CAMERA_REFRESH_MS = 100;
-const CAMPAIGN_REFRESH_MS = 5000;
 const LOG_BOTTOM_TOLERANCE_PX = 24;
 const logAutofollow = new Map();
 
@@ -122,9 +121,20 @@ function renderConfig(config) {
   $("dig-target").textContent = config.dig_target_m.map(value => Number(value).toFixed(2)).join(", ");
   $("orin-host").textContent = config.orin_host;
   renderTargets(config.rl_dig_targets || []);
+  renderHybridDigGroups(
+    config.hybrid_dig_groups || [],
+    config.hybrid_default_dig_group_id || "all",
+  );
   if (config.hybrid_mission_enabled) {
     $("hybrid-panel").classList.remove("hidden");
     $("hybrid-act-steps").textContent = String(config.hybrid_act_max_steps);
+    const localCycle = config.hybrid_runtime_backend === "resident_fixed_cycle";
+    $("hybrid-segmented-start").classList.toggle("hidden", localCycle);
+    $("hybrid-advance").classList.toggle("hidden", localCycle);
+    if (localCycle) {
+      $("hybrid-runtime-description").textContent =
+        "V3-A：PC 只启动/取消/显示，固定点轨迹与 RL/ACT 切换均在 Orin 本地完成。";
+    }
   }
   if (config.operator_control_enabled) {
     $("operator-control").classList.remove("hidden");
@@ -136,59 +146,6 @@ function renderConfig(config) {
   if (previewUrls.dump) {
     $("camera-dump-container")?.classList.remove("hidden");
     setupCameraPreview("dump", previewUrls.dump);
-  }
-}
-
-function renderCampaignStatus(payload) {
-  state.campaignStatus = payload;
-  state.campaignError = null;
-  $("collection-protocol-panel")?.classList.remove("campaign-error");
-  const completed = Number(payload.completed || 0);
-  const planned = Number(payload.planned || 0);
-  const ignored = Number(payload.ignored_diagnostics || 0);
-  $("campaign-progress").textContent = `${completed} / ${planned}`;
-  const slot = payload.next_expected_slot;
-  if (!slot) {
-    $("campaign-next-slot").textContent = payload.complete_and_valid
-      ? `采集计划已完成 · 已忽略诊断 ${ignored} 条`
-      : "没有剩余槽位，但 campaign 校验未通过";
-    updateOwnershipControls();
-    return;
-  }
-  const target = (state.config?.rl_dig_targets || [])
-    .find(candidate => candidate.target_id === slot.dig_point_id);
-  if (!target) {
-    renderCampaignUnavailable(
-      `权威下一槽位 ${slot.slot_id} 的挖掘点 ${slot.dig_point_id} 未配置`,
-    );
-    return;
-  }
-  $("campaign-next-slot").textContent = `${slot.slot_id} · 已忽略诊断 ${ignored} 条`;
-  const collectionStage = state.snapshot?.stage || "idle";
-  if (terminalStages.has(collectionStage)) {
-    $("task-variant").value = slot.task_variant;
-    $("soil-reset-block-id").value = slot.soil_reset_block_id;
-    $("dig-point-id").value = slot.dig_point_id;
-    selectTarget(target);
-  }
-  updateOwnershipControls();
-}
-
-function renderCampaignUnavailable(message) {
-  state.campaignStatus = null;
-  state.campaignError = message;
-  $("campaign-progress").textContent = "Orin campaign 不可用";
-  $("campaign-next-slot").textContent = message;
-  $("collection-protocol-panel")?.classList.add("campaign-error");
-  updateOwnershipControls();
-}
-
-async function refreshCampaignStatus() {
-  if (!state.config?.campaign_tracking_enabled) return;
-  try {
-    renderCampaignStatus(await api("/api/campaign/status"));
-  } catch (error) {
-    renderCampaignUnavailable(error.message);
   }
 }
 
@@ -231,17 +188,9 @@ function renderTargets(targets) {
   const grid = $("target-grid");
   if (!grid) return;
   grid.replaceChildren();
-  const digPoint = $("dig-point-id");
-  if (digPoint && targets.length) digPoint.replaceChildren();
-  state.selectedTargetId = targets[0]?.target_id || digPoint?.value || null;
+  state.selectedTargetId = targets[0]?.target_id || null;
   $("target-count").textContent = `${targets.length} 个可选点`;
   targets.forEach((target, index) => {
-    if (digPoint) {
-      const option = document.createElement("option");
-      option.value = target.target_id;
-      option.textContent = target.target_id;
-      digPoint.appendChild(option);
-    }
     const button = document.createElement("button");
     button.type = "button";
     button.className = `target-card${index === 0 ? " selected" : ""}`;
@@ -265,15 +214,68 @@ function selectTarget(target) {
   });
   $("dig-target").textContent = target.position_m
     .map(value => Number(value).toFixed(2)).join(", ");
-  if ($("hybrid-target")) $("hybrid-target").textContent = target.target_id;
-  if ($("dig-point-id")) $("dig-point-id").value = target.target_id;
+  if ($("hybrid-target") && !state.selectedHybridTargetId) {
+    $("hybrid-target").textContent = target.target_id;
+  }
+}
+
+function renderHybridDigGroups(groups, defaultGroupId) {
+  const select = $("hybrid-dig-group");
+  if (!select || !groups.length) return;
+  select.replaceChildren();
+  groups.forEach(group => {
+    const option = document.createElement("option");
+    option.value = group.group_id;
+    option.textContent = group.label;
+    select.appendChild(option);
+  });
+  const selected = groups.some(group => group.group_id === defaultGroupId)
+    ? defaultGroupId
+    : groups[0].group_id;
+  select.value = selected;
+  selectHybridGroup(selected);
+}
+
+function selectHybridGroup(groupId) {
+  const groups = state.config?.hybrid_dig_groups || [];
+  const group = groups.find(candidate => candidate.group_id === groupId);
+  if (!group || !group.point_ids.length) return;
+  state.selectedHybridGroupId = group.group_id;
+  const targetSelect = $("hybrid-dig-target");
+  targetSelect.replaceChildren();
+  group.point_ids.forEach(targetId => {
+    const option = document.createElement("option");
+    option.value = targetId;
+    option.textContent = targetId;
+    targetSelect.appendChild(option);
+  });
+  selectHybridTarget(group.point_ids[0]);
+}
+
+function selectHybridTarget(targetId) {
+  const groups = state.config?.hybrid_dig_groups || [];
+  const group = groups.find(candidate => candidate.group_id === state.selectedHybridGroupId);
+  if (!group || !group.point_ids.includes(targetId)) return;
+  state.selectedHybridTargetId = targetId;
+  $("hybrid-dig-target").value = targetId;
+  $("hybrid-target").textContent = targetId;
+  $("hybrid-group-hint").textContent =
+    `${group.label}：从 ${targetId} 开始，按 ${group.point_ids.join(" → ")} 循环；任务启动后选择锁定。`;
+}
+
+function renderHybridTarget(snapshot) {
+  const stage = snapshot.stage || "idle";
+  const selectedTarget = state.selectedHybridTargetId || state.selectedTargetId;
+  const targetId = hybridTerminalStages.has(stage)
+    ? selectedTarget || snapshot.dig_target_id
+    : snapshot.dig_target_id || selectedTarget;
+  $("hybrid-target").textContent = targetId || "—";
 }
 
 function renderSelectedMode() {
   const isRl = state.selectedMode === "rl";
   const isTeleop = state.selectedMode === "teleop";
   $("rl-target-section").classList.toggle("hidden", !isRl);
-  $("collection-protocol-panel")?.classList.toggle("hidden", isTeleop);
   $("collection-timeline").classList.toggle("hidden", isTeleop);
   $("start-button").textContent = isTeleop ? "启动仅遥操作" : "开始采集流程";
   $("batch-hint").textContent = isTeleop
@@ -309,7 +311,6 @@ function scheduleCameraRefresh(cameraId, delayMs) {
 }
 
 function renderSnapshot(snapshot) {
-  const previousStage = state.snapshot?.stage || "idle";
   state.snapshot = snapshot;
   const stage = snapshot.stage || "idle";
   const active = !terminalStages.has(stage);
@@ -321,7 +322,6 @@ function renderSnapshot(snapshot) {
     renderSelectedMode();
   }
   $("stage-label").textContent = stageLabels[stage] || stage;
-  $("completed-count").textContent = String(snapshot.completed_count || 0);
   $("status-dot").className = `status-dot${active ? " active" : ""}${stage === "failed" ? " error" : ""}`;
 
   const manual = stage === "manual_positioning";
@@ -331,37 +331,20 @@ function renderSnapshot(snapshot) {
   $("review-actions").classList.toggle("hidden", !review);
 
   const logs = Array.isArray(snapshot.logs) ? snapshot.logs : [];
-  const protocolLine = collectionProtocolLine(snapshot);
-  const visibleLogs = protocolLine && !logs.includes(protocolLine)
-    ? [protocolLine, ...logs]
-    : logs;
-  renderLogContent("log-output", visibleLogs, "等待采集任务…");
-  if (snapshot.task_variant) $("task-variant").value = snapshot.task_variant;
-  if (snapshot.soil_reset_block_id) $("soil-reset-block-id").value = snapshot.soil_reset_block_id;
-  if (snapshot.dig_point_id) $("dig-point-id").value = snapshot.dig_point_id;
-  if ($("episode-context")) {
-    $("episode-context").textContent = protocolLine.replace("[episode-context] ", "");
-  }
+  renderLogContent("log-output", logs, "等待采集任务…");
   $("episode-path").textContent = snapshot.episode_path || "";
   $("episode-path").title = snapshot.episode_path || "";
   $("error-banner").textContent = snapshot.error || "";
   $("error-banner").classList.toggle("hidden", !snapshot.error);
   renderProgress(stage);
   updateOwnershipControls();
-  if (
-    stage === "completed"
-    && previousStage !== "completed"
-    && state.config?.campaign_tracking_enabled
-  ) {
-    void refreshCampaignStatus();
-  }
 }
 
 function renderHybridSnapshot(snapshot) {
   state.hybridSnapshot = snapshot;
   const stage = snapshot.stage || "idle";
   $("hybrid-stage").textContent = hybridStageLabels[stage] || stage;
-  $("hybrid-target").textContent = snapshot.dig_target_id || state.selectedTargetId || "—";
+  renderHybridTarget(snapshot);
   const requestedCycles = Number(snapshot.requested_cycles || 1);
   $("hybrid-cycles").textContent = `${snapshot.run_completed_cycles || 0} / ${requestedCycles} 铲`;
   const logs = Array.isArray(snapshot.logs) ? snapshot.logs : [];
@@ -398,14 +381,7 @@ function updateOwnershipControls() {
   const hybridStage = state.hybridSnapshot?.stage || "idle";
   const collectionActive = !terminalStages.has(collectionStage);
   const hybridActive = !hybridTerminalStages.has(hybridStage);
-  const campaignBlocksCollection = Boolean(
-    state.config?.campaign_tracking_enabled
-    && state.selectedMode !== "teleop"
-    && (
-      state.campaignError
-      || !state.campaignStatus?.next_expected_slot
-    )
-  );
+  const hybridCanStop = state.hybridSnapshot?.can_stop === true;
   if (hybridActive) {
     $("stage-label").textContent = `闭环 · ${hybridStageLabels[hybridStage] || hybridStage}`;
     $("status-dot").className = `status-dot active${hybridStage === "failed" ? " error" : ""}`;
@@ -413,19 +389,18 @@ function updateOwnershipControls() {
     $("stage-label").textContent = stageLabels[collectionStage] || collectionStage;
     $("status-dot").className = `status-dot${collectionActive ? " active" : ""}${collectionStage === "failed" ? " error" : ""}`;
   }
-  $("start-button").disabled = collectionActive || hybridActive || campaignBlocksCollection;
+  $("start-button").disabled = collectionActive || hybridActive;
   $("stop-button").disabled = !collectionActive || collectionStage === "stopping";
   document.querySelectorAll(".mode-card").forEach(card => { card.disabled = collectionActive || hybridActive; });
   document.querySelectorAll(".target-card").forEach(card => { card.disabled = collectionActive || hybridActive; });
-  ["task-variant", "soil-reset-block-id", "dig-point-id"].forEach(id => {
-    if ($(id)) $(id).disabled = collectionActive || hybridActive;
-  });
   if (!state.config?.hybrid_mission_enabled) return;
   $("hybrid-segmented-start").disabled = collectionActive || hybridActive;
   $("hybrid-auto-start").disabled = collectionActive || hybridActive;
   $("hybrid-cycle-count").disabled = collectionActive || hybridActive;
+  $("hybrid-dig-group").disabled = collectionActive || hybridActive;
+  $("hybrid-dig-target").disabled = collectionActive || hybridActive;
   $("hybrid-advance").disabled = collectionActive || !hybridStage.startsWith("awaiting_");
-  $("hybrid-stop").disabled = !hybridActive || hybridStage === "stopping";
+  $("hybrid-stop").disabled = !hybridCanStop || hybridStage === "stopping";
   if (state.config.operator_control_enabled) {
     const operatorStage = state.operatorSnapshot?.stage || "stopped";
     const operatorActive = operatorStage === "starting" || operatorStage === "ready";
@@ -466,16 +441,17 @@ function bindActions() {
       .then(() => toast("Mission 日志已复制"))
       .catch(error => toast(error.message, true));
   });
+  $("clear-log")?.addEventListener("click", () => {
+    command("/api/collection/logs/clear");
+  });
+  $("clear-hybrid-log")?.addEventListener("click", () => {
+    commandHybrid("/api/hybrid/logs/clear");
+  });
   document.querySelectorAll(".mode-card").forEach(card => card.addEventListener("click", () => {
     state.selectedMode = card.dataset.mode;
     renderSelectedMode();
     document.querySelectorAll(".mode-card").forEach(node => node.classList.toggle("selected", node === card));
   }));
-  $("dig-point-id")?.addEventListener("change", event => {
-    const target = (state.config?.rl_dig_targets || [])
-      .find(candidate => candidate.target_id === event.target.value);
-    if (target) selectTarget(target);
-  });
   $("start-button").addEventListener("click", () => command(
     "/api/collection/start",
     collectionStartPayload(),
@@ -486,15 +462,23 @@ function bindActions() {
     command("/api/collection/outcome", {outcome: button.dataset.outcome});
   }));
   $("hybrid-segmented-start").addEventListener("click", () => commandHybrid("/api/hybrid/start", {
-    dig_target_id: state.selectedTargetId,
+    dig_target_id: state.selectedHybridTargetId || state.selectedTargetId,
+    dig_group_id: selectedHybridGroupId(),
     automatic: false,
     cycle_count: 1,
     motion_authorization: null
   }));
   $("hybrid-cycle-count").addEventListener("change", renderHybridCycleButton);
+  $("hybrid-dig-group").addEventListener("change", event => {
+    selectHybridGroup(event.target.value);
+  });
+  $("hybrid-dig-target").addEventListener("change", event => {
+    selectHybridTarget(event.target.value);
+  });
   $("hybrid-auto-start").addEventListener("click", () => {
     commandHybrid("/api/hybrid/start", {
-      dig_target_id: state.selectedTargetId,
+      dig_target_id: state.selectedHybridTargetId || state.selectedTargetId,
+      dig_group_id: selectedHybridGroupId(),
       automatic: true,
       cycle_count: selectedHybridCycleCount(),
       motion_authorization: hybridMotionAuthorization()
@@ -513,22 +497,10 @@ function bindActions() {
 }
 
 function collectionStartPayload() {
-  const teleop = state.selectedMode === "teleop";
   return {
     positioning_mode: state.selectedMode,
     dig_target_id: state.selectedMode === "rl" ? state.selectedTargetId : null,
-    task_variant: teleop ? null : $("task-variant")?.value || null,
-    soil_reset_block_id: teleop ? null : $("soil-reset-block-id")?.value || null,
-    dig_point_id: teleop ? null : $("dig-point-id")?.value || state.selectedTargetId,
   };
-}
-
-function collectionProtocolLine(snapshot) {
-  if (!snapshot.task_variant) return "";
-  return "[episode-context] "
-    + `task_variant=${snapshot.task_variant} `
-    + `soil_reset_block_id=${snapshot.soil_reset_block_id} `
-    + `dig_point_id=${snapshot.dig_point_id}`;
 }
 
 function hybridMotionAuthorization() {
@@ -538,6 +510,10 @@ function hybridMotionAuthorization() {
 function selectedHybridCycleCount() {
   const value = Number.parseInt($("hybrid-cycle-count")?.value || "4", 10);
   return Number.isInteger(value) && value >= 1 && value <= 9 ? value : 4;
+}
+
+function selectedHybridGroupId() {
+  return state.selectedHybridGroupId || "all";
 }
 
 function renderHybridCycleButton() {
@@ -628,10 +604,6 @@ async function boot() {
   renderHybridCycleButton();
   try {
     renderConfig(await api("/api/config"));
-    await refreshCampaignStatus();
-    if (state.config?.campaign_tracking_enabled) {
-      window.setInterval(refreshCampaignStatus, CAMPAIGN_REFRESH_MS);
-    }
     await refreshStatus();
     window.setInterval(refreshStatus, 500);
     await refreshHybridStatus();

@@ -110,6 +110,8 @@ class PreparedDumpAdapter(Protocol):
 
     def trigger_prepare(self) -> None: ...
 
+    def trigger_refresh(self) -> None: ...
+
     def activate_prepared(self) -> PreparedDumpActivation: ...
 
     def cancel(self) -> None: ...
@@ -129,6 +131,7 @@ class SshResidentControlAdapter:
         run_command: RunCommand = subprocess.run,
         connect_timeout_s: int = 5,
         command_timeout_s: int = 30,
+        lease_command_timeout_s: int = 1,
     ) -> None:
         if (
             not isinstance(ssh_host, str)
@@ -149,6 +152,12 @@ class SshResidentControlAdapter:
             run_command=run_command,
             connect_timeout_s=connect_timeout_s,
             command_timeout_s=command_timeout_s,
+        )
+        self._lease_remote_host = SshRuntimeHost(
+            ssh_host,
+            run_command=run_command,
+            connect_timeout_s=connect_timeout_s,
+            command_timeout_s=lease_command_timeout_s,
         )
         self._orin_repo = repo
         self._socket_path = socket_value
@@ -199,7 +208,12 @@ class SshResidentControlAdapter:
         remote_command = (
             f"cd {shlex.quote(self._orin_repo)} && {shlex.join(argv)}"
         )
-        output = self._remote_host.run(remote_command)
+        remote_host = (
+            self._lease_remote_host
+            if command == "renew_lease"
+            else self._remote_host
+        )
+        output = remote_host.run(remote_command)
         return _parse_success_response(output, expected_command=command)
 
 
@@ -263,6 +277,7 @@ class ResidentHybridMissionOperations:
         behavior: ResidentBehaviorAdapter,
         prepared_dump: PreparedDumpAdapter | None = None,
         prepared_dump_lead_steps: int | None = None,
+        prepared_dump_refresh_lead_steps: int | None = None,
         act_run_timeout_s: float,
         handoff_timeout_s: float = 10.0,
         poll_interval_s: float = 0.1,
@@ -291,10 +306,24 @@ class ResidentHybridMissionOperations:
             )
         if prepared_dump_lead_steps is not None:
             _act_step_budget(prepared_dump_lead_steps)
+        if prepared_dump_refresh_lead_steps is not None:
+            _act_step_budget(prepared_dump_refresh_lead_steps)
+            if prepared_dump_lead_steps is None:
+                raise ValueError(
+                    "prepared_dump_refresh_lead_steps requires prepared dump"
+                )
+            if prepared_dump_refresh_lead_steps >= prepared_dump_lead_steps:
+                raise ValueError(
+                    "prepared dump refresh lead must be less than initial lead"
+                )
         self._prepared_dump = prepared_dump
         self._prepared_dump_lead_steps = prepared_dump_lead_steps
+        self._prepared_dump_refresh_lead_steps = (
+            prepared_dump_refresh_lead_steps
+        )
         self._prepared_dump_started = False
         self._prepared_dump_triggered = False
+        self._prepared_dump_refreshed = False
         self._terminal_disarmed = False
         self._act_run_timeout_s = float(act_run_timeout_s)
         self._handoff_timeout_s = float(handoff_timeout_s)
@@ -319,6 +348,7 @@ class ResidentHybridMissionOperations:
             outcome = self._prepared_dump.activate_prepared()
             self._prepared_dump_started = False
             self._prepared_dump_triggered = False
+            self._prepared_dump_refreshed = False
             if outcome is not PreparedDumpActivation.ACTIVATED:
                 if outcome is not PreparedDumpActivation.FALLBACK_SAFE:
                     raise RuntimeError(
@@ -344,8 +374,13 @@ class ResidentHybridMissionOperations:
     def run_act_dig(self, max_steps: int) -> None:
         steps = _act_step_budget(max_steps)
         lead_steps = self._prepared_dump_lead_steps
+        refresh_lead_steps = self._prepared_dump_refresh_lead_steps
         if lead_steps is not None and lead_steps >= steps:
             raise ValueError("prepared_dump_lead_steps must be less than max_steps")
+        if refresh_lead_steps is not None and refresh_lead_steps >= steps:
+            raise ValueError(
+                "prepared_dump_refresh_lead_steps must be less than max_steps"
+            )
         try:
             self._cancel_prepared_dump()
             self._control.ensure_ready()
@@ -367,6 +402,7 @@ class ResidentHybridMissionOperations:
                 self._prepared_dump.start_prepare()
                 self._prepared_dump_started = True
                 self._prepared_dump_triggered = False
+                self._prepared_dump_refreshed = False
             deadline = self._monotonic() + self._act_run_timeout_s
             self._wait_for_act_completion(
                 status,
@@ -374,6 +410,11 @@ class ResidentHybridMissionOperations:
                 max_steps=steps,
                 prepare_at_step=(
                     None if lead_steps is None else steps - lead_steps
+                ),
+                refresh_at_step=(
+                    None
+                    if refresh_lead_steps is None
+                    else steps - refresh_lead_steps
                 ),
                 deadline=deadline,
             )
@@ -455,6 +496,7 @@ class ResidentHybridMissionOperations:
         prepared = self._prepared_dump
         self._prepared_dump_started = False
         self._prepared_dump_triggered = False
+        self._prepared_dump_refreshed = False
         if prepared is not None:
             prepared.cancel()
 
@@ -489,6 +531,7 @@ class ResidentHybridMissionOperations:
         generation: int,
         max_steps: int,
         prepare_at_step: int | None,
+        refresh_at_step: int | None,
         deadline: float,
     ) -> None:
         current = status
@@ -510,6 +553,16 @@ class ResidentHybridMissionOperations:
                 assert self._prepared_dump is not None
                 self._prepared_dump.trigger_prepare()
                 self._prepared_dump_triggered = True
+            if (
+                refresh_at_step is not None
+                and self._prepared_dump_started
+                and self._prepared_dump_triggered
+                and not self._prepared_dump_refreshed
+                and current.act_segment_completed_steps >= refresh_at_step
+            ):
+                assert self._prepared_dump is not None
+                self._prepared_dump.trigger_refresh()
+                self._prepared_dump_refreshed = True
             if current.act_segment_complete:
                 if current.act_segment_completed_steps != max_steps:
                     raise RuntimeError(

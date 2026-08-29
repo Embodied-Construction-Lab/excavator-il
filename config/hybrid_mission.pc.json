@@ -19,6 +19,7 @@
     "handoff_timeout_s": 3,
     "poll_interval_ms": 50,
     "prepared_dump_lead_steps": 20,
+    "prepared_dump_refresh_lead_steps": 5,
     "prepared_ready_grace_ms": 300,
     "prepared_start_tolerance_m": 0.15
   }

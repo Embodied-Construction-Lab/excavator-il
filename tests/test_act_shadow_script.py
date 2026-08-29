@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 
 def test_act_shadow_runs_as_operator_with_hardware_device_groups():
     script = (
@@ -27,6 +29,19 @@ def test_act_runtime_uses_the_verified_uvc_capture_node():
     assert '"device": "/dev/video0"' in config
 
 
+@pytest.mark.parametrize("name", ["run_act_shadow.sh", "run_act_motion.sh"])
+def test_standard_act_launchers_map_the_stable_front_camera(name):
+    script = (
+        Path(__file__).resolve().parents[1] / "scripts" / name
+    ).read_text(encoding="utf-8")
+
+    assert 'front_camera_device=' in script
+    assert 'front_camera_device_resolved="$(readlink -e -- ' in script
+    assert 'test -c "${front_camera_device_resolved}"' in script
+    assert '--device "${front_camera_device_resolved}:/dev/video0"' in script
+    assert "--device /dev/video0" not in script
+
+
 def test_act_runtime_requires_and_mounts_the_fixed_resnet18_backbone_cache():
     root = Path(__file__).resolve().parents[1]
 
@@ -50,13 +65,14 @@ def test_act_motion_requires_local_authorization_without_pc_runtime_input():
     assert "authentication_key" not in script
     assert "--network=host" in script
     assert "--operator-observation-config /opt/collection-runtime.json" in script
-    assert "collection.orin.json:/opt/collection-runtime.json:ro" in script
+    assert 'collection_config="${repo_dir}/config/collection.orin.json"' in script
+    assert '"${collection_config}:/opt/collection-runtime.json:ro"' in script
     assert "PC teleop" in script
     assert "模型可能立即发送非零杆量" in script
     assert '[[ "${confirmation}" != "ALLOW_ACT_MACHINE_MOTION" ]]' in script
     assert "--motion-authorization ALLOW_ACT_MACHINE_MOTION" in script
     assert "pgrep -f" in script
-    assert "fuser /dev/ttyTHS1 /dev/video0" in script
+    assert 'fuser /dev/ttyTHS1 "${front_camera_device_resolved}"' in script
     assert "--cap-drop=ALL" in script
     assert "--privileged" not in script
 

@@ -8,7 +8,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
-COLLECTION_UI_CONFIG_SCHEMA_VERSION = "excavator_collection_ui_config.v2"
+COLLECTION_UI_CONFIG_SCHEMA_VERSION = "excavator_collection_ui_config.v3"
+DUAL_CAMERA_COLLECTION_UI_CONFIG_SCHEMA_VERSION = "excavator_collection_ui_config.v2"
 LEGACY_COLLECTION_UI_CONFIG_SCHEMA_VERSION = "excavator_collection_ui_config.v1"
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
@@ -24,6 +25,7 @@ class CollectionUiConfig:
     telemetry_url: str = ""
     hybrid_mission_config: Path | None = None
     hybrid_evidence_config: Path | None = None
+    resident_fixed_cycle_config: Path | None = None
 
 
 def _text(value: object, field: str, *, allow_empty: bool = False) -> str:
@@ -56,11 +58,13 @@ def load_collection_ui_config(path: str | Path) -> CollectionUiConfig:
         raise ValueError("collection UI config must be an object")
     if raw.get("schema_version") not in {
         COLLECTION_UI_CONFIG_SCHEMA_VERSION,
+        DUAL_CAMERA_COLLECTION_UI_CONFIG_SCHEMA_VERSION,
         LEGACY_COLLECTION_UI_CONFIG_SCHEMA_VERSION,
     }:
         raise ValueError(
             "schema_version must be "
             f"{COLLECTION_UI_CONFIG_SCHEMA_VERSION} or "
+            f"{DUAL_CAMERA_COLLECTION_UI_CONFIG_SCHEMA_VERSION} or "
             f"{LEGACY_COLLECTION_UI_CONFIG_SCHEMA_VERSION}"
         )
     server = raw.get("server")
@@ -72,6 +76,13 @@ def load_collection_ui_config(path: str | Path) -> CollectionUiConfig:
     port = server.get("port")
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         raise ValueError("server.port must be an integer in [1, 65535]")
+    hybrid_mission = raw.get("hybrid_mission_config")
+    hybrid_evidence = raw.get("hybrid_evidence_config")
+    resident_fixed_cycle = raw.get("resident_fixed_cycle_config")
+    if resident_fixed_cycle is not None and hybrid_mission is not None:
+        raise ValueError(
+            "resident_fixed_cycle_config is exclusive with V2 hybrid Mission config"
+        )
     return CollectionUiConfig(
         guided_config=(
             config_path.parent
@@ -95,18 +106,26 @@ def load_collection_ui_config(path: str | Path) -> CollectionUiConfig:
         telemetry_url=_http_url(raw.get("telemetry_url"), "telemetry_url"),
         hybrid_mission_config=(
             None
-            if raw.get("hybrid_mission_config") is None
+            if hybrid_mission is None
             else (
                 config_path.parent
-                / _text(raw.get("hybrid_mission_config"), "hybrid_mission_config")
+                / _text(hybrid_mission, "hybrid_mission_config")
             ).resolve()
         ),
         hybrid_evidence_config=(
             None
-            if raw.get("hybrid_evidence_config") is None
+            if hybrid_evidence is None
             else (
                 config_path.parent
-                / _text(raw.get("hybrid_evidence_config"), "hybrid_evidence_config")
+                / _text(hybrid_evidence, "hybrid_evidence_config")
+            ).resolve()
+        ),
+        resident_fixed_cycle_config=(
+            None
+            if resident_fixed_cycle is None
+            else (
+                config_path.parent
+                / _text(resident_fixed_cycle, "resident_fixed_cycle_config")
             ).resolve()
         ),
     )
