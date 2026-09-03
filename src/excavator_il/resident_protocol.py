@@ -14,6 +14,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import select
 import socket
 import threading
@@ -23,6 +24,7 @@ from typing import Any
 
 RESIDENT_STATE_SCHEMA_VERSION = "resident_act_state.v1"
 CANDIDATE_SCHEMA_VERSION = "resident_policy_candidate.v2"
+ACT_WORKER_IDENTITY_SCHEMA_VERSION = "resident_act_worker_identity.v1"
 MAX_FRAME_BYTES = 4096
 UINT32_MAX = 0xFFFFFFFF
 UINT64_MAX = 0xFFFFFFFFFFFFFFFF
@@ -81,10 +83,30 @@ _CANDIDATE_FIELDS = frozenset(
         "valid_until_monotonic_ns",
     }
 )
+_ACT_WORKER_IDENTITY_FIELDS = frozenset(
+    {"schema_version", "behavior_id", "checkpoint_model_sha256"}
+)
+_SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 class ResidentActOwnerClosed(ConnectionError):
     """The authoritative resident owner ended the local data link."""
+
+
+@dataclass(frozen=True)
+class ResidentActWorkerIdentity:
+    behavior_id: str
+    checkpoint_model_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.behavior_id, str) or _SAFE_ID.fullmatch(self.behavior_id) is None:
+            raise ValueError("ACT worker behavior_id is invalid")
+        if (
+            not isinstance(self.checkpoint_model_sha256, str)
+            or _SHA256.fullmatch(self.checkpoint_model_sha256) is None
+        ):
+            raise ValueError("ACT worker checkpoint_model_sha256 is invalid")
 
 
 @dataclass(frozen=True)
@@ -327,13 +349,23 @@ def decode_policy_candidate(payload: bytes) -> ResidentPolicyCandidate:
 class ResidentActDataClient:
     """Strict framed client for the single owner-side ACT data link."""
 
-    def __init__(self, socket_path: str | os.PathLike[str]) -> None:
+    def __init__(
+        self,
+        socket_path: str | os.PathLike[str],
+        *,
+        worker_identity: ResidentActWorkerIdentity | None = None,
+    ) -> None:
         path = Path(socket_path)
         if not path.is_absolute():
             raise ValueError("resident ACT socket path must be absolute")
         if len(os.fsencode(path)) > _UNIX_PATH_MAX_BYTES:
             raise ValueError("resident ACT socket path exceeds the Unix limit")
+        if worker_identity is not None and not isinstance(
+            worker_identity, ResidentActWorkerIdentity
+        ):
+            raise ValueError("worker_identity is invalid")
         self._path = path
+        self._worker_identity = worker_identity
         self._connection: socket.socket | None = None
         self._receive_buffer = bytearray()
         self._expected_payload_bytes: int | None = None
@@ -377,6 +409,8 @@ class ResidentActDataClient:
             self._connection = connection
             self._receive_buffer.clear()
             self._expected_payload_bytes = None
+            if self._worker_identity is not None:
+                self._send_payload(encode_act_worker_identity(self._worker_identity))
             return
 
     def receive_state(self, *, timeout_s: float) -> ResidentActState | None:
@@ -406,7 +440,9 @@ class ResidentActDataClient:
                 self._receive_buffer.extend(chunk)
 
     def send_candidate(self, candidate: ResidentPolicyCandidate) -> None:
-        payload = encode_policy_candidate(candidate)
+        self._send_payload(encode_policy_candidate(candidate))
+
+    def _send_payload(self, payload: bytes) -> None:
         framed = len(payload).to_bytes(_HEADER_BYTES, "big") + payload
         with self._send_lock:
             connection = self._require_connection()
@@ -483,6 +519,31 @@ def _encode_json(value: dict[str, Any], *, kind: str) -> bytes:
     if not encoded or len(encoded) > MAX_FRAME_BYTES:
         raise ValueError(f"{kind} payload size is invalid")
     return encoded
+
+
+def encode_act_worker_identity(identity: ResidentActWorkerIdentity) -> bytes:
+    if not isinstance(identity, ResidentActWorkerIdentity):
+        raise ValueError("identity must be a ResidentActWorkerIdentity")
+    return _encode_json(
+        {
+            "schema_version": ACT_WORKER_IDENTITY_SCHEMA_VERSION,
+            "behavior_id": identity.behavior_id,
+            "checkpoint_model_sha256": identity.checkpoint_model_sha256,
+        },
+        kind="ACT worker identity",
+    )
+
+
+def decode_act_worker_identity(payload: bytes) -> ResidentActWorkerIdentity:
+    value = _decode_json(payload, kind="ACT worker identity")
+    if set(value) != _ACT_WORKER_IDENTITY_FIELDS:
+        raise ValueError("ACT worker identity fields are invalid")
+    if value["schema_version"] != ACT_WORKER_IDENTITY_SCHEMA_VERSION:
+        raise ValueError("ACT worker identity schema_version is unsupported")
+    return ResidentActWorkerIdentity(
+        behavior_id=value["behavior_id"],
+        checkpoint_model_sha256=value["checkpoint_model_sha256"],
+    )
 
 
 def _decode_json(payload: bytes, *, kind: str) -> dict[str, Any]:

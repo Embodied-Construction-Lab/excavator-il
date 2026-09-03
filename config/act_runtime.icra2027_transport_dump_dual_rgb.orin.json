@@ -1,5 +1,6 @@
 {
-  "schema_version": "excavator_act_runtime_config.v3",
+  "schema_version": "excavator_act_runtime_config.v4",
+  "act_behavior_id": "act_dig_transport_dump",
   "checkpoint_path": "/opt/act-checkpoint",
   "deployment_manifest_path": "/opt/act-deployment/deployment_manifest.json",
   "machine_profile_path": "/opt/excavator-config/machine_profile.json",

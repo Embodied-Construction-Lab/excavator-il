@@ -26,18 +26,27 @@ REMOTE_ORIN_REPOSITORY = (
     "/home/jetson16/workspace_excavator/excavator-orin-runtime"
 )
 MISSION_PATH = WORKSPACE / "AiryLidar/mission/config/excavation_cycle.json"
-DEMO_PATH = WORKSPACE / "AiryLidar/mission/config/excavation_demo.json"
 BUILDER = LOCAL_ORIN_REPOSITORY / "scripts/build_v3a_fixed_cycle_candidate.py"
 DEPLOYMENTS = (
     (
-        "regime_factorized",
-        130,
+        "fixed_target_hybrid",
+        Path("deploy/missions/fixed_target_hybrid.json"),
         Path("deploy/v3b/catalog/candidate"),
     ),
     (
-        "act_full_cycle",
-        260,
-        Path("deploy/v3b/act-full-cycle/catalog/candidate"),
+        "classical_tracking_hybrid",
+        Path("deploy/missions/classical_tracking_hybrid.json"),
+        Path("deploy/v3b/classical-tracking/catalog/candidate"),
+    ),
+    (
+        "fixed_dig_hybrid",
+        Path("deploy/missions/fixed_dig_hybrid.json"),
+        Path("deploy/v3b/fixed-dig/catalog/candidate"),
+    ),
+    (
+        "engineering_act_transport_reference",
+        Path("deploy/missions/engineering_act_transport_reference.json"),
+        Path("deploy/v3b/act-dig-transport-dump-reference/catalog/candidate"),
     ),
 )
 
@@ -111,8 +120,8 @@ def _run(command: list[str], *, cwd: Path | None = None) -> subprocess.Completed
 
 def _build_deployments(staging_root: Path) -> dict[str, Path]:
     generated: dict[str, Path] = {}
-    for profile, act_max_steps, relative_destination in DEPLOYMENTS:
-        output_dir = staging_root / profile
+    for mission_id, mission_definition, relative_destination in DEPLOYMENTS:
+        output_dir = staging_root / mission_id
         deployed_root = f"{REMOTE_ORIN_REPOSITORY}/{relative_destination}"
         _run(
             [
@@ -120,24 +129,20 @@ def _build_deployments(staging_root: Path) -> dict[str, Path]:
                 str(BUILDER),
                 "--mission-config",
                 str(MISSION_PATH),
-                "--demo-config",
-                str(DEMO_PATH),
+                "--mission-definition",
+                str(LOCAL_ORIN_REPOSITORY / mission_definition),
                 "--dig-point-catalog",
                 str(CATALOG_PATH),
                 "--output-dir",
                 str(output_dir),
                 "--deployed-root",
                 deployed_root,
-                "--mission-profile",
-                profile,
-                "--act-max-steps",
-                str(act_max_steps),
                 "--intermediate-waypoint-tolerance-m",
                 "0.40",
             ],
             cwd=LOCAL_ORIN_REPOSITORY,
         )
-        generated[profile] = output_dir
+        generated[mission_id] = output_dir
     return generated
 
 
@@ -145,30 +150,39 @@ def _verify_deployments(
     generated: dict[str, Path], report: dict[str, object]
 ) -> dict[str, str]:
     artifact_hashes: dict[str, str] = {}
-    for profile, _steps, _destination in DEPLOYMENTS:
-        directory = generated[profile]
+    for mission_id, _definition, _destination in DEPLOYMENTS:
+        directory = generated[mission_id]
         files = sorted(path.name for path in directory.iterdir())
         expected_files = [
             "fixed_cycle.candidate.json",
             "target_catalog.candidate.json",
         ]
         if files != expected_files:
-            raise CatalogSyncError(f"unexpected {profile} deployment files: {files}")
+            raise CatalogSyncError(
+                f"unexpected {mission_id} deployment files: {files}"
+            )
         plan = json.loads((directory / expected_files[0]).read_text())
         catalog_path = directory / expected_files[1]
         catalog = json.loads(catalog_path.read_text())
         artifact_sha = hashlib.sha256(catalog_path.read_bytes()).hexdigest()
         if plan.get("source_catalog_sha256") != report["source_catalog_sha256"]:
-            raise CatalogSyncError(f"{profile} source catalog hash mismatch")
+            raise CatalogSyncError(f"{mission_id} source catalog hash mismatch")
         if plan.get("dig_sequence") != list(report["points"]):
-            raise CatalogSyncError(f"{profile} point order mismatch")
+            raise CatalogSyncError(f"{mission_id} point order mismatch")
         if plan.get("dig_groups") != report["groups"]:
-            raise CatalogSyncError(f"{profile} group mismatch")
+            raise CatalogSyncError(f"{mission_id} group mismatch")
         if catalog.get("dig_points") != report["points"]:
-            raise CatalogSyncError(f"{profile} point coordinates mismatch")
+            raise CatalogSyncError(f"{mission_id} point coordinates mismatch")
         if plan.get("target_catalog", {}).get("sha256") != artifact_sha:
-            raise CatalogSyncError(f"{profile} artifact hash mismatch")
-        artifact_hashes[profile] = artifact_sha
+            raise CatalogSyncError(f"{mission_id} artifact hash mismatch")
+        if plan.get("mission", {}).get("mission_id") != mission_id:
+            raise CatalogSyncError(f"{mission_id} Mission identity mismatch")
+        mission_sha256 = plan.get("mission_sha256")
+        if catalog.get("mission_id") != mission_id:
+            raise CatalogSyncError(f"{mission_id} catalog Mission identity mismatch")
+        if catalog.get("mission_sha256") != mission_sha256:
+            raise CatalogSyncError(f"{mission_id} catalog Mission digest mismatch")
+        artifact_hashes[mission_id] = artifact_sha
     return artifact_hashes
 
 
@@ -178,11 +192,11 @@ def _remote_backup(orin_host: str) -> str:
     if not backup_path.startswith("/tmp/v3b-catalog-sync."):
         raise CatalogSyncError("Orin returned an invalid backup path")
     commands = ["set -e"]
-    for profile, _steps, relative_destination in DEPLOYMENTS:
+    for mission_id, _definition, relative_destination in DEPLOYMENTS:
         source = f"{REMOTE_ORIN_REPOSITORY}/{relative_destination}"
         commands.append(
             f"if [ -d '{source}' ]; then cp -a '{source}' "
-            f"'{backup_path}/{profile}'; fi"
+            f"'{backup_path}/{mission_id}'; fi"
         )
         commands.append(f"mkdir -p '{source}'")
     _run(["ssh", orin_host, "; ".join(commands)])
@@ -190,14 +204,14 @@ def _remote_backup(orin_host: str) -> str:
 
 
 def _upload_deployments(orin_host: str, generated: dict[str, Path]) -> None:
-    for profile, _steps, relative_destination in DEPLOYMENTS:
+    for mission_id, _definition, relative_destination in DEPLOYMENTS:
         remote = f"{REMOTE_ORIN_REPOSITORY}/{relative_destination}/"
         _run(
             [
                 "rsync",
                 "-a",
                 "--delete",
-                f"{generated[profile]}/",
+                f"{generated[mission_id]}/",
                 f"{orin_host}:{remote}",
             ]
         )
@@ -214,23 +228,30 @@ def _verify_remote(
             "points": report["points"],
             "groups": report["groups"],
             "artifact_hashes": artifact_hashes,
+            "deployments": {
+                mission_id: str(relative_destination)
+                for mission_id, _definition, relative_destination in DEPLOYMENTS
+            },
         },
         separators=(",", ":"),
     )
     verifier = (
         "import hashlib,json,sys; from pathlib import Path\n"
         "root=Path(sys.argv[1]); expected=json.loads(sys.argv[2])\n"
-        "items=((\"regime_factorized\",root/\"deploy/v3b/catalog/candidate\"),"
-        "(\"act_full_cycle\",root/\"deploy/v3b/act-full-cycle/catalog/candidate\"))\n"
-        "for profile,directory in items:\n"
+        "for mission_id,relative in expected[\"deployments\"].items():\n"
+        " directory=root/relative\n"
         " p=json.loads((directory/\"fixed_cycle.candidate.json\").read_text()); "
         "cpath=directory/\"target_catalog.candidate.json\"; "
-        "c=json.loads(cpath.read_text()); sha=hashlib.sha256(cpath.read_bytes()).hexdigest(); "
+        "c=json.loads(cpath.read_text()); "
+        "sha=hashlib.sha256(cpath.read_bytes()).hexdigest(); "
         "assert p[\"source_catalog_sha256\"]==expected[\"source_sha\"]; "
         "assert p[\"dig_sequence\"]==list(expected[\"points\"]); "
         "assert p[\"dig_groups\"]==expected[\"groups\"]; "
         "assert c[\"dig_points\"]==expected[\"points\"]; "
-        "assert sha==expected[\"artifact_hashes\"][profile]\n"
+        "assert p[\"mission\"][\"mission_id\"]==mission_id; "
+        "assert c[\"mission_id\"]==mission_id; "
+        "assert c[\"mission_sha256\"]==p[\"mission_sha256\"]; "
+        "assert sha==expected[\"artifact_hashes\"][mission_id]\n"
     )
     remote_command = " ".join(
         shlex.quote(value)
@@ -247,12 +268,12 @@ def _verify_remote(
 
 def _publish_local(generated: dict[str, Path]) -> str:
     backup_root = Path(tempfile.mkdtemp(prefix="v3b-catalog-local-backup-"))
-    for profile, _steps, relative_destination in DEPLOYMENTS:
+    for mission_id, _definition, relative_destination in DEPLOYMENTS:
         destination = LOCAL_ORIN_REPOSITORY / relative_destination
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
-            shutil.move(str(destination), str(backup_root / profile))
-        shutil.move(str(generated[profile]), str(destination))
+            shutil.move(str(destination), str(backup_root / mission_id))
+        shutil.move(str(generated[mission_id]), str(destination))
     return str(backup_root)
 
 

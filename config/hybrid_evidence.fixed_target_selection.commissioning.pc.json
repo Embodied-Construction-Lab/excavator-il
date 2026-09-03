@@ -1,0 +1,81 @@
+{
+  "schema_version": "excavator_hybrid_evidence_config.v2",
+  "mission_id": "fixed_target_hybrid",
+  "mission_sha256": "3a5c7edd6a228863e3d5eefe3228173848756a46e9ce441da53cc2b0c164d786",
+  "evidence_root": "../../EvaluationReport/experiment_runs",
+  "machine_profile_path": "../../shared/machine_profile.json",
+  "repository_paths": {
+    "excavator_il": "..",
+    "excavator_orin_runtime": "../../excavator-orin-runtime",
+    "airy_lidar": "../../AiryLidar",
+    "rl_excavator": "../../RLExcavator"
+  },
+  "config_paths": {
+    "act_runtime": "act_runtime.orin.json",
+    "act_deployment": "act_deployment.icra2027_dig_only_front_step400000.json",
+    "edge_runtime": "../../excavator-orin-runtime/deploy/edge_runtime.resident.remote.json",
+    "experiment_profile": "experiments/icra2027/fixed_target_selection.json"
+  },
+  "policy_ids": {
+    "dig_policy": "lerobot_act:icra2027_dig_only_front_swing_zero_seed2027_step400000",
+    "trajectory_controller": "onnx_rl:scale_v3_deadzone_reward_03_p003"
+  },
+  "host_topology": {
+    "pc": {
+      "host": "192.168.50.1",
+      "role": "planning_ui"
+    },
+    "orin": {
+      "host": "192.168.50.2",
+      "role": "resident_runtime"
+    }
+  },
+  "evaluation_scope": "training_internal",
+  "evidence_requirements": {
+    "act_deployment_manifest": {
+      "required": true,
+      "min_count": 1
+    },
+    "act_policy_checkpoint": {
+      "required": true,
+      "min_count": 1
+    },
+    "rl_onnx_model": {
+      "required": true,
+      "min_count": 1
+    }
+  },
+  "task_context": {
+    "task_variant": "dig_transport_dump",
+    "soil_reset_block_id": null,
+    "operator_id": null,
+    "material_id": null
+  },
+  "artifacts": [
+    {
+      "artifact_id": "act_deployment_manifest",
+      "source_path": "act_deployment.icra2027_dig_only_front_step400000.json",
+      "role": "act_deployment_manifest",
+      "metadata": {
+        "policy": "dig_policy"
+      }
+    },
+    {
+      "artifact_id": "act_policy_checkpoint",
+      "source_path": "../outputs/icra2027_dig_only_front_swing_zero_seed2027/checkpoints/400000/pretrained_model",
+      "role": "act_policy_checkpoint",
+      "metadata": {
+        "policy": "dig_policy",
+        "checkpoint_step": 400000
+      }
+    },
+    {
+      "artifact_id": "rl_onnx_model",
+      "source_path": "../../RLExcavator/Assets/AIModels/ScaleModelDeploy05_cale_v3_deadzone_reward_03_p003.onnx",
+      "role": "rl_onnx_model",
+      "metadata": {
+        "policy": "trajectory_controller"
+      }
+    }
+  ]
+}

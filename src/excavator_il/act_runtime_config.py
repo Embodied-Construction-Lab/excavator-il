@@ -13,7 +13,8 @@ from types import MappingProxyType
 from .collector.config import SerialConfig
 
 
-SCHEMA_VERSION = "excavator_act_runtime_config.v3"
+SCHEMA_VERSION = "excavator_act_runtime_config.v4"
+DUAL_CAMERA_SCHEMA_VERSION = "excavator_act_runtime_config.v3"
 LEGACY_SCHEMA_VERSION = "excavator_act_runtime_config.v2"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _BACKEND_IDENTIFIER = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
@@ -35,7 +36,8 @@ _COMMON_ROOT_FIELDS = frozenset(
 _ROOT_FIELDS_BY_SCHEMA = MappingProxyType(
     {
         LEGACY_SCHEMA_VERSION: _COMMON_ROOT_FIELDS | {"camera_front"},
-        SCHEMA_VERSION: _COMMON_ROOT_FIELDS | {"cameras"},
+        DUAL_CAMERA_SCHEMA_VERSION: _COMMON_ROOT_FIELDS | {"cameras"},
+        SCHEMA_VERSION: _COMMON_ROOT_FIELDS | {"cameras", "act_behavior_id"},
     }
 )
 _CAMERA_ROLES = ("front", "dump")
@@ -63,6 +65,7 @@ class ActRuntimeConfig:
     log_root: Path
     device: str
     dig_policy_backend: str
+    act_behavior_id: str | None
     serial: SerialConfig
     cameras: Mapping[str, ActCameraConfig]
     max_inference_state_age_ms: float
@@ -164,7 +167,7 @@ def load_act_runtime_config(path: str | Path) -> ActRuntimeConfig:
     expected_fields = _ROOT_FIELDS_BY_SCHEMA.get(schema_version)
     if expected_fields is None:
         raise ValueError(
-            f"schema_version must be {SCHEMA_VERSION} or {LEGACY_SCHEMA_VERSION}"
+            "schema_version must be a supported ACT runtime config version"
         )
     unexpected = set(root) - expected_fields
     if unexpected:
@@ -203,6 +206,13 @@ def load_act_runtime_config(path: str | Path) -> ActRuntimeConfig:
     dig_policy_backend = _normalized_backend_identifier(
         root.get("dig_policy_backend", "lerobot_act"), "dig_policy_backend"
     )
+    act_behavior_id = None
+    if schema_version == SCHEMA_VERSION:
+        act_behavior_id = _normalized_backend_identifier(
+            root.get("act_behavior_id"), "act_behavior_id"
+        )
+        if act_behavior_id not in {"act_dig_lift", "act_dig_transport_dump"}:
+            raise ValueError("act_behavior_id is unsupported")
     serial = _object(root.get("stm32_serial"), "stm32_serial")
     cameras = _camera_configs(root, schema_version)
     timing = _object(root.get("timing"), "timing")
@@ -224,6 +234,7 @@ def load_act_runtime_config(path: str | Path) -> ActRuntimeConfig:
         log_root=Path(_text(root.get("log_root"), "log_root")).expanduser(),
         device=device,
         dig_policy_backend=dig_policy_backend,
+        act_behavior_id=act_behavior_id,
         serial=SerialConfig(
             port=_text(serial.get("port"), "stm32_serial.port"),
             baudrate=baudrate,

@@ -1,5 +1,7 @@
 {
-  "schema_version": "excavator_hybrid_evidence_config.v1",
+  "schema_version": "excavator_hybrid_evidence_config.v2",
+  "mission_id": "fixed_target_hybrid",
+  "mission_sha256": "3a5c7edd6a228863e3d5eefe3228173848756a46e9ce441da53cc2b0c164d786",
   "evidence_root": "../../EvaluationReport/experiment_runs",
   "machine_profile_path": "../../shared/machine_profile.json",
   "repository_paths": {

@@ -542,20 +542,24 @@ async function commandOperator(path) {
 
 function setMetric(id, value, digits = 1) {
   const node = $(id);
-  if (node) node.textContent = Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : "—";
+  const numeric = value === null || value === undefined ? Number.NaN : Number(value);
+  if (node) node.textContent = Number.isFinite(numeric) ? numeric.toFixed(digits) : "—";
 }
 
 function renderTelemetry(payload) {
   const ageMs = Number(payload.age_ms);
-  const fresh = Number.isFinite(ageMs) && ageMs <= 250;
-  const hardwareFaults = Number(payload.fault_flags || 0) & ~16;
-  const healthy = payload.sensor_valid === true && hardwareFaults === 0;
+  const fresh = Number.isFinite(ageMs) && ageMs <= 500;
+  const faultFlags = payload.fault_flags;
+  const hardwareFault = Array.isArray(faultFlags)
+    ? faultFlags.length > 0
+    : (Number(faultFlags || 0) & ~16) !== 0;
+  const healthy = payload.sensor_valid === true && !hardwareFault;
   const badge = $("telemetry-state");
   badge.textContent = !fresh
     ? "遥测过期"
     : !healthy ? "传感器 / 硬件故障"
     : payload.control_enabled === true
-      ? `实时 · ${ageMs.toFixed(0)} ms`
+      ? `实时 · UDP 18081 · ${ageMs.toFixed(0)} ms`
       : "实时 · 安全零位";
   badge.classList.toggle("waiting", !fresh || !healthy);
   const angles = payload.joint_angles_deg || {};
@@ -572,9 +576,13 @@ function renderTelemetry(payload) {
 function renderTelemetryUnavailable() {
   const badge = $("telemetry-state");
   if (badge) {
-    badge.textContent = "等待 Collector";
+    badge.textContent = "等待机器状态 · UDP 18081";
     badge.classList.add("waiting");
   }
+  for (const id of [
+    "angle-boom", "angle-arm", "angle-bucket", "angle-swing",
+    "cylinder-boom", "cylinder-stick", "cylinder-bucket",
+  ]) setMetric(id, null);
 }
 
 async function refreshTelemetry() {

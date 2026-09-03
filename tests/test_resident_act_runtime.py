@@ -860,6 +860,8 @@ def test_worker_factory_loads_the_model_and_opens_the_camera_exactly_once(
             return policy
 
     config = SimpleNamespace(
+        act_behavior_id="act_dig_lift",
+        checkpoint_model_sha256="a" * 64,
         checkpoint_path=Path("/checkpoint"),
         deployment_manifest_path=Path("/manifest.json"),
         machine_profile_path=Path("/machine.json"),
@@ -988,6 +990,8 @@ def test_worker_factory_default_provider_fails_closed_for_unknown_backend(
     monkeypatch,
 ):
     config = SimpleNamespace(
+        act_behavior_id="act_dig_lift",
+        checkpoint_model_sha256="a" * 64,
         dig_policy_backend="diffusion_policy",
         camera=SimpleNamespace(
             device="/dev/video0", width=640, height=480, nominal_fps=30
@@ -1034,6 +1038,8 @@ def test_worker_factory_uses_injected_provider_without_commissioned_act_loader(
             return None
 
     config = SimpleNamespace(
+        act_behavior_id="act_dig_transport_dump",
+        checkpoint_model_sha256="b" * 64,
         dig_policy_backend="diffusion_policy",
         camera=SimpleNamespace(
             device="/dev/video0", width=640, height=480, nominal_fps=30
@@ -1048,7 +1054,9 @@ def test_worker_factory_uses_injected_provider_without_commissioned_act_loader(
     monkeypatch.setattr(
         resident_runtime_module,
         "ResidentActDataClient",
-        lambda socket_path: SimpleNamespace(socket_path=socket_path, close=lambda: None),
+        lambda socket_path, **_kwargs: SimpleNamespace(
+            socket_path=socket_path, close=lambda: None
+        ),
     )
     monkeypatch.setattr(
         resident_runtime_module,
@@ -1098,6 +1106,8 @@ def test_worker_factory_opens_every_configured_camera_role(monkeypatch):
         ),
     }
     config = SimpleNamespace(
+        act_behavior_id="act_dig_transport_dump",
+        checkpoint_model_sha256="b" * 64,
         dig_policy_backend="diffusion_policy",
         cameras=camera_configs,
         camera_roles=("front", "dump"),
@@ -1112,7 +1122,9 @@ def test_worker_factory_opens_every_configured_camera_role(monkeypatch):
     monkeypatch.setattr(
         resident_runtime_module,
         "ResidentActDataClient",
-        lambda socket_path: SimpleNamespace(socket_path=socket_path, close=lambda: None),
+        lambda socket_path, **_kwargs: SimpleNamespace(
+            socket_path=socket_path, close=lambda: None
+        ),
     )
 
     def open_camera(camera_config):

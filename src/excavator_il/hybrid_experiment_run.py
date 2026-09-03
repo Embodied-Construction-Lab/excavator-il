@@ -18,50 +18,39 @@ from types import MappingProxyType
 from typing import Any
 
 from ._hybrid_evidence_lifecycle import HybridMissionEvidenceLifecycle
+from ._hybrid_experiment_contract import (
+    ARTIFACT_CONFIG_FIELDS as _ARTIFACT_CONFIG_FIELDS,
+    AUTOMATIC_CONFIG_LABELS as _AUTOMATIC_CONFIG_LABELS,
+    EVALUATION_SCOPES as _EVALUATION_SCOPES,
+    HOST_CONFIG_FIELDS as _HOST_CONFIG_FIELDS,
+    HYBRID_CONFIG_FIELDS as _HYBRID_CONFIG_FIELDS,
+    HYBRID_EXPERIMENT_RUN_CONFIG_SCHEMA_VERSION,
+    HYBRID_POLICY_EVIDENCE_ROLES,
+    HybridEvidenceArtifact,
+    POLICY_LABELS as _POLICY_LABELS,
+    REPOSITORY_LABELS as _REPOSITORY_LABELS,
+    REQUIREMENT_CONFIG_FIELDS as _REQUIREMENT_CONFIG_FIELDS,
+    TASK_CONTEXT_CONFIG_FIELDS as _TASK_CONTEXT_CONFIG_FIELDS,
+    config_path as _config_path,
+    config_identifier as _config_identifier,
+    config_sha256 as _config_sha256,
+    config_text as _config_text,
+    dig_policy_family as _dig_policy_family,
+    expected_policy_evidence_roles as _expected_policy_evidence_roles,
+    fixed_action_profile_id as _fixed_action_profile_id,
+    optional_config_text as _optional_config_text,
+    path_mapping as _path_mapping,
+    require_no_symlink_components as _require_no_symlink_components,
+    required_count as _required_count,
+    requirement as _requirement,
+    strict_object as _strict_object,
+    string_mapping as _string_mapping,
+    trajectory_controller_family as _trajectory_controller_family,
+    validate_repository_scope as _validate_repository_scope,
+)
 from .experiment_run import EvidenceRequirement, ExperimentRun, TaskContext
 from .guided_episode import GuidedEpisodeConfig
 from .hybrid_mission import HybridMissionConfig
-
-
-_AUTOMATIC_CONFIG_LABELS = frozenset(
-    {"guided_episode", "hybrid_mission", "resident_fixed_cycle"}
-)
-HYBRID_POLICY_EVIDENCE_ROLES = (
-    "act_deployment_manifest",
-    "act_policy_checkpoint",
-    "rl_onnx_model",
-)
-HYBRID_EXPERIMENT_RUN_CONFIG_SCHEMA_VERSION = (
-    "excavator_hybrid_evidence_config.v1"
-)
-_HYBRID_CONFIG_FIELDS = frozenset(
-    {
-        "schema_version",
-        "evidence_root",
-        "machine_profile_path",
-        "repository_paths",
-        "config_paths",
-        "policy_ids",
-        "host_topology",
-        "evaluation_scope",
-        "evidence_requirements",
-        "task_context",
-        "artifacts",
-    }
-)
-_REPOSITORY_LABELS = frozenset(
-    {"excavator_il", "excavator_orin_runtime", "airy_lidar", "rl_excavator"}
-)
-_POLICY_LABELS = frozenset({"dig_policy", "trajectory_controller"})
-_TASK_CONTEXT_CONFIG_FIELDS = frozenset(
-    {"task_variant", "soil_reset_block_id", "operator_id", "material_id"}
-)
-_ARTIFACT_CONFIG_FIELDS = frozenset(
-    {"artifact_id", "source_path", "role", "metadata"}
-)
-_REQUIREMENT_CONFIG_FIELDS = frozenset({"required", "min_count"})
-_HOST_CONFIG_FIELDS = frozenset({"host", "role"})
-_EVALUATION_SCOPES = frozenset({"training_internal", "held_out_experiment"})
 
 
 class HybridEvidenceIncompleteError(RuntimeError):
@@ -72,101 +61,11 @@ class HybridEvidenceIncompleteError(RuntimeError):
         self.finalized = finalized
 
 
-def _strict_object(
-    value: object,
-    field: str,
-    *,
-    expected_fields: frozenset[str] | None = None,
-) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{field} must be an object")
-    if expected_fields is not None and set(value) != expected_fields:
-        raise ValueError(
-            f"{field} must contain exactly: {', '.join(sorted(expected_fields))}"
-        )
-    return value
-
-
-def _config_text(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{field} must be non-empty text")
-    return value
-
-
-def _optional_config_text(value: object, field: str) -> str | None:
-    if value is None:
-        return None
-    return _config_text(value, field)
-
-
-def _config_path(value: object, field: str, base: Path) -> Path:
-    text = _config_text(value, field)
-    return (base / text).expanduser().resolve()
-
-
-def _path_mapping(
-    value: object,
-    field: str,
-    base: Path,
-    *,
-    expected_labels: frozenset[str] | None = None,
-) -> dict[str, Path]:
-    raw = _strict_object(value, field, expected_fields=expected_labels)
-    if not raw:
-        raise ValueError(f"{field} must not be empty")
-    return {
-        _config_text(label, f"{field} label"): _config_path(
-            path, f"{field}.{label}", base
-        )
-        for label, path in raw.items()
-    }
-
-
-def _string_mapping(
-    value: object,
-    field: str,
-    *,
-    expected_labels: frozenset[str],
-) -> dict[str, str]:
-    raw = _strict_object(value, field, expected_fields=expected_labels)
-    return {
-        label: _config_text(raw[label], f"{field}.{label}")
-        for label in sorted(expected_labels)
-    }
-
-
 def _require_run_id(run: Any) -> str:
     value = getattr(run, "run_id", None)
     if not isinstance(value, str) or not value:
         raise ValueError("evidence run must expose a non-empty run_id")
     return value
-
-
-def _requirement(value: object, role: str) -> tuple[bool, int]:
-    if isinstance(value, EvidenceRequirement):
-        required, minimum = value.required, value.min_count
-    elif isinstance(value, Mapping):
-        required, minimum = value.get("required"), value.get("min_count")
-    else:
-        raise ValueError(f"evidence requirement {role} must be an object")
-    if not isinstance(required, bool):
-        raise ValueError(f"evidence requirement {role}.required must be boolean")
-    if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 0:
-        raise ValueError(
-            f"evidence requirement {role}.min_count must be non-negative"
-        )
-    return required, minimum
-
-
-def _required_count(value: object, role: str) -> int:
-    required, minimum = _requirement(value, role)
-    if not required:
-        raise ValueError(f"hybrid policy evidence role {role} must be required")
-    if minimum < 1:
-        raise ValueError(
-            f"hybrid policy evidence role {role} must require at least one artifact"
-        )
-    return minimum
 
 
 @dataclass(frozen=True)
@@ -180,34 +79,6 @@ class HybridMissionRunRequest:
 
 
 @dataclass(frozen=True)
-class HybridEvidenceArtifact:
-    """A concrete mission/runtime log path eligible for final registration."""
-
-    artifact_id: str
-    source_path: Path
-    role: str
-    metadata: Mapping[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        for value, field_name in (
-            (self.artifact_id, "artifact_id"),
-            (self.role, "role"),
-        ):
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"{field_name} must be non-empty text")
-        object.__setattr__(
-            self,
-            "source_path",
-            Path(self.source_path).expanduser(),
-        )
-        object.__setattr__(
-            self,
-            "metadata",
-            MappingProxyType(dict(self.metadata)),
-        )
-
-
-@dataclass(frozen=True)
 class HybridExperimentRunConfig:
     """Host-local, reproducibility-critical inputs absent from Mission config."""
 
@@ -217,6 +88,8 @@ class HybridExperimentRunConfig:
     config_paths: Mapping[str, Path]
     policy_ids: Mapping[str, str]
     host_topology: Mapping[str, Any]
+    mission_id: str
+    mission_sha256: str
     evaluation_scope: str = "training_internal"
     evidence_requirements: Mapping[
         str, EvidenceRequirement | Mapping[str, Any]
@@ -226,12 +99,15 @@ class HybridExperimentRunConfig:
     operator_id: str | None = None
     material_id: str | None = None
     artifacts: tuple[HybridEvidenceArtifact, ...] = ()
+    source_path: Path | None = None
 
     @classmethod
     def load(cls, path: str | Path) -> "HybridExperimentRunConfig":
         """Load the versioned host-local evidence contract without guessing paths."""
 
-        config_path = Path(path).expanduser().resolve()
+        source_path = Path(path).expanduser().absolute()
+        _require_no_symlink_components(source_path, "hybrid evidence config")
+        config_path = source_path.resolve()
         try:
             parsed = json.loads(config_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -270,15 +146,29 @@ class HybridExperimentRunConfig:
                 "host": _config_text(host["host"], f"host_topology.{label}.host"),
                 "role": _config_text(host["role"], f"host_topology.{label}.role"),
             }
+        policy_ids = _string_mapping(
+            root["policy_ids"],
+            "policy_ids",
+            expected_labels=_POLICY_LABELS,
+        )
+        expected_requirement_roles = frozenset(
+            _expected_policy_evidence_roles(
+                dig_policy_family=_dig_policy_family(policy_ids["dig_policy"]),
+                trajectory_controller_family=_trajectory_controller_family(
+                    policy_ids["trajectory_controller"]
+                ),
+            )
+        )
         raw_requirements = _strict_object(
             root["evidence_requirements"], "evidence_requirements"
         )
-        if set(raw_requirements) != set(HYBRID_POLICY_EVIDENCE_ROLES):
+        if set(raw_requirements) != expected_requirement_roles:
             raise ValueError(
-                "evidence_requirements must contain exactly the hybrid policy roles"
+                "evidence_requirements must contain exactly the configured "
+                "policy evidence roles"
             )
         requirements: dict[str, EvidenceRequirement] = {}
-        for role in HYBRID_POLICY_EVIDENCE_ROLES:
+        for role in sorted(expected_requirement_roles):
             item = _strict_object(
                 raw_requirements[role],
                 f"evidence_requirements.{role}",
@@ -337,12 +227,12 @@ class HybridExperimentRunConfig:
                 expected_labels=_REPOSITORY_LABELS,
             ),
             config_paths=_path_mapping(root["config_paths"], "config_paths", base),
-            policy_ids=_string_mapping(
-                root["policy_ids"],
-                "policy_ids",
-                expected_labels=_POLICY_LABELS,
-            ),
+            policy_ids=policy_ids,
             host_topology=host_topology,
+            mission_id=_config_identifier(root["mission_id"], "mission_id"),
+            mission_sha256=_config_sha256(
+                root["mission_sha256"], "mission_sha256"
+            ),
             evaluation_scope=_config_text(
                 root["evaluation_scope"], "evaluation_scope"
             ),
@@ -360,6 +250,7 @@ class HybridExperimentRunConfig:
                 task["material_id"], "task_context.material_id"
             ),
             artifacts=tuple(artifacts),
+            source_path=source_path,
         )
 
     def __post_init__(self) -> None:
@@ -411,19 +302,72 @@ class HybridExperimentRunConfig:
             "host_topology",
             MappingProxyType(dict(self.host_topology)),
         )
+        object.__setattr__(
+            self,
+            "mission_id",
+            _config_identifier(self.mission_id, "mission_id"),
+        )
+        object.__setattr__(
+            self,
+            "mission_sha256",
+            _config_sha256(self.mission_sha256, "mission_sha256"),
+        )
         object.__setattr__(self, "artifacts", artifacts)
+        object.__setattr__(
+            self,
+            "source_path",
+            None
+            if self.source_path is None
+            else Path(self.source_path).expanduser().absolute(),
+        )
         requirements = dict(self.evidence_requirements)
-        required_counts = {}
-        for role in HYBRID_POLICY_EVIDENCE_ROLES:
-            specification = requirements.setdefault(
-                role,
-                EvidenceRequirement(required=True, min_count=1),
+        dig_policy_family = _dig_policy_family(self.policy_ids.get("dig_policy"))
+        controller_family = _trajectory_controller_family(
+            self.policy_ids.get("trajectory_controller")
+        )
+        expected_policy_roles = frozenset(
+            _expected_policy_evidence_roles(
+                dig_policy_family=dig_policy_family,
+                trajectory_controller_family=controller_family,
             )
-            required_counts[role] = _required_count(specification, role)
+        )
+        unexpected_requirement_roles = frozenset(requirements) - expected_policy_roles
+        if unexpected_requirement_roles:
+            raise ValueError(
+                "evidence_requirements roles do not match configured policy "
+                "families: "
+                + ", ".join(sorted(unexpected_requirement_roles))
+            )
+        required_counts = {
+            role: _required_count(
+                requirements.setdefault(
+                    role,
+                    EvidenceRequirement(required=True, min_count=1),
+                ),
+                role,
+            )
+            for role in expected_policy_roles
+        }
+        forbidden_policy_roles = frozenset(HYBRID_POLICY_EVIDENCE_ROLES) - (
+            expected_policy_roles
+        )
+        forbidden_bound_roles = sorted(
+            {
+                item.role
+                for item in artifacts
+                if item.role in forbidden_policy_roles
+            }
+        )
+        if forbidden_bound_roles:
+            raise ValueError(
+                "configured policy families must not bind unsupported policy "
+                "artifacts: "
+                + ", ".join(forbidden_bound_roles)
+            )
         observed_roles = Counter(item.role for item in artifacts)
         missing_bindings = [
             role
-            for role in HYBRID_POLICY_EVIDENCE_ROLES
+            for role in required_counts
             if observed_roles[role] < required_counts[role]
         ]
         if missing_bindings:
@@ -437,6 +381,24 @@ class HybridExperimentRunConfig:
             MappingProxyType(requirements),
         )
 
+    def validate_repository_scope(self) -> None:
+        """Reject loaded provenance paths outside their declared workspace."""
+
+        if self.source_path is None:
+            raise ValueError(
+                "source_path is required for repository-scoped hybrid evidence"
+            )
+        _validate_repository_scope(
+            source_path=self.source_path,
+            evidence_root=self.evidence_root,
+            machine_profile_path=self.machine_profile_path,
+            repository_paths=self.repository_paths,
+            config_paths=self.config_paths,
+            artifact_paths=tuple(
+                artifact.source_path for artifact in self.artifacts
+            ),
+        )
+
 
 class _ConfiguredHybridExperimentRun:
     def __init__(
@@ -448,6 +410,9 @@ class _ConfiguredHybridExperimentRun:
             str, EvidenceRequirement | Mapping[str, Any]
         ],
         evaluation_scope: str,
+        mission_id: str,
+        mission_sha256: str,
+        experiment_profile_id: str | None = None,
         initial_events: tuple[tuple[str, Mapping[str, Any]], ...] = (),
         prestart_artifacts: tuple[HybridEvidenceArtifact, ...] = (),
         path_is_available: Callable[[Path], bool],
@@ -456,6 +421,9 @@ class _ConfiguredHybridExperimentRun:
         self._artifacts = artifacts
         self._path_is_available = path_is_available
         self._evaluation_scope = evaluation_scope
+        self._mission_id = mission_id
+        self._mission_sha256 = mission_sha256
+        self._experiment_profile_id = experiment_profile_id
         self._registered_artifact_ids: set[str] = set()
         self._registered_roles: Counter[str] = Counter()
         self._reported_unavailable_ids: set[str] = set()
@@ -524,6 +492,13 @@ class _ConfiguredHybridExperimentRun:
         final_metrics = {
             **dict(metrics or {}),
             "evaluation_scope": self._evaluation_scope,
+            "mission_id": self._mission_id,
+            "mission_sha256": self._mission_sha256,
+            **(
+                {"experiment_profile_id": self._experiment_profile_id}
+                if self._experiment_profile_id is not None
+                else {}
+            ),
         }
         for artifact in self._artifacts:
             if artifact.artifact_id in self._registered_artifact_ids:
@@ -611,10 +586,67 @@ class HybridExperimentRunFactory:
         self._path_is_available = path_is_available
         self._runtime_config_label = runtime_config_label
         self._runtime_backend = runtime_backend
+        self._config.validate_repository_scope()
+        self._experiment_profile = self._load_experiment_profile()
+        self._experiment_profile_id = (
+            None
+            if self._experiment_profile is None
+            else self._experiment_profile.profile_id
+        )
+
+    def _load_experiment_profile(self) -> Any | None:
+        profile_path = self._config.config_paths.get("experiment_profile")
+        if profile_path is None:
+            return None
+        from .icra2027_experiment_profile import Icra2027ExperimentProfile
+
+        profile = Icra2027ExperimentProfile.load(profile_path)
+        profile.preflight()
+        expected_scope = (
+            "held_out_experiment"
+            if profile.readiness == "ready"
+            else "training_internal"
+        )
+        if self._config.evaluation_scope != expected_scope:
+            raise ValueError(
+                f"{profile.readiness} experiment_profile requires "
+                f"{expected_scope} evidence scope"
+            )
+        return profile
+
+    def _require_profile_runtime_binding(self, config_path: Path) -> None:
+        if self._experiment_profile is None:
+            return
+        expected = self._experiment_profile.bindings[
+            "resident_fixed_cycle_config"
+        ]
+        if expected is None or Path(config_path).expanduser().resolve() != expected:
+            raise ValueError(
+                "experiment_profile runtime config does not match the Mission "
+                f"request: expected {expected}, got "
+                f"{Path(config_path).expanduser().resolve()}"
+            )
+
+    def _require_fixed_action_policy_binding(self) -> None:
+        policy_id = self._config.policy_ids["dig_policy"]
+        if _dig_policy_family(policy_id) != "fixed_action":
+            return
+        expected_profile_id = policy_id.partition(":")[2]
+        for artifact in self._config.artifacts:
+            if artifact.role != "fixed_action_profile":
+                continue
+            actual_profile_id = _fixed_action_profile_id(artifact.source_path)
+            if actual_profile_id != expected_profile_id:
+                raise ValueError(
+                    "fixed_action policy identity does not match bound "
+                    "fixed_action_profile: "
+                    f"expected {expected_profile_id}, got {actual_profile_id}"
+                )
 
     def preflight(self) -> None:
         """Validate static host-local evidence inputs without starting hardware."""
 
+        self._config.validate_repository_scope()
         if not self._config.machine_profile_path.is_file():
             raise ValueError(
                 "machine_profile_path does not exist as a file: "
@@ -642,6 +674,7 @@ class HybridExperimentRunFactory:
                     f"artifact {artifact.role} must be a file or directory: "
                     f"{artifact.source_path}"
                 )
+        self._require_fixed_action_policy_binding()
         evidence_parent = self._config.evidence_root.parent
         if not evidence_parent.is_dir():
             raise ValueError(
@@ -656,7 +689,20 @@ class HybridExperimentRunFactory:
             )
 
     def __call__(self, request: HybridMissionRunRequest) -> Any:
+        self._config.validate_repository_scope()
+        self._require_profile_runtime_binding(request.config_path)
         hybrid = self._hybrid_config_loader(request.config_path)
+        if (
+            self._runtime_config_label == "resident_fixed_cycle"
+            and getattr(hybrid, "expected_mission_id", None) != self._config.mission_id
+        ):
+            raise ValueError("runtime mission_id does not match evidence mission_id")
+        if (
+            self._runtime_config_label == "resident_fixed_cycle"
+            and getattr(hybrid, "expected_mission_sha256", None)
+            != self._config.mission_sha256
+        ):
+            raise ValueError("runtime Mission digest does not match evidence")
         guided_path = Path(hybrid.guided_config)
         guided = self._guided_config_loader(guided_path)
         available_required_roles = Counter(
@@ -682,10 +728,12 @@ class HybridExperimentRunFactory:
                 "required hybrid evidence is unavailable before Mission start: "
                 + ", ".join(missing_required_roles)
             )
+        self._require_fixed_action_policy_binding()
         operator_id = self._config.operator_id or guided.operator_id
         material_id = self._config.material_id or guided.material_id
         config_paths = {
             **self._config.config_paths,
+            "hybrid_evidence": self._config.source_path,
             "guided_episode": guided_path,
             self._runtime_config_label: request.config_path,
         }
@@ -711,6 +759,9 @@ class HybridExperimentRunFactory:
             artifacts=self._config.artifacts,
             evidence_requirements=self._config.evidence_requirements,
             evaluation_scope=self._config.evaluation_scope,
+            mission_id=self._config.mission_id,
+            mission_sha256=self._config.mission_sha256,
+            experiment_profile_id=self._experiment_profile_id,
             initial_events=(
                 (
                     "runtime_selected",
@@ -723,6 +774,13 @@ class HybridExperimentRunFactory:
                         ),
                         "automatic": request.automatic,
                         "requested_cycles": request.requested_cycles,
+                        "mission_id": self._config.mission_id,
+                        "mission_sha256": self._config.mission_sha256,
+                        **(
+                            {"experiment_profile_id": self._experiment_profile_id}
+                            if self._experiment_profile_id is not None
+                            else {}
+                        ),
                     },
                 ),
             ),

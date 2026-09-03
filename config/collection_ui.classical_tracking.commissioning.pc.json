@@ -1,0 +1,13 @@
+{
+  "schema_version": "excavator_collection_ui_config.v3",
+  "guided_config": "guided_episode.pc.json",
+  "resident_fixed_cycle_config": "resident_fixed_cycle.classical_tracking.commissioning.pc.json",
+  "hybrid_evidence_config": "hybrid_evidence.classical_tracking.commissioning.pc.json",
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8088
+  },
+  "camera_preview_url": "http://192.168.50.2:18092/camera/front.mjpg",
+  "camera_dump_preview_url": "http://192.168.50.2:18092/camera/dump.mjpg",
+  "visualization_url": ""
+}

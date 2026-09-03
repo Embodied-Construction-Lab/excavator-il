@@ -12,8 +12,9 @@ from excavator_il.resident_fixed_cycle_visualization import (
 def _status(active_trajectory):
     return {
         "run_id": "run-v3a-001",
-        "mission_profile": "regime_factorized",
-        "stage": "FOLLOW_DIG",
+        "mission_id": "fixed_target_hybrid",
+        "active_behavior_id": "onnx_rl_tracking",
+        "stage": "go_current_dig",
         "requested_cycles": 2,
         "completed_cycles": 0,
         "current_dig_point_id": "dig_01",
@@ -42,7 +43,8 @@ def _trajectory():
 def test_remote_status_strictly_parses_orin_active_trajectory():
     status = ResidentFixedCycleRemoteStatus.from_mapping(_status(_trajectory()))
 
-    assert status.mission_profile == "regime_factorized"
+    assert status.mission_id == "fixed_target_hybrid"
+    assert status.active_behavior_id == "onnx_rl_tracking"
     assert status.active_trajectory == ResidentTrajectoryVisualization(
         frame_id="machine_root_ros",
         target_id="dig_01",
@@ -54,6 +56,38 @@ def test_remote_status_strictly_parses_orin_active_trajectory():
         current_waypoint_index=1,
         waypoint_tolerance_m=0.40,
     )
+
+
+def test_remote_status_accepts_declarative_fixed_dig_behavior_and_custom_stage():
+    payload = _status(_trajectory())
+    payload["mission_id"] = "fixed_dig_hybrid"
+    payload["active_behavior_id"] = "fixed_dig"
+    payload["stage"] = "dig_with_fixed_action"
+
+    status = ResidentFixedCycleRemoteStatus.from_mapping(payload)
+
+    assert status.mission_id == "fixed_dig_hybrid"
+    assert status.active_behavior_id == "fixed_dig"
+    assert status.stage == "dig_with_fixed_action"
+
+
+def test_remote_status_requires_active_behavior_only_while_nonterminal():
+    active = _status(None)
+    active["active_behavior_id"] = ""
+    with pytest.raises(ValueError, match="active_behavior_id"):
+        ResidentFixedCycleRemoteStatus.from_mapping(active)
+
+    terminal = _status(None)
+    terminal.update(
+        {
+            "stage": "COMPLETED",
+            "active_behavior_id": "",
+            "terminal": True,
+            "outcome": "SUCCEEDED",
+        }
+    )
+    parsed = ResidentFixedCycleRemoteStatus.from_mapping(terminal)
+    assert parsed.active_behavior_id == ""
 
 
 @pytest.mark.parametrize(

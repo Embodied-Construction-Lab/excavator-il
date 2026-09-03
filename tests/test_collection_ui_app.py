@@ -653,7 +653,7 @@ def test_collection_ui_exposes_config_status_and_guided_collection_actions(tmp_p
     assert 'id="hybrid-dig-group"' in page.text
     assert 'id="hybrid-dig-target"' in page.text
     assert "起始挖掘点" in page.text
-    assert '/static/app.js?v=20260829-point-catalog' in page.text
+    assert '/static/app.js?v=20260902-unified-state' in page.text
     assert 'id="copy-log"' in page.text
     assert 'id="copy-hybrid-log"' in page.text
     assert 'id="clear-log"' in page.text
@@ -875,6 +875,60 @@ def test_collection_ui_proxies_collector_telemetry(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     assert response.json() == expected
+
+
+def test_collection_ui_uses_lifecycle_owned_machine_state_telemetry(tmp_path):
+    supervisor = _Supervisor()
+
+    class _TelemetrySource:
+        def __init__(self):
+            self.started = False
+            self.closed = False
+
+        def start(self):
+            self.started = True
+
+        def snapshot(self):
+            assert self.started
+            return {
+                "source": "machine_state_v1/udp:18081",
+                "seq": 18,
+                "age_ms": 20.0,
+                "joint_angles_deg": {},
+                "cylinders_mm": {},
+            }
+
+        def close(self):
+            self.closed = True
+
+    source = _TelemetrySource()
+    app = create_collection_ui_app(
+        config=CollectionUiConfig(
+            guided_config=tmp_path / "guided.json",
+            host="127.0.0.1",
+            port=8088,
+            camera_preview_url="http://192.168.50.2:18092/camera/front.mjpg",
+            visualization_url="",
+            telemetry_url="http://invalid.example/legacy.json",
+        ),
+        metadata=CollectionUiMetadata(
+            operator_id="zhaoshuai",
+            task="ExecuteDig",
+            dig_target_m=(1.0, 0.0, 0.0),
+            orin_host="192.168.50.2",
+            rl_dig_targets=(),
+        ),
+        supervisor=supervisor,
+        telemetry_source=source,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/telemetry")
+        assert source.started is True
+
+    assert response.status_code == 200
+    assert response.json()["source"] == "machine_state_v1/udp:18081"
+    assert source.closed is True
 
 
 def test_collection_ui_proxies_one_collector_camera_snapshot(monkeypatch, tmp_path):

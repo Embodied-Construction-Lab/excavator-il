@@ -1,5 +1,6 @@
 {
-  "schema_version": "excavator_act_runtime_config.v2",
+  "schema_version": "excavator_act_runtime_config.v4",
+  "act_behavior_id": "act_dig_lift",
   "checkpoint_path": "/opt/act-checkpoint",
   "deployment_manifest_path": "/opt/act-deployment/deployment_manifest.json",
   "machine_profile_path": "/opt/excavator-config/machine_profile.json",
@@ -20,11 +21,13 @@
     "port": "/dev/ttyTHS1",
     "baudrate": 460800
   },
-  "camera_front": {
-    "device": "/dev/video0",
-    "width": 640,
-    "height": 480,
-    "fps": 30
+  "cameras": {
+    "front": {
+      "device": "/dev/video0",
+      "width": 640,
+      "height": 480,
+      "fps": 30
+    }
   },
   "timing": {
     "max_inference_state_age_ms": 100,

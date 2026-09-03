@@ -30,6 +30,7 @@ class AiryOperatorSupervisor:
         behavior_port: int | None,
         profile: str = "live_commissioning",
         trajectory_path: str | Path | None = None,
+        external_state_bridge: bool = False,
         line_process_factory: Callable[..., Any] = LineProcess,
         output: Callable[[str], None] = print,
         ready_timeout_s: int = 60,
@@ -54,6 +55,7 @@ class AiryOperatorSupervisor:
             if trajectory_path is None
             else Path(trajectory_path).expanduser().resolve()
         )
+        self._external_state_bridge = external_state_bridge
         self._factory = line_process_factory
         self._output = output
         self._ready_timeout_s = ready_timeout_s
@@ -108,6 +110,8 @@ class AiryOperatorSupervisor:
             launch_arguments.append(
                 f"v3a_trajectory_path:={self._trajectory_path}"
             )
+        if self._external_state_bridge:
+            launch_arguments.append("external_state_bridge:=true")
         launch = shlex.join(launch_arguments)
         shell_command = " && ".join(
             [

@@ -1,0 +1,29 @@
+{
+  "schema_version": "excavator_icra2027_experiment_profile.v2",
+  "profile_id": "tadps",
+  "expected_mission_id": null,
+  "expected_mission_sha256": null,
+  "study_kind": "component_benchmark",
+  "readiness": "planned",
+  "reference_profile_id": null,
+  "isolated_factor": null,
+  "method_factors": {
+    "software_architecture": "regime_factorized",
+    "target_selection": "tadps",
+    "trajectory_tracking": "not_applicable",
+    "task_policy": "not_applicable"
+  },
+  "bindings": {
+    "collection_ui_config": null,
+    "resident_fixed_cycle_config": null,
+    "hybrid_evidence_config": null
+  },
+  "required_metrics": [
+    "terrain_valid_output_rate",
+    "target_displacement_m",
+    "target_switch_rate",
+    "dropout_rate",
+    "runtime_ms",
+    "downstream_planner_accept_rate"
+  ]
+}

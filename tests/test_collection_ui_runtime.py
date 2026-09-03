@@ -34,6 +34,23 @@ def test_collection_ui_metadata_comes_from_authoritative_guided_config():
     )
 
 
+def test_classical_tracking_ui_composes_without_starting_hardware():
+    config_path = (
+        Path(__file__).parents[1]
+        / "config/collection_ui.classical_tracking.commissioning.pc.json"
+    )
+
+    runtime = build_collection_ui_runtime(config_path)
+    fixed = ResidentFixedCyclePcConfig.load(
+        runtime.config.resident_fixed_cycle_config
+    )
+
+    assert fixed.trajectory_controller_backend == "cartesian_p"
+    assert fixed.edge_runtime_config == Path(
+        "deploy/edge_runtime.resident.cartesian_p.commissioning.json"
+    )
+
+
 def test_collection_ui_runtime_composes_config_supervisor_and_app(
     monkeypatch, tmp_path
 ):

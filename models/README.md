@@ -22,7 +22,8 @@
 
 ## 当前 V3-B 候选
 
-`icra2027_transport_dump_dual_rgb_step115000/` 是 V3-B `act_full_cycle` 的本地部署候选：
+`icra2027_transport_dump_dual_rgb_step115000/` 是 V3-B
+`act_dig_transport_dump_reference` 工程参考任务的本地部署候选：
 
 - 输入：按固定角色排序的 `front`、`dump` 两路 640×480 RGB 与 11D proprioception；
 - 输出：`[boom, stick, bucket, swing]` 四维归一化动作；

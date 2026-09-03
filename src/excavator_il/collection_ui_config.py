@@ -103,7 +103,11 @@ def load_collection_ui_config(path: str | Path) -> CollectionUiConfig:
             "visualization_url",
             allow_empty=True,
         ),
-        telemetry_url=_http_url(raw.get("telemetry_url"), "telemetry_url"),
+        telemetry_url=_http_url(
+            raw.get("telemetry_url", ""),
+            "telemetry_url",
+            allow_empty=True,
+        ),
         hybrid_mission_config=(
             None
             if hybrid_mission is None

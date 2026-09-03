@@ -1,0 +1,30 @@
+{
+  "schema_version": "excavator_icra2027_experiment_profile.v2",
+  "profile_id": "fixed_dig",
+  "expected_mission_id": "fixed_dig_hybrid",
+  "expected_mission_sha256": "a52462867a4c81e28e623d02c736b3f6e91cec62cbb71fa0505ad6035ad80101",
+  "study_kind": "live_mission",
+  "readiness": "commissioning",
+  "reference_profile_id": "fixed_target_selection",
+  "isolated_factor": "task_policy",
+  "method_factors": {
+    "software_architecture": "regime_factorized",
+    "target_selection": "fixed_catalog",
+    "trajectory_tracking": "tc_btf",
+    "task_policy": "fixed_dig_fixed_dump"
+  },
+  "bindings": {
+    "collection_ui_config": "../../collection_ui.fixed_dig.commissioning.pc.json",
+    "resident_fixed_cycle_config": "../../resident_fixed_cycle.fixed_dig.commissioning.pc.json",
+    "hybrid_evidence_config": "../../hybrid_evidence.fixed_dig.commissioning.pc.json"
+  },
+  "required_metrics": [
+    "cycle_success_rate",
+    "cycle_duration_s",
+    "payload_mass_kg",
+    "fill_ratio",
+    "spillage_mass_kg",
+    "intervention_count",
+    "runtime_abort_count"
+  ]
+}

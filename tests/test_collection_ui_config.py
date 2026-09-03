@@ -130,3 +130,25 @@ def test_active_ui_config_selects_v3b_resident_fixed_cycle():
     assert ui_config.hybrid_evidence_config == (
         config_dir / "hybrid_evidence.pc.json"
     ).resolve()
+    assert ui_config.telemetry_url == ""
+
+
+def test_classical_tracking_ui_config_is_parallel_to_default_v3b():
+    config_dir = Path(__file__).parents[1] / "config"
+
+    ui_config = load_collection_ui_config(
+        config_dir / "collection_ui.classical_tracking.commissioning.pc.json"
+    )
+
+    assert ui_config.resident_fixed_cycle_config == (
+        config_dir
+        / "resident_fixed_cycle.classical_tracking.commissioning.pc.json"
+    ).resolve()
+    assert ui_config.hybrid_evidence_config == (
+        config_dir
+        / "hybrid_evidence.classical_tracking.commissioning.pc.json"
+    ).resolve()
+    default = load_collection_ui_config(config_dir / "collection_ui.pc.json")
+    assert default.resident_fixed_cycle_config != (
+        ui_config.resident_fixed_cycle_config
+    )

@@ -1,0 +1,67 @@
+{
+  "schema_version": "excavator_hybrid_evidence_config.v2",
+  "mission_id": "fixed_dig_hybrid",
+  "mission_sha256": "a52462867a4c81e28e623d02c736b3f6e91cec62cbb71fa0505ad6035ad80101",
+  "evidence_root": "../../EvaluationReport/experiment_runs",
+  "machine_profile_path": "../../shared/machine_profile.json",
+  "repository_paths": {
+    "excavator_il": "..",
+    "excavator_orin_runtime": "../../excavator-orin-runtime",
+    "airy_lidar": "../../AiryLidar",
+    "rl_excavator": "../../RLExcavator"
+  },
+  "config_paths": {
+    "edge_runtime": "../../excavator-orin-runtime/deploy/edge_runtime.resident.fixed_dig.commissioning.json",
+    "fixed_action_profile": "../../excavator-orin-runtime/deploy/fixed_actions.icra2027_fixed_dig.commissioning.json",
+    "experiment_profile": "experiments/icra2027/fixed_dig.json"
+  },
+  "policy_ids": {
+    "dig_policy": "fixed_action:icra2027_fixed_dig_fixed_dump_commissioning_v1",
+    "trajectory_controller": "onnx_rl:scale_v3_deadzone_reward_03_p003"
+  },
+  "host_topology": {
+    "pc": {
+      "host": "192.168.50.1",
+      "role": "planning_ui"
+    },
+    "orin": {
+      "host": "192.168.50.2",
+      "role": "resident_runtime"
+    }
+  },
+  "evaluation_scope": "training_internal",
+  "evidence_requirements": {
+    "fixed_action_profile": {
+      "required": true,
+      "min_count": 1
+    },
+    "rl_onnx_model": {
+      "required": true,
+      "min_count": 1
+    }
+  },
+  "task_context": {
+    "task_variant": "dig_transport_dump",
+    "soil_reset_block_id": null,
+    "operator_id": null,
+    "material_id": null
+  },
+  "artifacts": [
+    {
+      "artifact_id": "fixed_action_profile",
+      "source_path": "../../excavator-orin-runtime/deploy/fixed_actions.icra2027_fixed_dig.commissioning.json",
+      "role": "fixed_action_profile",
+      "metadata": {
+        "policy": "dig_policy"
+      }
+    },
+    {
+      "artifact_id": "rl_onnx_model",
+      "source_path": "../../RLExcavator/Assets/AIModels/ScaleModelDeploy05_cale_v3_deadzone_reward_03_p003.onnx",
+      "role": "rl_onnx_model",
+      "metadata": {
+        "policy": "trajectory_controller"
+      }
+    }
+  ]
+}

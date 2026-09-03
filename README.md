@@ -187,11 +187,16 @@ python scripts/run_collection_ui.py
 预览不落入训练数据路径，不改变两路 30 Hz 采集或 Recorder 的 Episode 生命周期。任一路相机采集
 线程异常都会让活动 Episode 以 `collector_runtime_error` 中止并执行安全回零，不能留下看似成功的
 单路数据。
-同一 Collector 还把已经解析的 STM32 最新帧投影为只读遥测，页面以 2 Hz 显示动臂/斗杆/铲斗/
-回转关节角以及三个油缸活塞杆伸缩量。UI 不会为此再次打开串口；Collector 未运行时显示等待。
+机构状态不再从 `18092/tcp` 的相机服务读取。WebUI 启动时会在 PC 常驻一个只读状态桥，持续接收
+Orin 或 Collector 发往 `192.168.50.1:18081/udp` 的 `machine_state_v1`，原子更新本地状态快照，
+同时发布 RViz 使用的 `/joint_states`。页面以 2 Hz 显示动臂/斗杆/铲斗/回转关节角以及三个油缸
+活塞杆伸缩量；RL、ACT 和示教采集阶段共用这条状态链。状态超过 500 ms 未更新时，页面会清空旧值
+并显示“等待机器状态”，不会继续展示冻结角度。UI 和状态桥都只读，不打开 STM32 串口、不发送动作。
+`18092/tcp` 在活动 UI 中只用于两路相机 JPEG 预览。
 
 原生 RViz 是 Qt 桌面程序，当前 Web UI 不嵌入 RViz/Foxglove，也不显示三维可视化占位。
-需要录制三维状态时，使用页面“启动 RL + RViz”打开的原生 RViz 窗口。
+需要录制三维状态时，使用页面“启动 RL + RViz”打开的原生 RViz 窗口。该 Operator 会复用
+WebUI 已启动的状态桥，不会再次绑定 `18081/udp`。
 
 ### V3-B Orin 本地目录驱动闭环
 
@@ -229,7 +234,8 @@ field deployment；不需要修改代码或维护逐点轨迹 JSON。PC 启动 o
 
 同一个本地 UI 提供一个与采集状态机互斥的目录驱动混合 Mission Module。旧 V2 三点 UI 入口已删除，
 只能通过 `resident_fixed_cycle_config` 与权威点位目录启动。它不是在浏览器里直接拼接
-shell，而是按固定状态机执行：
+shell，也不再为每个实验复制一套固定状态机。Orin 的通用 Scheduler 读取冻结的声明式 Mission，
+按其中的 Behavior 列表执行。例如论文主线是：
 
 ```text
 Mission 开始时一次性启动 Orin resident owner（唯一串口 owner）
@@ -237,17 +243,14 @@ Mission 开始时一次性启动 Orin resident owner（唯一串口 owner）
 → RL Plan/Follow DIG（RL ONNX 已在 resident owner 内存中）
 → STM32 确认 RL terminal zero 与 ACT target zero
 → 同一 owner 内切换 generation，ACT 直接执行挖掘
-→ ACT 末段并行准备 DUMP 轨迹
 → STM32 确认 ACT terminal zero 与 RL target zero
-→ 激活已准备轨迹；不满足新鲜度/起点契约时安全回退到普通 Plan
 → ExecuteDump → RL Follow 下一挖掘点 → 下一铲
 ```
 
-第一版 ACT 完成条件是 `config/hybrid_mission.pc.json` 中的 `act.max_steps=130`：live warmup 后累计
-130 个有效 10 Hz 推理 step，约 13 秒，然后由 ACT Runtime 自己终态回零并退出。130 来自当前正式
-采集 Episode 有效步数的中位数附近，它是有界实验时长，不是假装成视觉“挖掘成功检测器”。任何
-遥测、相机、推理、串口或资源交接错误都会提前失败并归零。后续真实数据足够时再评估 learned
-success detector。
+不同实验只替换 Mission 中的 Behavior：`onnx_rl_tracking` 可换为 `cartesian_p_tracking`，
+`act_dig_lift` 可换为 `fixed_dig`；工程参考则组合 `act_dig_transport_dump`。ACT 的 `max_steps` 是
+Mission definition 内的有界实验预算，不是假装成视觉“任务成功检测器”。任何遥测、相机、推理、
+串口或资源交接错误都会提前失败并归零。
 
 可先在页面点击“启动 RL + RViz”并等待“已就绪”，用于纯 RL 演示或提前录屏；若直接启动分段/自动 Mission，后端会在 Operator 未就绪时先自动启动并等待就绪。若已经在外部终端运行 Operator，则继续
 沿用该窗口，不要重复启动。Orin 不要手工启动 `orin_state_sender.py`、Collector 或 ACT Runtime。
@@ -264,9 +267,12 @@ Web UI 提供：
 `/dev/ttyTHS1`，RL ONNX 常驻其中；独立 ACT Worker 在整个 Mission 内保持 checkpoint、CUDA、
 action queue 与 `/dev/video0` 就绪，但永不映射串口。交接只更换带
 `control_generation` 的 Motion Authority，并严格等待旧来源 terminal zero、目标模式 zero claim
-和首条非零命令的 STM32 telemetry ACK。ACT 最后 20 steps 时，PC 并行准备 DUMP 轨迹；若准备结果
-过期、起点不兼容或未及时就绪，则保持归零并回退到普通 live Plan，不复用可疑轨迹。该结构消除模型、
-容器、串口和相机冷启动，但不缩短真实轨迹跟踪、ACT 130 steps、固定倾倒或必要的 zero/ACK。
+和首条非零命令的 STM32 telemetry ACK。阶段推进、动态圆弧轨迹与 ACT budget 都在 Orin 本地完成；
+该结构消除模型、容器、串口和相机冷启动，但不绕过真实轨迹跟踪、固定动作或必要的 zero/ACK。
+
+PC runtime v6、Orin plan/catalog/READY、Experiment Profile 和 evidence 会共同校验 Mission ID 与
+canonical SHA-256。包含 ACT 的 Mission 还会在 worker data link 建立时核对 Behavior ID 与 checkpoint
+model SHA-256；错误模型在候选动作进入 Motion Core 前即被拒绝。
 
 `config/act_runtime.orin.json` 的 `dig_policy_backend` 是挖掘算法选择边界；当前活动值必须显式为
 `lerobot_act`。旧配置缺少该字段时仍兼容为 `lerobot_act`，未知 backend 会在加载配置时直接拒绝。
@@ -514,6 +520,94 @@ python scripts/evaluate_experiment_runs.py \
 ```
 
 `training_internal` 与 `held_out_experiment` 两种 scope 不能混合聚合；论文结论只使用后者。
+
+### ICRA 2027 实验 Profile
+
+论文对照条件不再通过临时改 JSON 或日志文件名区分。严格 Profile 位于
+`config/experiments/icra2027/`，明确记录软件架构、目标选择、轨迹跟踪、任务策略、参考条件、
+唯一消融因素、必需指标以及运行/证据配置绑定。只读检查不会启动 Orin、相机或 STM32：
+
+```bash
+python scripts/inspect_icra2027_experiments.py
+python scripts/inspect_icra2027_experiments.py \
+  --require-ready <profile_id>
+```
+
+退出码 `0` 表示矩阵有效且所有标记为 `ready` 的条件通过静态预检，退出码 `2` 表示配置不完整、
+Profile 仍未达到 `ready` 或绑定不一致。当前论文矩阵有三个互不覆盖默认入口的
+`commissioning` 条件：
+
+- `fixed_target_selection`：固定点位 + TC-BTF/ONNX；
+- `classical_tracking`：相同固定点位、Resident Mission、ACT 挖掘和固定倾倒，只将轨迹控制器替换为
+  Cartesian-P；
+- `fixed_dig`：固定点位 + TC-BTF/ONNX + 固定挖掘脚本 + 固定倾倒。
+
+另有一个不进入论文矩阵的工程参考任务
+`act_dig_transport_dump_reference`：RL/TC-BTF 到挖掘点，ACT 完成挖掘、运转和倾倒，随后
+RL/TC-BTF 到下一个挖掘点。它不是“ACT 全流程”；真正的 ACT 全流程还应由 ACT 自主前往下一
+挖掘点，当前模型和数据不支持这一能力。
+
+固定点位参考条件使用独立的 commissioning 证据配置：
+
+```bash
+python scripts/run_collection_ui.py \
+  --config config/collection_ui.fixed_target_selection.commissioning.pc.json
+```
+
+Cartesian-P 试运行同样使用独立配置，且必须先完成发动机关闭验收：
+
+```bash
+python scripts/run_collection_ui.py \
+  --config config/collection_ui.classical_tracking.commissioning.pc.json
+```
+
+该配置使用独立 runtime root，显式携带
+`ALLOW_CARTESIAN_P_MACHINE_MOTION`，不会加载 RL ONNX，也不会把不存在的 RL 模型写成实验
+artifact。`fixed_dig` 与工程参考任务也使用各自独立的 UI/证据配置：
+
+```bash
+python scripts/run_collection_ui.py \
+  --config config/collection_ui.fixed_dig.commissioning.pc.json
+
+python scripts/run_collection_ui.py \
+  --config config/collection_ui.act_dig_transport_dump_reference.commissioning.pc.json
+```
+
+`proposed_hybrid` 与 `tadps` 仍为 `planned`，当前没有任何 Profile 达到正式 `ready`。三套论文
+commissioning evidence 的 scope 均固定为 `training_internal`，不能进入论文聚合。Profile 原文和
+SHA 会进入 Experiment Run 配置快照，Profile ID 同时写入 `runtime_selected` 事件与最终 metrics。
+工程参考任务的 evidence 同样是 `training_internal`，且不绑定 ICRA experiment profile。
+所有这些入口都复用同一 Scheduler、Motion Authority 和串口 owner；区别仅是严格 Mission definition
+中的 Behavior 组合。新增组合通常只增加 Mission/deployment/runtime/evidence 配置，不修改调度器。
+
+RL sim-real 对照实验还提供了真机 parent Run CLI。它只消费离线 `orin_edge_control_audit.v1`
+日志并导出严格 `excavator_rl_control_trace.v3`，不会接触真机。v3 将真实斗尖、参考 waypoint、
+waypoint index 和独立 terminal outcome 与冻结 trajectory suite 的 SHA 一起绑定；旧 v1/v2 trace
+必须从原始 audit 重新导出，不能手工改 schema：
+
+```bash
+python scripts/record_rl_real_experiment_run.py \
+  --evidence-root "$EVIDENCE_ROOT" \
+  --machine-profile ../shared/machine_profile.json \
+  --trajectory-suite "$TRAJECTORY_SUITE" \
+  --trajectory-suite-sha256 "$TRAJECTORY_SUITE_SHA256" \
+  --trajectory-controller-onnx "$RL_ONNX" \
+  --control-audit "$REAL_AUDIT_JSONL" \
+  --trace-output "$REAL_TRACE_JSONL" \
+  --trace-run-id "$TRACE_RUN_ID" \
+  --policy-id "onnx_rl:scale_v3_deadzone_reward_03_p003" \
+  --evaluation-scope held_out_experiment \
+  --task-variant dig_transport_dump \
+  --operator-id "$OPERATOR_ID" \
+  --material-id "$MATERIAL_ID" \
+  --run-id "$REAL_RUN_ID"
+```
+
+其中 `TRAJECTORY_SUITE_SHA256` 由作者对本次冻结 suite 显式计算：
+
+```bash
+TRAJECTORY_SUITE_SHA256="$(sha256sum "$TRAJECTORY_SUITE" | awk '{print $1}')"
+```
 
 ## 6. STM32 固件配套
 

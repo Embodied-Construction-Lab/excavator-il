@@ -1,7 +1,9 @@
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 
@@ -13,6 +15,14 @@ CATALOG = (
     WORKSPACE
     / "AiryLidar/mission/config/excavation_dig_point_catalog.v1.json"
 )
+
+
+def _load_sync_module():
+    spec = importlib.util.spec_from_file_location("sync_v3b_dig_catalog", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_dry_run_reports_the_authoritative_catalog_without_remote_access(
@@ -133,3 +143,68 @@ def test_idle_check_does_not_match_its_own_remote_shell_command(
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["status"] == "orin_idle"
     assert not rsync_marker.exists()
+
+
+def test_builder_regenerates_every_declarative_mission_from_one_catalog(
+    tmp_path: Path,
+) -> None:
+    sync = _load_sync_module()
+    report = sync._catalog_report()
+
+    generated = sync._build_deployments(tmp_path)
+    artifact_hashes = sync._verify_deployments(generated, report)
+
+    expected_missions = {
+        "fixed_target_hybrid",
+        "classical_tracking_hybrid",
+        "fixed_dig_hybrid",
+        "engineering_act_transport_reference",
+    }
+    assert set(generated) == expected_missions
+    assert set(artifact_hashes) == expected_missions
+    for mission_id, directory in generated.items():
+        plan = json.loads(
+            (directory / "fixed_cycle.candidate.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        target_catalog = json.loads(
+            (directory / "target_catalog.candidate.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert plan["schema_version"] == "resident_fixed_cycle_plan.v5"
+        assert plan["mission"]["mission_id"] == mission_id
+        assert target_catalog["waypoint_tolerance_m"] == 0.25
+        assert target_catalog["intermediate_waypoint_tolerance_m"] == 0.40
+
+
+def test_remote_verifier_covers_every_declarative_mission(monkeypatch) -> None:
+    sync = _load_sync_module()
+    report = sync._catalog_report()
+    mission_ids = {
+        mission_id for mission_id, _definition, _destination in sync.DEPLOYMENTS
+    }
+    commands = []
+
+    def capture(command, *, cwd=None):
+        commands.append((command, cwd))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(sync, "_run", capture)
+    sync._verify_remote(
+        "orin-under-test",
+        report,
+        {mission_id: "a" * 64 for mission_id in mission_ids},
+    )
+
+    assert len(commands) == 1
+    command, cwd = commands[0]
+    assert cwd is None
+    assert command[:2] == ["ssh", "orin-under-test"]
+    remote_argv = shlex.split(command[2])
+    assert remote_argv[:2] == ["python3", "-c"]
+    compile(remote_argv[2], "<remote-deployment-verifier>", "exec")
+    expected = json.loads(remote_argv[4])
+    assert set(expected["deployments"]) == mission_ids
+    assert set(expected["artifact_hashes"]) == mission_ids

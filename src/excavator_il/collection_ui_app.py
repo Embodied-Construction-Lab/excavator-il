@@ -104,6 +104,14 @@ class OperatorSupervisor(Protocol):
     def close(self) -> None: ...
 
 
+class TelemetrySource(Protocol):
+    def start(self) -> None: ...
+
+    def snapshot(self) -> dict[str, Any]: ...
+
+    def close(self) -> None: ...
+
+
 class StartCollectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -179,15 +187,22 @@ def create_collection_ui_app(
     supervisor: CollectionSupervisor,
     hybrid_supervisor: HybridSupervisor | None = None,
     operator_supervisor: OperatorSupervisor | None = None,
+    telemetry_source: TelemetrySource | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        yield
-        supervisor.close()
-        if hybrid_supervisor is not None:
-            hybrid_supervisor.close()
-        if operator_supervisor is not None:
-            operator_supervisor.close()
+        if telemetry_source is not None:
+            telemetry_source.start()
+        try:
+            yield
+        finally:
+            supervisor.close()
+            if hybrid_supervisor is not None:
+                hybrid_supervisor.close()
+            if operator_supervisor is not None:
+                operator_supervisor.close()
+            if telemetry_source is not None:
+                telemetry_source.close()
 
     app = FastAPI(title="Excavator Guided Collection UI", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
@@ -239,6 +254,11 @@ def create_collection_ui_app(
 
     @app.get("/api/telemetry")
     def telemetry() -> dict[str, Any]:
+        if telemetry_source is not None:
+            try:
+                return telemetry_source.snapshot()
+            except RuntimeError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
         if not config.telemetry_url:
             raise HTTPException(status_code=503, detail="telemetry preview is disabled")
         try:

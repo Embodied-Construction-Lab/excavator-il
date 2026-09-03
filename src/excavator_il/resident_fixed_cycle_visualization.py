@@ -14,7 +14,8 @@ from typing import Any, Mapping
 _STATUS_FIELDS = frozenset(
     {
         "run_id",
-        "mission_profile",
+        "mission_id",
+        "active_behavior_id",
         "stage",
         "requested_cycles",
         "completed_cycles",
@@ -26,20 +27,17 @@ _STATUS_FIELDS = frozenset(
         "active_trajectory",
     }
 )
-_STAGES = frozenset(
+_TERMINAL_STAGES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
+_BEHAVIOR_IDS = frozenset(
     {
-        "IDLE",
-        "FOLLOW_DIG",
-        "ACT_DIG",
-        "ACT_FULL_CYCLE",
-        "FOLLOW_DUMP",
-        "EXECUTE_DUMP",
-        "COMPLETED",
-        "FAILED",
-        "CANCELLED",
+        "onnx_rl_tracking",
+        "cartesian_p_tracking",
+        "act_dig_lift",
+        "act_dig_transport_dump",
+        "fixed_dig",
+        "fixed_dump",
     }
 )
-_TERMINAL_STAGES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 
 
@@ -94,7 +92,8 @@ class ResidentTrajectoryVisualization:
 @dataclass(frozen=True)
 class ResidentFixedCycleRemoteStatus:
     run_id: str
-    mission_profile: str
+    mission_id: str
+    active_behavior_id: str
     stage: str
     requested_cycles: int
     completed_cycles: int
@@ -112,9 +111,7 @@ class ResidentFixedCycleRemoteStatus:
     ) -> "ResidentFixedCycleRemoteStatus":
         if not isinstance(value, Mapping) or set(value) != _STATUS_FIELDS:
             raise ValueError("V3-A status fields are invalid")
-        stage = _text(value["stage"], "status.stage")
-        if stage not in _STAGES:
-            raise ValueError("V3-A status stage is invalid")
+        stage = _identifier(value["stage"], "status.stage")
         requested = _count(value["requested_cycles"], "status.requested_cycles")
         completed = _count(value["completed_cycles"], "status.completed_cycles")
         if completed > requested:
@@ -125,14 +122,28 @@ class ResidentFixedCycleRemoteStatus:
         if terminal != (stage in _TERMINAL_STAGES):
             raise ValueError("V3-A terminal flag and stage disagree")
         raw_trajectory = value["active_trajectory"]
-        mission_profile = _text(
-            value["mission_profile"], "status.mission_profile"
+        mission_id = _optional_identifier(value["mission_id"], "status.mission_id")
+        active_behavior_id = _optional_identifier(
+            value["active_behavior_id"], "status.active_behavior_id"
         )
-        if mission_profile not in {"regime_factorized", "act_full_cycle"}:
-            raise ValueError("V3-A status mission_profile is invalid")
+        if active_behavior_id and active_behavior_id not in _BEHAVIOR_IDS:
+            raise ValueError("V3-A status active_behavior_id is invalid")
+        if stage == "IDLE":
+            if terminal or active_behavior_id:
+                raise ValueError("V3-A IDLE status cannot have an active behavior")
+        elif terminal:
+            if not mission_id or active_behavior_id:
+                raise ValueError(
+                    "V3-A terminal status mission/active_behavior_id is invalid"
+                )
+        elif not mission_id or not active_behavior_id:
+            raise ValueError(
+                "V3-A active status requires mission_id and active_behavior_id"
+            )
         return cls(
             run_id=_optional_identifier(value["run_id"], "status.run_id"),
-            mission_profile=mission_profile,
+            mission_id=mission_id,
+            active_behavior_id=active_behavior_id,
             stage=stage,
             requested_cycles=requested,
             completed_cycles=completed,

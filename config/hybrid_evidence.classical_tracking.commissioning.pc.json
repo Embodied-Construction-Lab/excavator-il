@@ -1,5 +1,7 @@
 {
-  "schema_version": "excavator_hybrid_evidence_config.v1",
+  "schema_version": "excavator_hybrid_evidence_config.v2",
+  "mission_id": "classical_tracking_hybrid",
+  "mission_sha256": "629ecaa1dcff9b17c8b5497d7fae7dc8e0223b0eb1c1c5d8aec22465eea1e1a7",
   "evidence_root": "../../EvaluationReport/experiment_runs",
   "machine_profile_path": "../../shared/machine_profile.json",
   "repository_paths": {
@@ -9,12 +11,14 @@
     "rl_excavator": "../../RLExcavator"
   },
   "config_paths": {
-    "act_runtime": "act_runtime.icra2027_transport_dump_dual_rgb.orin.json",
-    "act_deployment": "act_deployment.icra2027_transport_dump_dual_rgb_step115000.json"
+    "act_runtime": "act_runtime.orin.json",
+    "act_deployment": "act_deployment.icra2027_dig_only_front_step400000.json",
+    "edge_runtime": "../../excavator-orin-runtime/deploy/edge_runtime.resident.cartesian_p.commissioning.json",
+    "experiment_profile": "experiments/icra2027/classical_tracking.json"
   },
   "policy_ids": {
-    "dig_policy": "lerobot_act:icra2027_transport_dump_dual_rgb_step115000",
-    "trajectory_controller": "onnx_rl:scale_v3_deadzone_reward_03_p003"
+    "dig_policy": "lerobot_act:icra2027_dig_only_front_swing_zero_seed2027_step400000",
+    "trajectory_controller": "cartesian_p:deterministic_v1"
   },
   "host_topology": {
     "pc": {
@@ -35,10 +39,6 @@
     "act_policy_checkpoint": {
       "required": true,
       "min_count": 1
-    },
-    "rl_onnx_model": {
-      "required": true,
-      "min_count": 1
     }
   },
   "task_context": {
@@ -50,29 +50,19 @@
   "artifacts": [
     {
       "artifact_id": "act_deployment_manifest",
-      "source_path": "act_deployment.icra2027_transport_dump_dual_rgb_step115000.json",
+      "source_path": "act_deployment.icra2027_dig_only_front_step400000.json",
       "role": "act_deployment_manifest",
       "metadata": {
-        "policy": "dig_policy",
-        "mission_profile": "act_full_cycle"
+        "policy": "dig_policy"
       }
     },
     {
       "artifact_id": "act_policy_checkpoint",
-      "source_path": "../models/icra2027_transport_dump_dual_rgb_step115000/checkpoint",
+      "source_path": "../outputs/icra2027_dig_only_front_swing_zero_seed2027/checkpoints/400000/pretrained_model",
       "role": "act_policy_checkpoint",
       "metadata": {
         "policy": "dig_policy",
-        "checkpoint_step": 115000,
-        "camera_roles": ["front", "dump"]
-      }
-    },
-    {
-      "artifact_id": "rl_onnx_model",
-      "source_path": "../../RLExcavator/Assets/AIModels/ScaleModelDeploy05_cale_v3_deadzone_reward_03_p003.onnx",
-      "role": "rl_onnx_model",
-      "metadata": {
-        "policy": "trajectory_controller"
+        "checkpoint_step": 400000
       }
     }
   ]

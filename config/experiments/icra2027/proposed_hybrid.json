@@ -1,0 +1,30 @@
+{
+  "schema_version": "excavator_icra2027_experiment_profile.v2",
+  "profile_id": "proposed_hybrid",
+  "expected_mission_id": null,
+  "expected_mission_sha256": null,
+  "study_kind": "live_mission",
+  "readiness": "planned",
+  "reference_profile_id": null,
+  "isolated_factor": null,
+  "method_factors": {
+    "software_architecture": "regime_factorized",
+    "target_selection": "tadps",
+    "trajectory_tracking": "tc_btf",
+    "task_policy": "act_dig_lift_fixed_dump"
+  },
+  "bindings": {
+    "collection_ui_config": null,
+    "resident_fixed_cycle_config": null,
+    "hybrid_evidence_config": null
+  },
+  "required_metrics": [
+    "cycle_success_rate",
+    "cycle_duration_s",
+    "payload_mass_kg",
+    "fill_ratio",
+    "spillage_mass_kg",
+    "intervention_count",
+    "runtime_abort_count"
+  ]
+}

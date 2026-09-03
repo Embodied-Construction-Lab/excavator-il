@@ -87,7 +87,7 @@ def check_site_config(config_dir: str | Path) -> dict[str, object]:
         guided["rl_preposition"]["serial_port"],
         serial_port,
     )
-    for label in ("camera_preview_url", "telemetry_url"):
+    for label in ("camera_preview_url", "camera_dump_preview_url"):
         host, port = _url_endpoint(f"ui.{label}", ui[label])
         _require_equal(f"ui.{label} host", host, orin_host)
         _require_equal(f"ui.{label} port", port, preview_port)

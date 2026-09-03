@@ -78,6 +78,19 @@ def test_runtime_config_v3_loads_explicit_dual_camera_roles(tmp_path):
     assert config.cameras["dump"].device == "/dev/video2"
 
 
+def test_runtime_config_v4_binds_the_worker_to_one_act_behavior(tmp_path):
+    raw = _config()
+    raw["schema_version"] = "excavator_act_runtime_config.v4"
+    raw["cameras"] = {"front": raw.pop("camera_front")}
+    raw["act_behavior_id"] = "act_dig_lift"
+    path = tmp_path / "runtime.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    config = load_act_runtime_config(path)
+
+    assert config.act_behavior_id == "act_dig_lift"
+
+
 def test_runtime_config_keeps_legacy_configs_on_the_act_backend(tmp_path):
     path = tmp_path / "runtime.json"
     path.write_text(json.dumps(_config()), encoding="utf-8")

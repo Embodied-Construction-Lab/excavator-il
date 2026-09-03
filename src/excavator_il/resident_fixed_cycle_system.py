@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
 import shlex
 import signal
@@ -10,7 +9,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping
@@ -23,15 +22,16 @@ from .hybrid_experiment_run import (
     HybridMissionRunRequest,
 )
 from .remote_runtime import LineProcess, SshRuntimeHost
+from ._resident_fixed_cycle_config import (
+    CONFIG_SCHEMA_VERSION,
+    ResidentFixedCyclePcConfig,
+)
 from ._resident_fixed_cycle_support import (
     COMMISSIONING_AUTHORIZATION,
     CONTROL_SCHEMA_VERSION,
-    absolute_posix as _absolute_posix,
     bounded_integer as _bounded_integer,
-    bounded_number as _bounded_number,
-    commissioning_authorization as _commissioning_authorization,
     parse_control_response as _parse_control_response,
-    relative_script as _relative_script,
+    parse_owner_readiness as _parse_owner_readiness,
     remote_pid as _remote_pid,
     text as _text,
     wait_process as _wait_process,
@@ -46,173 +46,18 @@ from .resident_fixed_cycle_visualization import (
     v3a_trajectory_path,
 )
 
-CONFIG_SCHEMA_VERSION = "excavator_resident_fixed_cycle_pc.v3"
-GROUPED_CONFIG_SCHEMA_VERSION = "excavator_resident_fixed_cycle_pc.v4"
-LEGACY_CONFIG_SCHEMA_VERSION = "excavator_resident_fixed_cycle_pc.v2"
-_LEGACY_CONFIG_FIELDS = frozenset(
-    {
-        "schema_version",
-        "guided_config",
-        "fixed_cycle_plan",
-        "runtime_root",
-        "owner_script",
-        "act_worker_script",
-        "control_socket",
-        "ready_timeout_s",
-        "status_poll_ms",
-        "act_max_steps",
-        "commissioning_authorization",
-    }
-)
-_CONFIG_FIELDS = _LEGACY_CONFIG_FIELDS | frozenset(
-    {
-        "mission_profile",
-        "act_runtime_config",
-        "act_checkpoint_host_path",
-        "act_deployment_host_path",
-    }
-)
-_GROUPED_CONFIG_FIELDS = _CONFIG_FIELDS | {"dig_point_catalog"}
 _TERMINAL_UI_STAGES = frozenset({"completed", "failed", "cancelled"})
-_STAGE_TO_UI = {
-    "IDLE": "idle",
-    "FOLLOW_DIG": "running_rl_to_dig",
-    "ACT_DIG": "running_act_dig",
-    "ACT_FULL_CYCLE": "running_act_dig",
-    "FOLLOW_DUMP": "running_rl_to_dump_and_dump",
-    "EXECUTE_DUMP": "running_rl_to_dump_and_dump",
+_TERMINAL_STAGE_TO_UI = {
     "COMPLETED": "completed",
     "FAILED": "failed",
     "CANCELLED": "cancelled",
 }
+_TRACKING_BEHAVIORS = frozenset({"onnx_rl_tracking", "cartesian_p_tracking"})
+_DIG_BEHAVIORS = frozenset(
+    {"act_dig_lift", "act_dig_transport_dump", "fixed_dig"}
+)
 
 
-@dataclass(frozen=True)
-class ResidentFixedCyclePcConfig:
-    guided_config: Path
-    fixed_cycle_plan: PurePosixPath
-    runtime_root: PurePosixPath
-    owner_script: str
-    act_worker_script: str
-    control_socket: PurePosixPath
-    ready_timeout_s: float
-    status_poll_s: float
-    act_max_steps: int
-    commissioning_authorization: str
-    mission_profile: str = "regime_factorized"
-    act_runtime_config: PurePosixPath | None = None
-    act_checkpoint_host_path: PurePosixPath | None = None
-    act_deployment_host_path: PurePosixPath | None = None
-    dig_point_catalog: PurePosixPath | None = None
-
-    @classmethod
-    def load(cls, path: str | Path) -> "ResidentFixedCyclePcConfig":
-        config_path = Path(path).expanduser().resolve()
-        try:
-            value = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError(f"cannot load V3-A PC config: {exc}") from exc
-        if not isinstance(value, Mapping):
-            raise ValueError("V3-A PC config fields are invalid")
-        schema_version = value.get("schema_version")
-        if schema_version not in {
-            LEGACY_CONFIG_SCHEMA_VERSION,
-            CONFIG_SCHEMA_VERSION,
-            GROUPED_CONFIG_SCHEMA_VERSION,
-        }:
-            raise ValueError("unsupported V3-A PC config schema")
-        expected_fields = {
-            LEGACY_CONFIG_SCHEMA_VERSION: _LEGACY_CONFIG_FIELDS,
-            CONFIG_SCHEMA_VERSION: _CONFIG_FIELDS,
-            GROUPED_CONFIG_SCHEMA_VERSION: _GROUPED_CONFIG_FIELDS,
-        }[schema_version]
-        if set(value) != expected_fields:
-            raise ValueError("V3-A PC config fields are invalid")
-        if schema_version == LEGACY_CONFIG_SCHEMA_VERSION:
-            mission_profile = "regime_factorized"
-            act_runtime_config = None
-            act_checkpoint_host_path = None
-            act_deployment_host_path = None
-            dig_point_catalog = None
-        else:
-            mission_profile = _text(value["mission_profile"], "mission_profile")
-            if (
-                schema_version == CONFIG_SCHEMA_VERSION
-                and mission_profile != "act_full_cycle"
-            ):
-                raise ValueError("V3-B PC config mission_profile is invalid")
-            if mission_profile == "act_full_cycle":
-                act_runtime_config = _absolute_posix(
-                    value["act_runtime_config"], "act_runtime_config"
-                )
-                act_checkpoint_host_path = _absolute_posix(
-                    value["act_checkpoint_host_path"], "act_checkpoint_host_path"
-                )
-                act_deployment_host_path = _absolute_posix(
-                    value["act_deployment_host_path"], "act_deployment_host_path"
-                )
-            elif mission_profile == "regime_factorized" and all(
-                value[field] is None
-                for field in (
-                    "act_runtime_config",
-                    "act_checkpoint_host_path",
-                    "act_deployment_host_path",
-                )
-            ):
-                act_runtime_config = None
-                act_checkpoint_host_path = None
-                act_deployment_host_path = None
-            else:
-                raise ValueError("V3-B PC config mission_profile is invalid")
-            dig_point_catalog = (
-                _relative_catalog(value["dig_point_catalog"])
-                if schema_version == GROUPED_CONFIG_SCHEMA_VERSION
-                else None
-            )
-        plan = _absolute_posix(value["fixed_cycle_plan"], "fixed_cycle_plan")
-        root = _absolute_posix(value["runtime_root"], "runtime_root")
-        socket_path = _absolute_posix(value["control_socket"], "control_socket")
-        if root not in socket_path.parents:
-            raise ValueError("control_socket must be inside runtime_root")
-        ready_timeout_s = _bounded_number(
-            value["ready_timeout_s"], "ready_timeout_s", 1.0, 300.0
-        )
-        poll_ms = _bounded_number(
-            value["status_poll_ms"], "status_poll_ms", 20.0, 1000.0
-        )
-        return cls(
-            guided_config=(
-                config_path.parent
-                / _text(value["guided_config"], "guided_config")
-            ).resolve(),
-            fixed_cycle_plan=plan,
-            runtime_root=root,
-            owner_script=_relative_script(value["owner_script"], "owner_script"),
-            act_worker_script=_relative_script(
-                value["act_worker_script"], "act_worker_script"
-            ),
-            control_socket=socket_path,
-            ready_timeout_s=ready_timeout_s,
-            status_poll_s=poll_ms / 1000.0,
-            act_max_steps=_bounded_integer(
-                value["act_max_steps"], "act_max_steps", 1, 2000
-            ),
-            commissioning_authorization=_commissioning_authorization(
-                value["commissioning_authorization"]
-            ),
-            mission_profile=mission_profile,
-            act_runtime_config=act_runtime_config,
-            act_checkpoint_host_path=act_checkpoint_host_path,
-            act_deployment_host_path=act_deployment_host_path,
-            dig_point_catalog=dig_point_catalog,
-        )
-
-
-def _relative_catalog(value: Any) -> PurePosixPath:
-    path = PurePosixPath(_text(value, "dig_point_catalog"))
-    if path.is_absolute() or ".." in path.parts or path.suffix != ".json":
-        raise ValueError("dig_point_catalog must be a normalized relative JSON path")
-    return path
 class ResidentFixedCycleProcesses:
     """Own the V3-A resident owner and ACT worker remote processes."""
 
@@ -236,6 +81,7 @@ class ResidentFixedCycleProcesses:
         self._owner_pid: int | None = None
         self._act_process: Any | None = None
         self._act_pid: int | None = None
+        self._owner_act_worker_required: bool | None = None
 
     def start(self) -> None:
         if self._owner_process is not None or self._act_process is not None:
@@ -243,7 +89,8 @@ class ResidentFixedCycleProcesses:
             return
         try:
             self._start_owner()
-            self._start_act_worker()
+            if self._requires_act_worker():
+                self._start_act_worker()
         except BaseException:
             try:
                 self.stop()
@@ -252,10 +99,10 @@ class ResidentFixedCycleProcesses:
             raise
 
     def require_running(self) -> None:
-        for name, process in (
-            ("resident owner", self._owner_process),
-            ("resident ACT worker", self._act_process),
-        ):
+        checks = [("resident owner", self._owner_process)]
+        if self._requires_act_worker():
+            checks.append(("resident ACT worker", self._act_process))
+        for name, process in checks:
             if process is None:
                 raise RuntimeError(f"{name} is not started")
             if process.returncode is not None:
@@ -287,6 +134,8 @@ class ResidentFixedCycleProcesses:
             self._guided.rl_pc_host,
             "--serial-port",
             str(self._guided.rl_serial_port),
+            "--edge-config",
+            str(self._config.edge_runtime_config),
             "--fixed-cycle-plan",
             str(self._config.fixed_cycle_plan),
         ]
@@ -297,6 +146,13 @@ class ResidentFixedCycleProcesses:
                 [
                     "--commissioning-authorization",
                     self._config.commissioning_authorization,
+                ]
+            )
+        if self._config.trajectory_controller_commissioning_authorization:
+            argv.extend(
+                [
+                    "--trajectory-controller-commissioning-authorization",
+                    self._config.trajectory_controller_commissioning_authorization,
                 ]
             )
         command = (
@@ -314,12 +170,38 @@ class ResidentFixedCycleProcesses:
             lambda item: "RESIDENT_FIXED_CYCLE_READY " in item,
             self._config.ready_timeout_s,
         )
-        expected = (
-            f"control_socket={self._config.control_socket} "
-            f"act_socket={self._config.runtime_root / 'act.sock'}"
-        )
-        if expected not in ready_line:
+        readiness = _parse_owner_readiness(ready_line)
+        if (
+            readiness.control_socket != self._config.control_socket
+            or readiness.act_socket != self._config.runtime_root / "act.sock"
+        ):
             raise RuntimeError("V3-A owner announced an unexpected control socket")
+        if (
+            readiness.trajectory_controller_backend
+            != self._config.trajectory_controller_backend
+        ):
+            raise RuntimeError(
+                "V3-A owner trajectory controller backend does not match PC config"
+            )
+        if readiness.mission_id != self._config.expected_mission_id:
+            raise RuntimeError("V3-A owner mission_id does not match PC config")
+        if readiness.mission_sha256 != self._config.expected_mission_sha256:
+            raise RuntimeError("V3-A owner mission_sha256 does not match PC config")
+        if (
+            readiness.act_worker_required
+            != self._config.expected_act_worker_required
+        ):
+            raise RuntimeError(
+                "V3-A owner act_worker_required does not match PC config/assets"
+            )
+        if readiness.act_worker_behavior_id != self._config.expected_act_behavior_id:
+            raise RuntimeError("V3-A owner ACT behavior does not match PC config")
+        if (
+            readiness.act_worker_model_sha256
+            != self._config.expected_act_model_sha256
+        ):
+            raise RuntimeError("V3-A owner ACT model does not match PC config")
+        self._owner_act_worker_required = readiness.act_worker_required
         process.wait_for(
             lambda item: "RESIDENT_HARDWARE_READY sensor_valid=True" in item,
             self._config.ready_timeout_s,
@@ -336,6 +218,11 @@ class ResidentFixedCycleProcesses:
             return hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError as exc:
             raise RuntimeError(f"cannot hash Dig Point Catalog: {exc}") from exc
+
+    def _requires_act_worker(self) -> bool:
+        if self._owner_act_worker_required is not None:
+            return self._owner_act_worker_required
+        return self._config.expected_act_worker_required
 
     def _start_act_worker(self) -> None:
         argv = [
@@ -373,6 +260,7 @@ class ResidentFixedCycleProcesses:
             lambda item: "ACT resident worker ready:" in item,
             self._config.ready_timeout_s,
         )
+
     def _spawn(self, command: str, prefix: str) -> Any:
         log_path = Path(self._guided.log_dir) / (
             f"resident_fixed_cycle_{self._timestamp}.{prefix}.log"
@@ -392,7 +280,9 @@ class ResidentFixedCycleProcesses:
             if pid is not None and process.returncode is None:
                 self._remote_host.stop_owned_process(
                     pid=pid,
-                    identity_ere=r"[o]rin_state_sender\.py.*--resident-fixed-cycle-plan",
+                    identity_ere=(
+                        r"[o]rin_state_sender\.py.*--resident-fixed-cycle-plan"
+                    ),
                     serial_path=self._guided.rl_serial_port,
                     timeout_s=self._guided.rl_serial_release_timeout_s,
                     require_serial_release=True,
@@ -405,6 +295,7 @@ class ResidentFixedCycleProcesses:
         finally:
             self._owner_process = None
             self._owner_pid = None
+            self._owner_act_worker_required = None
 
     def _stop_act_worker(self, *, allow_nonzero: bool) -> None:
         process, pid = self._act_process, self._act_pid
@@ -414,7 +305,10 @@ class ResidentFixedCycleProcesses:
             if pid is not None and process.returncode is None:
                 self._remote_host.stop_owned_process(
                     pid=pid,
-                    identity_ere=r"([d]ocker.*resident_act_runtime|[r]un_act_resident\.sh)",
+                    identity_ere=(
+                        r"([d]ocker.*resident_act_runtime|"
+                        r"[r]un_act_resident\.sh)"
+                    ),
                     serial_path=PurePosixPath("/dev/video0"),
                     timeout_s=self._guided.rl_serial_release_timeout_s,
                     require_serial_release=True,
@@ -502,8 +396,8 @@ class SshResidentFixedCycleOperations:
         )
         output = self._remote_host.run(remote)
         status = _parse_control_response(output, command)
-        if status.mission_profile != self._config.mission_profile:
-            raise RuntimeError("V3-B owner mission_profile does not match PC config")
+        if status.mission_id != self._config.expected_mission_id:
+            raise RuntimeError("V3-B owner mission_id does not match PC config")
         self._trajectory_file.update(status.active_trajectory)
         return status
 
@@ -674,13 +568,15 @@ class ResidentFixedCycleSupervisor:
                 raise RuntimeError("no V3-A Mission is active")
             self._stop_requested = True
             self._state = replace(self._state, stage="stopping")
-        try:
-            status = self._operations.cancel()
-            self._apply_status(status)
-        except Exception as exc:
-            message = f"V3-A cancel request failed: {exc}"
-            self._append_log(message)
-            with self._lock:
+            try:
+                # Serialize the remote acknowledgement with the background
+                # poller so it cannot release the owner as unacknowledged while
+                # a successful cancel request is still in flight.
+                status = self._operations.cancel()
+                self._apply_status(status)
+            except Exception as exc:
+                message = f"V3-A cancel request failed: {exc}"
+                self._append_log(message)
                 self._state = replace(self._state, error=message)
 
     def close(self) -> None:
@@ -755,11 +651,14 @@ class ResidentFixedCycleSupervisor:
                         )
 
     def _apply_status(self, status: ResidentFixedCycleRemoteStatus) -> None:
-        stage = _STAGE_TO_UI[status.stage]
-        if status.stage == "FOLLOW_DIG" and status.completed_cycles > 0:
-            stage = "running_rl_return_to_dig"
+        stage = _ui_stage(status)
         error = status.reason_code if stage == "failed" else ""
         with self._lock:
+            if self._stop_requested and not status.terminal:
+                # A heartbeat fetched before the cancel acknowledgement may
+                # arrive afterwards.  It is stale with respect to operator
+                # cancellation and must not overwrite the terminal status.
+                return
             self._state = replace(
                 self._state,
                 stage=stage,
@@ -774,7 +673,8 @@ class ResidentFixedCycleSupervisor:
                 "resident_fixed_cycle_status",
                 {
                     "stage": status.stage,
-                    "mission_profile": status.mission_profile,
+                    "mission_id": status.mission_id,
+                    "active_behavior_id": status.active_behavior_id,
                     "requested_cycles": status.requested_cycles,
                     "completed_cycles": status.completed_cycles,
                     "dig_target_id": status.current_dig_point_id,
@@ -792,7 +692,8 @@ class ResidentFixedCycleSupervisor:
                 )
         self._append_log(
             "V3-A local status: "
-            f"profile={status.mission_profile} stage={status.stage} "
+            f"mission={status.mission_id} behavior={status.active_behavior_id} "
+            f"stage={status.stage} "
             f"cycles={status.completed_cycles}/"
             f"{status.requested_cycles} target={status.current_dig_point_id}"
             f" group={status.dig_group_id}"
@@ -814,3 +715,24 @@ class ResidentFixedCycleSupervisor:
             self._state,
             evidence_error=self._evidence.error,
         )
+
+
+def _ui_stage(status: ResidentFixedCycleRemoteStatus) -> str:
+    terminal = _TERMINAL_STAGE_TO_UI.get(status.stage)
+    if terminal is not None:
+        return terminal
+    if status.stage == "IDLE":
+        return "idle"
+    behavior = status.active_behavior_id
+    if behavior in _DIG_BEHAVIORS:
+        return "running_act_dig"
+    if behavior == "fixed_dump":
+        return "running_rl_to_dump_and_dump"
+    if behavior in _TRACKING_BEHAVIORS:
+        target = status.active_trajectory.target_id if status.active_trajectory else ""
+        if target == "dump":
+            return "running_rl_to_dump_and_dump"
+        if status.completed_cycles > 0:
+            return "running_rl_return_to_dig"
+        return "running_rl_to_dig"
+    raise RuntimeError("V3-A status has no supported active behavior")

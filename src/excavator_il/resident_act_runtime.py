@@ -42,6 +42,7 @@ from .resident_protocol import (
     ResidentActDataClient,
     ResidentActOwnerClosed,
     ResidentActState,
+    ResidentActWorkerIdentity,
     ResidentPolicyCandidate,
 )
 from ._resident_act_observation import (
@@ -714,7 +715,11 @@ def build_resident_act_worker(
         controller=controller,
         max_inference_ms=config.max_inference_ms,
     )
-    transport = ResidentActDataClient(socket_path)
+    worker_identity = ResidentActWorkerIdentity(
+        behavior_id=config.act_behavior_id,
+        checkpoint_model_sha256=config.checkpoint_model_sha256,
+    )
+    transport = ResidentActDataClient(socket_path, worker_identity=worker_identity)
     cameras: dict[str, UvcCamera] = {}
     try:
         for role, camera_config in configured_cameras.items():
@@ -779,25 +784,16 @@ def run_resident_act_worker(
     socket_path: str | os.PathLike[str],
     operator_observation_config: str | os.PathLike[str] | None = None,
 ) -> None:
-    """Script seam: construct the resident resources once, then run indefinitely."""
-
-    worker = build_resident_act_worker(
+    build_resident_act_worker(
         config_path,
         socket_path=socket_path,
         operator_observation_config=operator_observation_config,
-    )
-    worker.run()
+    ).run()
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Minimal module CLI; the existing project CLI can delegate here later."""
-
-    return _run_cli(
-        argv,
-        build_worker=build_resident_act_worker,
-        signal_module=signal,
-    )
+    return _run_cli(argv, build_worker=build_resident_act_worker, signal_module=signal)
 
 
-if __name__ == "__main__":  # pragma: no cover - exercised through the module CLI
+if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())

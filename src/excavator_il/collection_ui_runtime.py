@@ -22,6 +22,7 @@ from .hybrid_experiment_run import (
     HybridExperimentRunConfig,
     HybridExperimentRunFactory,
 )
+from .machine_state_telemetry import MachineStateTelemetryService
 from .resident_fixed_cycle_system import (
     ResidentFixedCyclePcConfig,
     ResidentFixedCycleSupervisor,
@@ -78,6 +79,7 @@ def build_collection_ui_runtime(
             ui_config.hybrid_evidence_config
         )
     supervisor = GuidedCollectionSupervisor(config_path=ui_config.guided_config)
+    telemetry_source = MachineStateTelemetryService(guided_config=guided_config)
     hybrid_supervisor = None
     operator_supervisor = None
     if ui_config.resident_fixed_cycle_config is not None:
@@ -138,6 +140,7 @@ def build_collection_ui_runtime(
             behavior_port=None,
             profile="live_shadow",
             trajectory_path=v3a_trajectory_path(guided_config.log_dir),
+            external_state_bridge=True,
         )
         metadata = replace(
             metadata,
@@ -153,6 +156,7 @@ def build_collection_ui_runtime(
         supervisor=supervisor,
         hybrid_supervisor=hybrid_supervisor,
         operator_supervisor=operator_supervisor,
+        telemetry_source=telemetry_source,
     )
     return CollectionUiRuntime(config=ui_config, app=app)
 

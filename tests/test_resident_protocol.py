@@ -12,8 +12,10 @@ from excavator_il.resident_protocol import (
     ResidentActDataClient,
     ResidentActOwnerClosed,
     ResidentActState,
+    ResidentActWorkerIdentity,
     ResidentPolicyCandidate,
     decode_policy_candidate,
+    decode_act_worker_identity,
     decode_resident_state,
     encode_policy_candidate,
     encode_resident_state,
@@ -59,10 +61,15 @@ def test_data_client_uses_strict_bidirectional_length_framing(tmp_path):
     listener.bind(os.fspath(path))
     listener.listen(1)
     received = []
+    identity = ResidentActWorkerIdentity("act_dig_lift", "a" * 64)
 
     def serve():
         connection, _ = listener.accept()
         with connection:
+            identity_size = int.from_bytes(_recv_exact(connection, 4), "big")
+            received.append(
+                decode_act_worker_identity(_recv_exact(connection, identity_size))
+            )
             payload = encode_resident_state(_state())
             framed = len(payload).to_bytes(4, "big") + payload
             for byte in framed:
@@ -72,7 +79,7 @@ def test_data_client_uses_strict_bidirectional_length_framing(tmp_path):
 
     server = threading.Thread(target=serve)
     server.start()
-    client = ResidentActDataClient(path)
+    client = ResidentActDataClient(path, worker_identity=identity)
     try:
         client.connect(timeout_s=0.5)
         assert client.receive_state(timeout_s=0.5) == _state()
@@ -90,7 +97,7 @@ def test_data_client_uses_strict_bidirectional_length_framing(tmp_path):
         server.join(timeout=1.0)
         listener.close()
 
-    assert received == [candidate]
+    assert received == [identity, candidate]
 
 
 def test_data_client_distinguishes_owner_eof_from_protocol_failure():

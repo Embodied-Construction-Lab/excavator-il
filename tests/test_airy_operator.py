@@ -87,6 +87,7 @@ def test_v3a_operator_starts_display_only_shadow_with_trajectory_file(tmp_path):
         behavior_port=None,
         profile="live_shadow",
         trajectory_path=trajectory,
+        external_state_bridge=True,
         line_process_factory=_Process,
     )
 
@@ -95,6 +96,7 @@ def test_v3a_operator_starts_display_only_shadow_with_trajectory_file(tmp_path):
     assert "profile:=live_shadow" in command
     assert "motion_authorization:=LOCKED" in command
     assert f"v3a_trajectory_path:={trajectory.resolve()}" in command
+    assert "external_state_bridge:=true" in command
     assert "ALLOW_LIVE_MACHINE_MOTION" not in command
 
 
