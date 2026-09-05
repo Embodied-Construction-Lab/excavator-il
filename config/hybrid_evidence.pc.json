@@ -16,7 +16,7 @@
   },
   "policy_ids": {
     "dig_policy": "lerobot_act:icra2027_dig_only_front_swing_zero_seed2027_step400000",
-    "trajectory_controller": "onnx_rl:scale_v3_deadzone_reward_03_p003"
+    "trajectory_controller": "onnx_rl:scale_v3_swing_terminal_braking_01"
   },
   "host_topology": {
     "pc": {
@@ -69,7 +69,7 @@
     },
     {
       "artifact_id": "rl_onnx_model",
-      "source_path": "../../RLExcavator/Assets/AIModels/ScaleModelDeploy05_cale_v3_deadzone_reward_03_p003.onnx",
+      "source_path": "../../RLExcavator/Assets/AIModels/ScaleModelDeploy06_scale_v3_swing_terminal_braking_01.onnx",
       "role": "rl_onnx_model",
       "metadata": {
         "policy": "trajectory_controller"

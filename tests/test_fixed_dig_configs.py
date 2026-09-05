@@ -54,7 +54,7 @@ def test_fixed_dig_evidence_config_declares_fixed_action_and_rl_artifacts():
         "dig_policy": (
             "fixed_action:icra2027_fixed_dig_fixed_dump_commissioning_v1"
         ),
-        "trajectory_controller": "onnx_rl:scale_v3_deadzone_reward_03_p003",
+        "trajectory_controller": "onnx_rl:scale_v3_swing_terminal_braking_01",
     }
     assert document["config_paths"]["edge_runtime"] == (
         "../../excavator-orin-runtime/deploy/"

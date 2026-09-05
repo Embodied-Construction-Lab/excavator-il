@@ -595,7 +595,7 @@ python scripts/record_rl_real_experiment_run.py \
   --control-audit "$REAL_AUDIT_JSONL" \
   --trace-output "$REAL_TRACE_JSONL" \
   --trace-run-id "$TRACE_RUN_ID" \
-  --policy-id "onnx_rl:scale_v3_deadzone_reward_03_p003" \
+  --policy-id "onnx_rl:scale_v3_swing_terminal_braking_01" \
   --evaluation-scope held_out_experiment \
   --task-variant dig_transport_dump \
   --operator-id "$OPERATOR_ID" \
