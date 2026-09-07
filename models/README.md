@@ -33,3 +33,23 @@
 - 状态：PC smoke/evaluator 已通过，尚未完成发动机关闭 HIL 与真机 Commissioning。
 
 该目录的权重仍被 Git 忽略；源码仓库只跟踪与它绑定的 runtime/deployment/evidence 配置和本说明。
+
+## 三阶段 ACT 工程参考候选
+
+`icra2027_transport_dump_three_phase_step140000/` 是与主线平行的探索模型：
+
+- 任务：ACT 连续完成挖掘、运转、倾倒，RL 只负责到达当前/下一挖掘点；
+- 输入：`front`、`dump` 双 RGB + 11D proprioception +
+  `[phase_is_dig, phase_is_transport, phase_is_dump]`，合计 14D 状态；
+- 在线阶段表：`0..92=DIG`、`93..141=TRANSPORT`、`142..240=DUMP`；切换阶段时丢弃
+  上一阶段未消费的 action chunk；
+- 输出：`[boom, stick, bucket, swing]` 四维归一化杆量；
+- checkpoint：step 140000，隔离 validation split 的 deployment-prior L1 为
+  `0.1062048085`；
+- `model.safetensors` SHA-256：
+  `8faf364022695312714ccbac3299635e8fc8ee30b1935b0f3122b1c1fdedd637`；
+- 状态：PC 静态资产预检、真实 checkpoint 加载和 CPU warmup 已通过；尚未同步到 Orin、重建容器或
+  完成发动机关闭 HIL，因此只能称 engineering candidate。
+
+该模型使用独立 Mission、runtime config、deployment manifest 和 UI config，不会替换
+`fixed_target_hybrid` 的 `act_dig_lift` 模型。

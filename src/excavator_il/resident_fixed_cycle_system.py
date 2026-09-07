@@ -54,7 +54,12 @@ _TERMINAL_STAGE_TO_UI = {
 }
 _TRACKING_BEHAVIORS = frozenset({"onnx_rl_tracking", "cartesian_p_tracking"})
 _DIG_BEHAVIORS = frozenset(
-    {"act_dig_lift", "act_dig_transport_dump", "fixed_dig"}
+    {
+        "act_dig_lift",
+        "act_dig_transport_dump",
+        "act_dig_transport_dump_three_phase",
+        "fixed_dig",
+    }
 )
 
 

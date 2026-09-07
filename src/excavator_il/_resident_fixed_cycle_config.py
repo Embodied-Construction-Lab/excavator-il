@@ -211,7 +211,11 @@ def _policy_config(
     model_sha256 = value["expected_act_model_sha256"]
     if expected_act_worker_required:
         behavior_id = text(behavior_id, "expected_act_behavior_id")
-        if behavior_id not in {"act_dig_lift", "act_dig_transport_dump"}:
+        if behavior_id not in {
+            "act_dig_lift",
+            "act_dig_transport_dump",
+            "act_dig_transport_dump_three_phase",
+        }:
             raise ValueError("expected_act_behavior_id is unsupported")
         model_sha256 = _sha256(model_sha256, "expected_act_model_sha256")
     elif behavior_id is not None or model_sha256 is not None:

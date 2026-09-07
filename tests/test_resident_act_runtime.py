@@ -65,9 +65,11 @@ sys.modules.setdefault(
 )
 
 import excavator_il.resident_act_runtime as resident_runtime_module
+import excavator_il._resident_act_policy_loader as policy_loader_module
 from excavator_il.act_runtime import ActRuntimeDecision
 from excavator_il.collector.camera import RgbCameraFrame
 from excavator_il.dig_policy import DigPolicyDescriptor, DigPolicyFactory
+from excavator_il.lerobot_conversion import STATE_FIELDS
 from excavator_il.resident_act_runtime import (
     ResidentActRuntime,
     ResidentActWorker,
@@ -872,6 +874,7 @@ def test_worker_factory_loads_the_model_and_opens_the_camera_exactly_once(
         max_inference_state_age_ms=100.0,
         max_camera_age_ms=120.0,
         max_inference_ms=100.0,
+        policy_state_fields=STATE_FIELDS,
     )
     observation_config = SimpleNamespace(
         camera=SimpleNamespace(
@@ -896,13 +899,14 @@ def test_worker_factory_loads_the_model_and_opens_the_camera_exactly_once(
         lambda path: observation_config if path == "/operator.json" else None,
     )
     monkeypatch.setattr(
-        resident_runtime_module,
+        policy_loader_module,
         "verify_deployment_manifest",
         lambda **_kwargs: calls.__setitem__("verify", calls["verify"] + 1),
     )
-    monkeypatch.setattr(resident_runtime_module, "get_policy_class", lambda _: _PolicyClass)
+    policies_module = sys.modules["lerobot.policies"]
+    monkeypatch.setattr(policies_module, "get_policy_class", lambda _: _PolicyClass)
     monkeypatch.setattr(
-        resident_runtime_module,
+        policies_module,
         "make_pre_post_processors",
         lambda *_args, **_kwargs: (lambda batch: batch, lambda action: action),
     )

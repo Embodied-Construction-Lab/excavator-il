@@ -1,0 +1,72 @@
+{
+  "schema_version": "excavator_hybrid_evidence_config.v2",
+  "mission_id": "engineering_act_transport_three_phase_reference",
+  "mission_sha256": "0f39e3dceef460bbcafe33294d189ae73dc32296a2ba2b2349666e761d2f680c",
+  "evidence_root": "../../EvaluationReport/experiment_runs",
+  "machine_profile_path": "../../shared/machine_profile.json",
+  "repository_paths": {
+    "excavator_il": "..",
+    "excavator_orin_runtime": "../../excavator-orin-runtime",
+    "airy_lidar": "../../AiryLidar",
+    "rl_excavator": "../../RLExcavator"
+  },
+  "config_paths": {
+    "act_runtime": "act_runtime.icra2027_transport_dump_three_phase.orin.json",
+    "act_deployment": "act_deployment.icra2027_transport_dump_three_phase_step140000.json",
+    "edge_runtime": "../../excavator-orin-runtime/deploy/edge_runtime.resident.remote.json"
+  },
+  "policy_ids": {
+    "dig_policy": "lerobot_act:icra2027_transport_dump_three_phase_step140000",
+    "trajectory_controller": "onnx_rl:scale_v3_swing_terminal_braking_01"
+  },
+  "host_topology": {
+    "pc": {
+      "host": "192.168.50.1",
+      "role": "planning_ui"
+    },
+    "orin": {
+      "host": "192.168.50.2",
+      "role": "resident_runtime"
+    }
+  },
+  "evaluation_scope": "training_internal",
+  "evidence_requirements": {
+    "act_deployment_manifest": {"required": true, "min_count": 1},
+    "act_policy_checkpoint": {"required": true, "min_count": 1},
+    "rl_onnx_model": {"required": true, "min_count": 1}
+  },
+  "task_context": {
+    "task_variant": "dig_transport_dump_three_phase",
+    "soil_reset_block_id": null,
+    "operator_id": null,
+    "material_id": null
+  },
+  "artifacts": [
+    {
+      "artifact_id": "act_deployment_manifest",
+      "source_path": "act_deployment.icra2027_transport_dump_three_phase_step140000.json",
+      "role": "act_deployment_manifest",
+      "metadata": {
+        "policy": "dig_policy",
+        "mission_id": "engineering_act_transport_three_phase_reference"
+      }
+    },
+    {
+      "artifact_id": "act_policy_checkpoint",
+      "source_path": "../models/icra2027_transport_dump_three_phase_step140000/checkpoint",
+      "role": "act_policy_checkpoint",
+      "metadata": {
+        "policy": "dig_policy",
+        "checkpoint_step": 140000,
+        "camera_roles": ["front", "dump"],
+        "phase_conditioning": ["DIG", "TRANSPORT", "DUMP"]
+      }
+    },
+    {
+      "artifact_id": "rl_onnx_model",
+      "source_path": "../../RLExcavator/Assets/AIModels/ScaleModelDeploy06_scale_v3_swing_terminal_braking_01.onnx",
+      "role": "rl_onnx_model",
+      "metadata": {"policy": "trajectory_controller"}
+    }
+  ]
+}

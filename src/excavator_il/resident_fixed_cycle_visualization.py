@@ -34,6 +34,7 @@ _BEHAVIOR_IDS = frozenset(
         "cartesian_p_tracking",
         "act_dig_lift",
         "act_dig_transport_dump",
+        "act_dig_transport_dump_three_phase",
         "fixed_dig",
         "fixed_dump",
     }

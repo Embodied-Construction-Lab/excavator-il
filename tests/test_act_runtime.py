@@ -16,6 +16,7 @@ from excavator_il.act_runtime import (
     state_from_stm32_telemetry,
     warmup_act_policy_session,
 )
+from excavator_il.act_phase_conditioning import PHASE_FEATURE_NAMES
 from excavator_il.collector.camera import RgbCameraFrame
 from excavator_il.dig_policy import ACTION_ORDER, DigPolicyObservation
 from excavator_il.stm32_protocol import Stm32TelemetryFrame
@@ -197,6 +198,57 @@ def test_lerobot_act_adapter_uses_both_named_rgb_roles_for_a_dual_camera_checkpo
     }
     assert float(batch["observation.images.front"].mean()) == pytest.approx(10 / 255)
     assert float(batch["observation.images.dump"].mean()) == pytest.approx(20 / 255)
+
+
+def test_lerobot_act_adapter_accepts_only_the_registered_14d_phase_contract():
+    policy = _Policy()
+    policy.config.input_features["observation.state"] = SimpleNamespace(shape=(14,))
+    state_fields = tuple(
+        (
+            "boom_pos_m",
+            "stick_pos_m",
+            "bucket_pos_m",
+            "boom_vel_mps",
+            "stick_vel_mps",
+            "bucket_vel_mps",
+            "boom_angle_rad",
+            "arm_angle_rad",
+            "bucket_angle_rad",
+            "swing_angle_rad",
+            "swing_vel_radps",
+        )
+    ) + PHASE_FEATURE_NAMES
+    adapter = ActPolicySession(
+        policy=policy,
+        preprocessor=lambda batch: batch,
+        postprocessor=lambda action: action,
+        device="cpu",
+        state_fields=state_fields,
+    )
+    observation = DigPolicyObservation(
+        state_by_name={name: float(index) for index, name in enumerate(state_fields)},
+        rgb_by_role={"front": np.zeros((2, 3, 3), dtype=np.uint8)},
+        state_monotonic_ns=2_000,
+        camera_monotonic_ns_by_role={"front": 1_900},
+    )
+
+    adapter.select_action(observation)
+
+    assert tuple(policy.selected_batches[-1]["observation.state"].shape) == (1, 14)
+
+
+def test_lerobot_act_adapter_rejects_an_unregistered_state_extension():
+    policy = _Policy()
+    policy.config.input_features["observation.state"] = SimpleNamespace(shape=(12,))
+
+    with pytest.raises(ValueError, match="state contract"):
+        ActPolicySession(
+            policy=policy,
+            preprocessor=lambda batch: batch,
+            postprocessor=lambda action: action,
+            device="cpu",
+            state_fields=("arbitrary",) * 12,
+        )
 
 
 def test_act_observation_rejects_a_state_that_cannot_form_the_named_contract():

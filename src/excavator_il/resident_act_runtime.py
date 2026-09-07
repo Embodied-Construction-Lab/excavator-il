@@ -16,17 +16,14 @@ import threading
 import time
 from typing import Any, Callable, Mapping
 
-from lerobot.policies import get_policy_class, make_pre_post_processors
-
-from .act_deployment import verify_deployment_manifest
 from .act_runtime import (
-    ActPolicySession,
     ActRuntimeController,
     ActRuntimeEngine,
     RuntimeMode,
     warmup_act_policy_session,
 )
 from .act_runtime_config import load_act_runtime_config
+from .act_phase_conditioning import ActPhaseSchedule
 from .act_runtime_contract import REQUIRED_MOTION_AUTHORIZATION
 from .collector.camera import RgbCameraFrame, UvcCamera
 from .collector.config import CameraConfig, load_collection_config
@@ -36,6 +33,10 @@ from .collector.preview import (
     MjpegPreviewServer,
 )
 from .dig_policy import DigPolicyFactory
+from ._resident_act_policy_loader import (
+    build_commissioned_dig_policy_factory as _build_commissioned_dig_policy_factory,
+    load_commissioned_lerobot_act_session as _load_commissioned_lerobot_act_session,
+)
 from .resident_protocol import (
     ACT_CONTROL_MODE,
     ACT_POLICY_SOURCE,
@@ -65,53 +66,6 @@ def _emit_lifecycle(message: str) -> None:
     """Emit process-control markers independently of third-party logging setup."""
 
     print(message, flush=True)
-
-
-def _load_commissioned_lerobot_act_session(config: Any) -> Any:
-    """Load the commissioned LeRobot ACT Adapter with deployment rechecks."""
-
-    provenance = {
-        "manifest_path": config.deployment_manifest_path,
-        "checkpoint_path": config.checkpoint_path,
-        "machine_profile_path": config.machine_profile_path,
-    }
-    verify_deployment_manifest(**provenance)
-    policy_class = get_policy_class("act")
-    _emit_lifecycle("ACT resident build: policy load starting")
-    policy = policy_class.from_pretrained(config.checkpoint_path)
-    _emit_lifecycle("ACT resident build: policy load passed")
-    policy.to(config.device)
-    _emit_lifecycle("ACT resident build: CUDA transfer passed")
-    policy.config.device = config.device
-    preprocessor, postprocessor = make_pre_post_processors(
-        policy.config,
-        pretrained_path=str(config.checkpoint_path),
-        preprocessor_overrides={"device_processor": {"device": config.device}},
-        postprocessor_overrides={"device_processor": {"device": config.device}},
-    )
-    _emit_lifecycle("ACT resident build: processors ready")
-    session = ActPolicySession(
-        policy=policy,
-        preprocessor=preprocessor,
-        postprocessor=postprocessor,
-        device=config.device,
-    )
-    # Catch checkpoint replacement during the comparatively expensive load.
-    verify_deployment_manifest(**provenance)
-    _emit_lifecycle("ACT resident build: deployment recheck passed")
-    return session
-
-
-def _build_commissioned_dig_policy_factory(
-    config: Any,
-    *,
-    commissioned_lerobot_act_loader: Callable[[Any], Any],
-) -> DigPolicyFactory:
-    return DigPolicyFactory(
-        {
-            "lerobot_act": lambda: commissioned_lerobot_act_loader(config),
-        }
-    )
 
 
 @dataclass(frozen=True)
@@ -150,6 +104,7 @@ class ResidentActRuntime:
         camera_buffer_capacity: int = 8,
         status_callback: Callable[[ResidentActStatus], None] | None = None,
         telemetry_preview: LatestTelemetryFrame | None = None,
+        phase_schedule: ActPhaseSchedule | None = None,
         monotonic_ns: Callable[[], int] = time.monotonic_ns,
     ) -> None:
         if (
@@ -185,6 +140,8 @@ class ResidentActRuntime:
         self._completed_steps = 0
         self._total_completed_steps = 0
         self._last_reason: str | None = None
+        self._phase_schedule = phase_schedule
+        self._active_phase_index: int | None = None
 
     @property
     def status(self) -> ResidentActStatus:
@@ -272,6 +229,18 @@ class ResidentActRuntime:
             if not generation_changed:
                 self._engine.reset()
             return self._send_zero(state, "observation_unavailable")
+        if self._phase_schedule is not None:
+            phase_index = self._phase_schedule.phase_index(self._completed_steps)
+            if (
+                self._active_phase_index is not None
+                and phase_index != self._active_phase_index
+            ):
+                self._engine.reset()
+            self._active_phase_index = phase_index
+            observation = self._phase_schedule.condition(
+                observation,
+                completed_steps=self._completed_steps,
+            )
         decision = self._engine.step(
             observation=observation,
             telemetry=_safety_telemetry(state),
@@ -346,6 +315,7 @@ class ResidentActRuntime:
         return step
 
     def _begin_activation(self, generation: int) -> None:
+        self._active_phase_index = None
         with self._status_condition:
             self._active_generation = generation if generation > 0 else None
             self._completed_steps = 0
@@ -768,6 +738,7 @@ def build_resident_act_worker(
         status_callback=status_callback,
         telemetry_preview=telemetry_preview,
         camera_roles=tuple(configured_cameras),
+        phase_schedule=getattr(config, "phase_schedule", None),
     )
     return ResidentActWorker(
         runtime=runtime,

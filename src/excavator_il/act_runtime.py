@@ -14,6 +14,7 @@ import numpy as np
 import torch
 
 from .lerobot_conversion import STATE_FIELDS
+from .act_phase_conditioning import PHASE_FEATURE_NAMES
 from .act_runtime_contract import REQUIRED_MOTION_AUTHORIZATION
 from .raw_episode import ACTION_FIELDS
 from .collector.camera import RgbCameraFrame
@@ -36,10 +37,14 @@ class ActObservation:
     camera_monotonic_ns: int
     extra_rgb_by_role: Mapping[str, np.ndarray] = field(default_factory=dict)
     extra_camera_monotonic_ns_by_role: Mapping[str, int] = field(default_factory=dict)
+    extra_state_by_name: Mapping[str, float] = field(default_factory=dict)
 
     def to_policy_observation(self) -> DigPolicyObservation:
         if len(self.state) != len(STATE_FIELDS):
             raise ValueError("ACT runtime state must contain 11 finite values")
+        extra_state = dict(self.extra_state_by_name)
+        if extra_state and tuple(extra_state) != PHASE_FEATURE_NAMES:
+            raise ValueError("ACT runtime extra state fields are invalid")
         rgb = {"front": self.front_rgb, **dict(self.extra_rgb_by_role)}
         stamps = {
             "front": self.camera_monotonic_ns,
@@ -49,7 +54,8 @@ class ActObservation:
             state_by_name={
                 name: float(self.state[index])
                 for index, name in enumerate(STATE_FIELDS)
-            },
+            }
+            | {name: float(extra_state[name]) for name in extra_state},
             rgb_by_role=rgb,
             state_monotonic_ns=self.state_monotonic_ns,
             camera_monotonic_ns_by_role=stamps,
@@ -310,6 +316,7 @@ class LeRobotActDigPolicyAdapter:
         preprocessor: Callable[[dict[str, torch.Tensor]], dict[str, torch.Tensor]],
         postprocessor: Callable[[torch.Tensor], torch.Tensor],
         device: str,
+        state_fields: tuple[str, ...] = STATE_FIELDS,
     ) -> None:
         if policy.config.chunk_size != 20 or policy.config.n_action_steps != 10:
             raise ValueError("ACT runtime requires chunk_size=20 and n_action_steps=10")
@@ -332,9 +339,13 @@ class LeRobotActDigPolicyAdapter:
             raise ValueError(
                 "ACT runtime requires named front RGB and optionally dump RGB inputs"
             )
-        if tuple(policy.config.input_features["observation.state"].shape) != (
-            len(STATE_FIELDS),
-        ):
+        supported_state_fields = (
+            STATE_FIELDS,
+            STATE_FIELDS + PHASE_FEATURE_NAMES,
+        )
+        if state_fields not in supported_state_fields or tuple(
+            policy.config.input_features["observation.state"].shape
+        ) != (len(state_fields),):
             raise ValueError("ACT runtime checkpoint state contract is invalid")
         if tuple(policy.config.output_features["action"].shape) != (
             len(ACTION_FIELDS),
@@ -344,6 +355,7 @@ class LeRobotActDigPolicyAdapter:
         self._preprocessor = preprocessor
         self._postprocessor = postprocessor
         self._device = device
+        self._state_fields = state_fields
         ordered_image_roles = tuple(
             role for role in ("front", "dump") if role in image_roles
         )
@@ -392,11 +404,11 @@ class LeRobotActDigPolicyAdapter:
             if isinstance(observation, ActObservation)
             else observation
         )
-        if set(named.state_by_name) != set(STATE_FIELDS):
+        if tuple(named.state_by_name) != self._state_fields:
             raise ValueError("ACT runtime named state fields are invalid")
-        state = tuple(float(named.state_by_name[name]) for name in STATE_FIELDS)
+        state = tuple(float(named.state_by_name[name]) for name in self._state_fields)
         if not all(math.isfinite(value) for value in state):
-            raise ValueError("ACT runtime state must contain 11 finite values")
+            raise ValueError("ACT runtime state must contain finite values")
         batch = {
             "observation.state": torch.tensor(
                 state, dtype=torch.float32
@@ -442,7 +454,10 @@ class LeRobotActDigPolicyAdapter:
 
     def warmup(self) -> tuple[float, ...]:
         observation = DigPolicyObservation(
-            state_by_name={name: 0.0 for name in STATE_FIELDS},
+            state_by_name={
+                name: (1.0 if name == PHASE_FEATURE_NAMES[0] else 0.0)
+                for name in self._state_fields
+            },
             rgb_by_role={
                 role: np.zeros((shape[1], shape[2], 3), dtype=np.uint8)
                 for role, shape in self._image_shapes.items()

@@ -11,6 +11,7 @@ from typing import Any
 from .checkpoint_evaluation import ACT_ACTION_ORDER, DEPLOYMENT_MANIFEST_SCHEMA_VERSION
 from .dig_policy import MAX_TOLERATED_NORMALIZED_MAGNITUDE
 from .lerobot_conversion import STATE_FIELDS
+from .act_phase_conditioning import PHASE_FEATURE_NAMES
 from .raw_episode import ACTION_FIELDS
 
 
@@ -81,7 +82,12 @@ def verify_deployment_manifest(
         raise ValueError("ACT deployment manifest action order is invalid")
     if tuple(contract.get("action_fields", ())) != ACTION_FIELDS:
         raise ValueError("ACT deployment manifest action fields are invalid")
-    if tuple(contract.get("state_fields", ())) != STATE_FIELDS:
+    state_fields = tuple(contract.get("state_fields", ()))
+    allowed_state_fields = (
+        STATE_FIELDS,
+        STATE_FIELDS + PHASE_FEATURE_NAMES,
+    )
+    if state_fields not in allowed_state_fields:
         raise ValueError("ACT deployment manifest state fields are invalid")
     input_feature_keys = contract.get("input_feature_keys")
     allowed_input_feature_keys = (
@@ -95,7 +101,7 @@ def verify_deployment_manifest(
     if input_feature_keys not in allowed_input_feature_keys:
         raise ValueError("ACT deployment manifest input_feature_keys is invalid")
     expected_contract = {
-        "state_dim": len(STATE_FIELDS),
+        "state_dim": len(state_fields),
         "action_dim": len(ACTION_FIELDS),
         "front_rgb_chw": [3, 480, 640],
         "chunk_size": 20,

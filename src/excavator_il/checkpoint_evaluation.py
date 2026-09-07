@@ -19,6 +19,10 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies import get_policy_class, make_pre_post_processors
 
 from .act_smoke import _validate_excavator_act_contract
+from .act_phase_conditioning import (
+    PHASE_CONDITIONED_DATASET_SCHEMA_VERSION,
+    PHASE_FEATURE_NAMES,
+)
 from .dig_policy import MAX_TOLERATED_NORMALIZED_MAGNITUDE
 from .lerobot_conversion import STATE_FIELDS
 from .raw_episode import ACTION_FIELDS
@@ -65,6 +69,62 @@ def _checkpoint_file_hashes(checkpoint: Path) -> dict[str, str]:
     if not files:
         raise ValueError(f"checkpoint contains no files: {checkpoint}")
     return {path.name: _sha256_file(path) for path in files}
+
+
+def _deployment_state_fields(
+    *,
+    policy_config: Mapping[str, Any],
+    split_root: Path,
+) -> tuple[str, ...]:
+    """Bind checkpoint state shape to the frozen dataset's named state contract."""
+
+    try:
+        checkpoint_shape = tuple(
+            policy_config["input_features"]["observation.state"]["shape"]
+        )
+        dataset_info = json.loads(
+            (split_root / "train/meta/info.json").read_text(encoding="utf-8")
+        )
+        dataset_state = dataset_info["features"]["observation.state"]
+        dataset_shape = tuple(dataset_state["shape"])
+        state_fields = tuple(dataset_state["names"])
+    except (KeyError, TypeError, OSError, json.JSONDecodeError) as exc:
+        raise ValueError("ACT deployment state contract is unavailable") from exc
+    allowed = (
+        STATE_FIELDS,
+        STATE_FIELDS + PHASE_FEATURE_NAMES,
+    )
+    if (
+        state_fields not in allowed
+        or dataset_shape != (len(state_fields),)
+        or checkpoint_shape != dataset_shape
+    ):
+        raise ValueError("ACT deployment state contract is invalid")
+    if state_fields == STATE_FIELDS + PHASE_FEATURE_NAMES:
+        try:
+            phase_provenance = json.loads(
+                (split_root / "phase_conditioning_provenance.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "phase-conditioned deployment provenance is unavailable"
+            ) from exc
+        if (
+            phase_provenance.get("schema_version")
+            != PHASE_CONDITIONED_DATASET_SCHEMA_VERSION
+            or tuple(phase_provenance.get("phase_feature_names", ()))
+            != PHASE_FEATURE_NAMES
+            or phase_provenance.get("state_contract")
+            != {
+                "source_dimension": len(STATE_FIELDS),
+                "derived_dimension": len(state_fields),
+                "append": "three_phase_one_hot",
+            }
+        ):
+            raise ValueError("phase-conditioned deployment provenance is invalid")
+    return state_fields
 
 
 def _policy_input_batch(
@@ -273,11 +333,15 @@ def write_act_deployment_manifest(
     if current_hashes != dict(metric.checkpoint_files_sha256):
         raise ValueError("checkpoint changed since checkpoint evaluation")
     input_features = policy_config.get("input_features", {})
+    state_fields = _deployment_state_fields(
+        policy_config=policy_config,
+        split_root=root,
+    )
     contract = {
         "action_order": list(ACT_ACTION_ORDER),
         "action_fields": list(ACTION_FIELDS),
-        "state_fields": list(STATE_FIELDS),
-        "state_dim": len(STATE_FIELDS),
+        "state_fields": list(state_fields),
+        "state_dim": len(state_fields),
         "action_dim": len(ACTION_FIELDS),
         "front_rgb_chw": input_features["observation.images.front"]["shape"],
         "chunk_size": policy_config.get("chunk_size"),

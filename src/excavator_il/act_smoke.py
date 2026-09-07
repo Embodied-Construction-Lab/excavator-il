@@ -12,11 +12,16 @@ from lerobot.configs.types import FeatureType, PolicyFeature
 from lerobot.policies.act.configuration_act import ACTConfig
 from lerobot.policies.act.modeling_act import ACTPolicy
 
+from .act_phase_conditioning import PHASE_FEATURE_NAMES
 from .lerobot_conversion import STATE_FIELDS
 from .raw_episode import ACTION_FIELDS
 
 
 _MAX_TOLERATED_RAW_ACTION_ABS = 1.05
+_SUPPORTED_STATE_CONTRACTS = (
+    STATE_FIELDS,
+    STATE_FIELDS + PHASE_FEATURE_NAMES,
+)
 
 
 @dataclass(frozen=True)
@@ -56,19 +61,16 @@ def _validate_excavator_act_contract(config: object, dataset: LeRobotDataset) ->
         {"observation.images.front", "observation.images.dump"},
     ):
         raise ValueError("ACT checkpoint must use front RGB and optional dump RGB")
-    required_inputs = {
-        "observation.state": (len(STATE_FIELDS),),
-        **{key: None for key in camera_features},
-    }
-    for key, expected_shape in required_inputs.items():
+    required_inputs = {"observation.state", *camera_features}
+    for key in required_inputs:
         if key not in config.input_features:
             raise ValueError(f"ACT checkpoint is missing required input feature: {key}")
         shape = tuple(config.input_features[key].shape)
-        if expected_shape is not None and shape != expected_shape:
-            raise ValueError(
-                f"ACT checkpoint state shape {shape} does not match {expected_shape}"
-            )
-        if expected_shape is None and (len(shape) != 3 or shape[0] != 3):
+        if key == "observation.state" and shape not in {
+            (len(contract),) for contract in _SUPPORTED_STATE_CONTRACTS
+        }:
+            raise ValueError(f"ACT checkpoint state shape {shape} is unsupported")
+        if key != "observation.state" and (len(shape) != 3 or shape[0] != 3):
             raise ValueError(f"ACT checkpoint RGB shape is invalid for {key}: {shape}")
     output = config.output_features.get("action")
     if output is None or tuple(output.shape) != (len(ACTION_FIELDS),):
@@ -82,10 +84,16 @@ def _validate_excavator_act_contract(config: object, dataset: LeRobotDataset) ->
             "dataset is missing required feature: "
             + ", ".join(sorted(missing_dataset_features))
         )
-    if tuple(features["observation.state"]["shape"]) != (len(STATE_FIELDS),):
-        raise ValueError("dataset state shape does not match the 11-dimensional contract")
-    if tuple(features["observation.state"].get("names") or ()) != STATE_FIELDS:
-        raise ValueError("dataset state names do not match the authoritative contract")
+    state_names = tuple(features["observation.state"].get("names") or ())
+    if state_names not in _SUPPORTED_STATE_CONTRACTS:
+        raise ValueError("dataset state names do not match a supported ACT contract")
+    dataset_state_shape = tuple(features["observation.state"]["shape"])
+    expected_state_shape = (len(state_names),)
+    if dataset_state_shape != expected_state_shape:
+        raise ValueError("dataset state shape does not match its named ACT contract")
+    checkpoint_state_shape = tuple(config.input_features["observation.state"].shape)
+    if checkpoint_state_shape != dataset_state_shape:
+        raise ValueError("checkpoint and dataset state shapes do not match")
     if tuple(features["action"]["shape"]) != (len(ACTION_FIELDS),):
         raise ValueError("dataset action shape does not match the four-axis contract")
     if tuple(features["action"].get("names") or ()) != ACTION_FIELDS:

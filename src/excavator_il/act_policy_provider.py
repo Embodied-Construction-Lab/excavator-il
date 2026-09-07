@@ -80,6 +80,7 @@ def _load_commissioned_lerobot_act(
         preprocessor=preprocessor,
         postprocessor=postprocessor,
         device=config.device,
+        state_fields=config.policy_state_fields,
     )
     # Detect checkpoint replacement during the comparatively expensive load.
     _verify_checkpoint(config)

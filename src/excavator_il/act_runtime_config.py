@@ -11,9 +11,15 @@ from typing import Any, Mapping
 from types import MappingProxyType
 
 from .collector.config import SerialConfig
+from .act_phase_conditioning import (
+    PHASE_FEATURE_NAMES,
+    PHASE_SCHEDULE_SCHEMA_VERSION,
+    ActPhaseSchedule,
+)
 
 
-SCHEMA_VERSION = "excavator_act_runtime_config.v4"
+SCHEMA_VERSION = "excavator_act_runtime_config.v5"
+BEHAVIOR_IDENTITY_SCHEMA_VERSION = "excavator_act_runtime_config.v4"
 DUAL_CAMERA_SCHEMA_VERSION = "excavator_act_runtime_config.v3"
 LEGACY_SCHEMA_VERSION = "excavator_act_runtime_config.v2"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -37,7 +43,10 @@ _ROOT_FIELDS_BY_SCHEMA = MappingProxyType(
     {
         LEGACY_SCHEMA_VERSION: _COMMON_ROOT_FIELDS | {"camera_front"},
         DUAL_CAMERA_SCHEMA_VERSION: _COMMON_ROOT_FIELDS | {"cameras"},
-        SCHEMA_VERSION: _COMMON_ROOT_FIELDS | {"cameras", "act_behavior_id"},
+        BEHAVIOR_IDENTITY_SCHEMA_VERSION: _COMMON_ROOT_FIELDS
+        | {"cameras", "act_behavior_id"},
+        SCHEMA_VERSION: _COMMON_ROOT_FIELDS
+        | {"cameras", "act_behavior_id", "phase_conditioning"},
     }
 )
 _CAMERA_ROLES = ("front", "dump")
@@ -66,6 +75,7 @@ class ActRuntimeConfig:
     device: str
     dig_policy_backend: str
     act_behavior_id: str | None
+    phase_schedule: ActPhaseSchedule | None
     serial: SerialConfig
     cameras: Mapping[str, ActCameraConfig]
     max_inference_state_age_ms: float
@@ -83,6 +93,14 @@ class ActRuntimeConfig:
     def camera_roles(self) -> tuple[str, ...]:
         return tuple(self.cameras)
 
+    @property
+    def policy_state_fields(self) -> tuple[str, ...]:
+        from .lerobot_conversion import STATE_FIELDS
+
+        if self.phase_schedule is None:
+            return STATE_FIELDS
+        return STATE_FIELDS + PHASE_FEATURE_NAMES
+
 
 def _object(value: Any, field: str) -> dict[str, Any]:
     if not isinstance(value, dict):
@@ -97,7 +115,11 @@ def _text(value: Any, field: str) -> str:
 
 
 def _integer(value: Any, field: str, low: int, high: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not low <= value <= high
+    ):
         raise ValueError(f"{field} must be an integer in [{low}, {high}]")
     return value
 
@@ -140,9 +162,13 @@ def _camera_config(value: Any, field: str) -> ActCameraConfig:
     )
 
 
-def _camera_configs(root: dict[str, Any], schema_version: str) -> Mapping[str, ActCameraConfig]:
+def _camera_configs(
+    root: dict[str, Any], schema_version: str
+) -> Mapping[str, ActCameraConfig]:
     if schema_version == LEGACY_SCHEMA_VERSION:
-        return MappingProxyType({"front": _camera_config(root.get("camera_front"), "camera_front")})
+        return MappingProxyType(
+            {"front": _camera_config(root.get("camera_front"), "camera_front")}
+        )
     raw_cameras = _object(root.get("cameras"), "cameras")
     roles = tuple(raw_cameras)
     if roles not in (("front",), _CAMERA_ROLES):
@@ -156,12 +182,41 @@ def _camera_configs(root: dict[str, Any], schema_version: str) -> Mapping[str, A
     return MappingProxyType(cameras)
 
 
+def _phase_schedule(value: Any) -> ActPhaseSchedule:
+    raw = _object(value, "phase_conditioning")
+    expected = {
+        "schema_version",
+        "dig_to_transport_step",
+        "transport_to_dump_step",
+    }
+    if set(raw) != expected:
+        raise ValueError(f"phase_conditioning must contain exactly {sorted(expected)}")
+    if raw.get("schema_version") != PHASE_SCHEDULE_SCHEMA_VERSION:
+        raise ValueError("phase_conditioning schema_version is invalid")
+    return ActPhaseSchedule(
+        dig_to_transport_step=_integer(
+            raw.get("dig_to_transport_step"),
+            "phase_conditioning.dig_to_transport_step",
+            1,
+            100_000,
+        ),
+        transport_to_dump_step=_integer(
+            raw.get("transport_to_dump_step"),
+            "phase_conditioning.transport_to_dump_step",
+            2,
+            100_000,
+        ),
+    )
+
+
 def load_act_runtime_config(path: str | Path) -> ActRuntimeConfig:
     config_path = Path(path).expanduser()
     try:
         raw = json.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"cannot load ACT runtime config {config_path}: {exc}") from exc
+        raise ValueError(
+            f"cannot load ACT runtime config {config_path}: {exc}"
+        ) from exc
     root = _object(raw, "config")
     schema_version = root.get("schema_version")
     expected_fields = _ROOT_FIELDS_BY_SCHEMA.get(schema_version)
@@ -207,12 +262,23 @@ def load_act_runtime_config(path: str | Path) -> ActRuntimeConfig:
         root.get("dig_policy_backend", "lerobot_act"), "dig_policy_backend"
     )
     act_behavior_id = None
-    if schema_version == SCHEMA_VERSION:
+    if schema_version in {BEHAVIOR_IDENTITY_SCHEMA_VERSION, SCHEMA_VERSION}:
         act_behavior_id = _normalized_backend_identifier(
             root.get("act_behavior_id"), "act_behavior_id"
         )
-        if act_behavior_id not in {"act_dig_lift", "act_dig_transport_dump"}:
+        if act_behavior_id not in {
+            "act_dig_lift",
+            "act_dig_transport_dump",
+            "act_dig_transport_dump_three_phase",
+        }:
             raise ValueError("act_behavior_id is unsupported")
+    phase_schedule = None
+    if schema_version == SCHEMA_VERSION:
+        if act_behavior_id != "act_dig_transport_dump_three_phase":
+            raise ValueError(
+                "phase_conditioning is only valid for the three-phase ACT behavior"
+            )
+        phase_schedule = _phase_schedule(root.get("phase_conditioning"))
     serial = _object(root.get("stm32_serial"), "stm32_serial")
     cameras = _camera_configs(root, schema_version)
     timing = _object(root.get("timing"), "timing")
@@ -235,6 +301,7 @@ def load_act_runtime_config(path: str | Path) -> ActRuntimeConfig:
         device=device,
         dig_policy_backend=dig_policy_backend,
         act_behavior_id=act_behavior_id,
+        phase_schedule=phase_schedule,
         serial=SerialConfig(
             port=_text(serial.get("port"), "stm32_serial.port"),
             baudrate=baudrate,

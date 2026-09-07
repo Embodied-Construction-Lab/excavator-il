@@ -321,3 +321,89 @@ def test_act_contract_accepts_front_and_dump_rgb_cameras():
     )
 
     _validate_excavator_act_contract(config, dataset)
+
+
+def test_act_contract_accepts_exact_three_phase_state_extension():
+    from types import SimpleNamespace
+
+    from lerobot.configs.types import FeatureType, PolicyFeature
+
+    from excavator_il.act_smoke import _validate_excavator_act_contract
+    from excavator_il.lerobot_conversion import STATE_FIELDS
+    from excavator_il.act_phase_conditioning import PHASE_FEATURE_NAMES
+    from excavator_il.raw_episode import ACTION_FIELDS
+
+    state_names = STATE_FIELDS + PHASE_FEATURE_NAMES
+    config = SimpleNamespace(
+        chunk_size=20,
+        n_action_steps=10,
+        temporal_ensemble_coeff=None,
+        input_features={
+            "observation.state": PolicyFeature(
+                type=FeatureType.STATE, shape=(len(state_names),)
+            ),
+            "observation.images.front": PolicyFeature(
+                type=FeatureType.VISUAL, shape=(3, 480, 640)
+            ),
+            "observation.images.dump": PolicyFeature(
+                type=FeatureType.VISUAL, shape=(3, 480, 640)
+            ),
+        },
+        output_features={
+            "action": PolicyFeature(type=FeatureType.ACTION, shape=(4,))
+        },
+    )
+    dataset = SimpleNamespace(
+        features={
+            "observation.state": {
+                "shape": (len(state_names),),
+                "names": state_names,
+            },
+            "observation.images.front": {"shape": (480, 640, 3)},
+            "observation.images.dump": {"shape": (480, 640, 3)},
+            "action": {"shape": (4,), "names": ACTION_FIELDS},
+        }
+    )
+
+    _validate_excavator_act_contract(config, dataset)
+
+
+def test_act_contract_rejects_unregistered_state_extension():
+    from types import SimpleNamespace
+
+    from lerobot.configs.types import FeatureType, PolicyFeature
+
+    from excavator_il.act_smoke import _validate_excavator_act_contract
+    from excavator_il.lerobot_conversion import STATE_FIELDS
+    from excavator_il.raw_episode import ACTION_FIELDS
+
+    state_names = STATE_FIELDS + ("unknown_condition_a", "unknown_condition_b", "x")
+    config = SimpleNamespace(
+        chunk_size=20,
+        n_action_steps=10,
+        temporal_ensemble_coeff=None,
+        input_features={
+            "observation.state": PolicyFeature(
+                type=FeatureType.STATE, shape=(len(state_names),)
+            ),
+            "observation.images.front": PolicyFeature(
+                type=FeatureType.VISUAL, shape=(3, 480, 640)
+            ),
+        },
+        output_features={
+            "action": PolicyFeature(type=FeatureType.ACTION, shape=(4,))
+        },
+    )
+    dataset = SimpleNamespace(
+        features={
+            "observation.state": {
+                "shape": (len(state_names),),
+                "names": state_names,
+            },
+            "observation.images.front": {"shape": (480, 640, 3)},
+            "action": {"shape": (4,), "names": ACTION_FIELDS},
+        }
+    )
+
+    with pytest.raises(ValueError, match="supported ACT contract"):
+        _validate_excavator_act_contract(config, dataset)

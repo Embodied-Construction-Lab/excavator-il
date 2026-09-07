@@ -76,7 +76,11 @@ def parse_owner_readiness(line: str) -> ResidentOwnerReadiness:
     behavior_id = fields["act_worker_behavior_id"]
     model_sha256 = fields["act_worker_model_sha256"]
     if worker_text == "true":
-        if behavior_id not in {"act_dig_lift", "act_dig_transport_dump"}:
+        if behavior_id not in {
+            "act_dig_lift",
+            "act_dig_transport_dump",
+            "act_dig_transport_dump_three_phase",
+        }:
             raise RuntimeError("V3-A owner readiness ACT behavior is invalid")
         if re.fullmatch(r"[0-9a-f]{64}", model_sha256) is None:
             raise RuntimeError("V3-A owner readiness ACT model is invalid")

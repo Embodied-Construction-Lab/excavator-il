@@ -248,7 +248,8 @@ Mission 开始时一次性启动 Orin resident owner（唯一串口 owner）
 ```
 
 不同实验只替换 Mission 中的 Behavior：`onnx_rl_tracking` 可换为 `cartesian_p_tracking`，
-`act_dig_lift` 可换为 `fixed_dig`；工程参考则组合 `act_dig_transport_dump`。ACT 的 `max_steps` 是
+`act_dig_lift` 可换为 `fixed_dig`；工程参考可组合 `act_dig_transport_dump` 或独立的
+`act_dig_transport_dump_three_phase`。ACT 的 `max_steps` 是
 Mission definition 内的有界实验预算，不是假装成视觉“任务成功检测器”。任何遥测、相机、推理、
 串口或资源交接错误都会提前失败并归零。
 
@@ -542,8 +543,14 @@ Profile 仍未达到 `ready` 或绑定不一致。当前论文矩阵有三个互
   Cartesian-P；
 - `fixed_dig`：固定点位 + TC-BTF/ONNX + 固定挖掘脚本 + 固定倾倒。
 
-另有一个不进入论文矩阵的工程参考任务
-`act_dig_transport_dump_reference`：RL/TC-BTF 到挖掘点，ACT 完成挖掘、运转和倾倒，随后
+另有两个不进入论文矩阵、也不替换默认主线的工程参考任务：
+
+- `act_dig_transport_dump_reference` 使用原 11D 状态 ACT；
+- `act_dig_transport_dump_three_phase_reference` 使用新训练的 14D ACT，在原 11D 机构状态后附加
+  `DIG / TRANSPORT / DUMP` 三维 one-hot 阶段输入，并在 93、142 step 切换阶段和清空旧 action
+  chunk。
+
+两者均采用相同的任务编排：RL/TC-BTF 到挖掘点，ACT 完成挖掘、运转和倾倒，随后
 RL/TC-BTF 到下一个挖掘点。它不是“ACT 全流程”；真正的 ACT 全流程还应由 ACT 自主前往下一
 挖掘点，当前模型和数据不支持这一能力。
 
@@ -571,12 +578,18 @@ python scripts/run_collection_ui.py \
 
 python scripts/run_collection_ui.py \
   --config config/collection_ui.act_dig_transport_dump_reference.commissioning.pc.json
+
+python scripts/preflight_phase_conditioned_act_reference_assets.py
+python scripts/run_collection_ui.py \
+  --config config/collection_ui.act_dig_transport_dump_three_phase_reference.commissioning.pc.json
 ```
 
 `proposed_hybrid` 与 `tadps` 仍为 `planned`，当前没有任何 Profile 达到正式 `ready`。三套论文
 commissioning evidence 的 scope 均固定为 `training_internal`，不能进入论文聚合。Profile 原文和
 SHA 会进入 Experiment Run 配置快照，Profile ID 同时写入 `runtime_selected` 事件与最终 metrics。
-工程参考任务的 evidence 同样是 `training_internal`，且不绑定 ICRA experiment profile。
+工程参考任务的 evidence 同样是 `training_internal`，且不绑定 ICRA experiment profile。三阶段模型
+固定绑定 step 140000（model SHA-256 `8faf3640...dedd637`）、双 RGB、14D 状态与 241-step 预算；
+缺失阶段配置、错误输入维度、模型 SHA 或 Mission SHA 不一致都会在运动开始前失败。
 所有这些入口都复用同一 Scheduler、Motion Authority 和串口 owner；区别仅是严格 Mission definition
 中的 Behavior 组合。新增组合通常只增加 Mission/deployment/runtime/evidence 配置，不修改调度器。
 

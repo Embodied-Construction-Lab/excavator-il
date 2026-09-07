@@ -8,6 +8,7 @@ import pytest
 
 from excavator_il.act_runtime_contract import REQUIRED_MOTION_AUTHORIZATION
 from excavator_il.dig_policy import DigPolicyDescriptor, DigPolicyFactory
+from excavator_il.lerobot_conversion import STATE_FIELDS
 
 
 def test_standard_runtime_service_imports_when_lerobot_is_unavailable():
@@ -242,6 +243,7 @@ def test_standard_lerobot_act_runtime_preserves_provenance_gates_and_warmup(
         state_silence_timeout_ms=250.0,
         max_camera_age_ms=120.0,
         max_inference_ms=100.0,
+        policy_state_fields=STATE_FIELDS,
     )
 
     class _HardwareSerial:

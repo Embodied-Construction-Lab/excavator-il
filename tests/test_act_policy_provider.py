@@ -8,6 +8,7 @@ import excavator_il.act_policy_provider as provider_module
 from excavator_il.act_policy_provider import build_commissioned_lerobot_act_factory
 from excavator_il.act_runtime import RuntimeMode
 from excavator_il.dig_policy import DigPolicyDescriptor
+from excavator_il.lerobot_conversion import STATE_FIELDS
 
 
 class _Adapter:
@@ -33,6 +34,7 @@ def _config(checkpoint_path, file_hashes):
         deployment_manifest_path=checkpoint_path.parent / "deployment.json",
         machine_profile_path=checkpoint_path.parent / "machine.json",
         device="cuda",
+        policy_state_fields=STATE_FIELDS,
     )
 
 
